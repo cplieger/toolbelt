@@ -570,3 +570,52 @@ func TestVerifyCatalog(t *testing.T) {
 		})
 	}
 }
+
+// TestFindChecksum pins the three real-world checksum-file formats and
+// the algorithm-aware matching that keeps a multi-algorithm BSD table
+// (mikefarah/yq's checksums-bsd lists MD5 through SHA-512 per asset)
+// from returning the wrong column's digest.
+func TestFindChecksum(t *testing.T) {
+	sha256hex := strings.Repeat("ab", 32)
+	sha512hex := strings.Repeat("cd", 64)
+	cases := []struct {
+		name  string
+		body  string
+		asset string
+		alg   string
+		want  string
+	}{
+		{"bare digest", sha256hex + "\n", "x.tar.gz", "sha256", sha256hex},
+		{"bare digest wrong length for alg", sha256hex + "\n", "x.tar.gz", "sha512", ""},
+		{"coreutils table", sha256hex + "  x.tar.gz\nffff  other.tar.gz\n", "x.tar.gz", "sha256", sha256hex},
+		{"coreutils binary-mode star", sha256hex + " *x.tar.gz\n", "x.tar.gz", "sha256", sha256hex},
+		{"bsd sha512", "SHA512 (x.tar.gz) = " + sha512hex + "\n", "x.tar.gz", "sha512", sha512hex},
+		{"bsd dashed tag", "SHA-512 (x.tar.gz) = " + sha512hex + "\n", "x.tar.gz", "sha512", sha512hex},
+		{
+			// The yq shape: several algorithms for the same asset; the
+			// sha512 line must win over MD5/SHA1/CRC32 rows.
+			"bsd multi-algorithm picks the requested one",
+			"MD5 (x.tar.gz) = 0123456789abcdef0123456789abcdef\n" +
+				"SHA1 (x.tar.gz) = 0123456789abcdef0123456789abcdef01234567\n" +
+				"SHA512 (x.tar.gz) = " + sha512hex + "\n",
+			"x.tar.gz", "sha512", sha512hex,
+		},
+		{
+			// Name-first multi-hash table (yq's plain `checksums`): no
+			// column is length+position safe to attribute, so no match —
+			// fail closed rather than guess.
+			"name-first multi-hash table refuses",
+			"x.tar.gz  df32907e  0123456789abcdef0123456789abcdef\n",
+			"x.tar.gz", "sha256", "",
+		},
+		{"unknown algorithm refuses", sha256hex + "  x.tar.gz\n", "x.tar.gz", "md5", ""},
+		{"asset not listed", sha256hex + "  other.tar.gz\n", "x.tar.gz", "sha256", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := findChecksum(tc.body, tc.asset, tc.alg); got != tc.want {
+				t.Fatalf("findChecksum(%s, %s) = %q, want %q", tc.asset, tc.alg, got, tc.want)
+			}
+		})
+	}
+}

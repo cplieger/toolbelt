@@ -262,7 +262,7 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 	if err != nil {
 		return fmt.Errorf("fetch checksum: %w", err)
 	}
-	want := findChecksum(string(body), filepath.Base(artifact))
+	want := findChecksum(string(body), filepath.Base(artifact), spec.ChecksumAlg)
 	if want == "" {
 		return fmt.Errorf("checksum file has no entry for %s", filepath.Base(artifact))
 	}
@@ -291,28 +291,66 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 	return nil
 }
 
-// findChecksum extracts the digest for asset from a checksum file body.
-func findChecksum(body, asset string) string {
+// findChecksum extracts asset's digest for the given algorithm from a
+// checksum file body. Real-world formats covered: a bare digest, the
+// coreutils "digest  name" table (binary mode prefixes the name with
+// *), and BSD style "SHA512 (name) = digest". The algorithm is part of
+// the match: BSD files often list SEVERAL algorithms per asset
+// (mikefarah/yq's checksums-bsd), and coreutils-style multi-hash
+// tables put the name first — digest-length and tag filtering keep a
+// CRC32/MD5 line from being returned as a sha512 (found the hard way
+// on the borgcube migration; the mismatch failed closed, as designed,
+// but with a misleading "want" value).
+func findChecksum(body, asset, alg string) string {
+	wantLen := map[string]int{"sha256": 64, "sha512": 128}[alg]
+	if wantLen == 0 {
+		return ""
+	}
 	lines := strings.Split(strings.TrimSpace(body), "\n")
-	if len(lines) == 1 && !strings.ContainsAny(strings.TrimSpace(lines[0]), " \t") {
+	if len(lines) == 1 && isHexDigest(strings.TrimSpace(lines[0]), wantLen) {
 		return strings.TrimSpace(lines[0]) // bare digest file
 	}
 	for _, line := range lines {
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		// sha256sum writes "digest  name" (binary mode prefixes name
-		// with *); BSD style writes "SHA256 (name) = digest".
-		nameField := strings.TrimPrefix(fields[len(fields)-1], "*")
-		if filepath.Base(nameField) == asset && len(fields[0]) >= 32 {
-			return fields[0]
-		}
-		if len(fields) == 4 && fields[0] != "" && strings.Trim(fields[1], "()") == asset {
-			return fields[3]
+		if d := checksumFromLine(strings.Fields(line), asset, alg, wantLen); d != "" {
+			return d
 		}
 	}
 	return ""
+}
+
+// checksumFromLine matches one checksum-file line against asset+alg:
+// BSD style ("SHA512 (name) = digest", tag dashed or not) or coreutils
+// style ("digest  name", * prefix tolerated).
+func checksumFromLine(fields []string, asset, alg string, wantLen int) string {
+	if len(fields) < 2 {
+		return ""
+	}
+	bsdTag := strings.ToUpper(alg)                           // SHA512
+	bsdTagDashed := strings.ToUpper(alg[:3]) + "-" + alg[3:] // SHA-512
+	if len(fields) == 4 && (fields[0] == bsdTag || fields[0] == bsdTagDashed) &&
+		strings.Trim(fields[1], "()") == asset && isHexDigest(fields[3], wantLen) {
+		return fields[3]
+	}
+	nameField := strings.TrimPrefix(fields[len(fields)-1], "*")
+	if filepath.Base(nameField) == asset && isHexDigest(fields[0], wantLen) {
+		return fields[0]
+	}
+	return ""
+}
+
+// isHexDigest reports whether s is exactly n hex characters.
+func isHexDigest(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // pruneOldVersions removes superseded versioned install dirs, keeping

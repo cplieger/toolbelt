@@ -204,21 +204,6 @@ func TestEvalConstraint(t *testing.T) {
 	}
 }
 
-func TestFindChecksum(t *testing.T) {
-	list := "abc123def456abc123def456abc123def456abc123def456abc123def456abcd  gh_2.96.0_linux_amd64.tar.gz\n" +
-		"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff  gh_2.96.0_macOS_amd64.zip\n"
-	if got := findChecksum(list, "gh_2.96.0_linux_amd64.tar.gz"); got != "abc123def456abc123def456abc123def456abc123def456abc123def456abcd" {
-		t.Errorf("list lookup = %q", got)
-	}
-	if got := findChecksum(list, "missing.tar.gz"); got != "" {
-		t.Errorf("missing asset = %q, want empty", got)
-	}
-	bare := "abc123def456abc123def456abc123def456abc123def456abc123def456abcd\n"
-	if got := findChecksum(bare, "anything.tar.gz"); got == "" {
-		t.Error("bare digest file should match any asset")
-	}
-}
-
 func TestEnvSupported(t *testing.T) {
 	cases := []struct {
 		envs []string
