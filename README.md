@@ -81,11 +81,11 @@ Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`
 `cmd/toolcatalog` (a nested module, so its registry-parsing dependencies never enter your `go.sum`) compiles the catalog at image build and verifies it against your required tool set:
 
 ```sh
-go run github.com/cplieger/toolbelt/cmd/toolcatalog@latest \
+go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
     -mise mise-checkout/registry -aqua aqua-registry-checkout/pkgs \
     -overlay overlays.json -refs mise=<ref>,aqua=<ref> -out tool-catalog.json
 
-go run github.com/cplieger/toolbelt/cmd/toolcatalog@latest \
+go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
     verify -catalog tool-catalog.json -require required-tools.txt
 ```
 
