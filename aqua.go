@@ -414,7 +414,10 @@ func (d *flatDef) checksumURL(p *AquaPackage, c *AquaChecksum, vars *templateVar
 	case aquaTypeHTTP:
 		return renderTemplate(c.URL, vars)
 	default:
-		return "", nil // unsupported checksum source: skip verification
+		// Unsupported checksum type: the empty URL is NOT a silent
+		// skip — resolveChecksum fails closed on it when the
+		// definition declares a checksum.
+		return "", nil
 	}
 }
 

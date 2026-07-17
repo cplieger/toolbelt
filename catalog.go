@@ -14,14 +14,13 @@ import (
 // CatalogEntry is one tool in the compiled catalog: the mise-registry
 // name/description joined with the preferred install source and, for
 // aqua sources, the embedded aqua package definition. Overlay entries
-// (curated) may add requires/shims/manual install commands and the lsp
+// (curated) may add requires/manual install commands and the lsp
 // marker.
 type CatalogEntry struct {
-	Shims       map[string]string `json:"shims,omitempty"`
-	Aqua        *AquaPackage      `json:"aqua,omitempty"`
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Source      string            `json:"source"`
+	Aqua        *AquaPackage `json:"aqua,omitempty"`
+	Name        string       `json:"name"`
+	Description string       `json:"description,omitempty"`
+	Source      string       `json:"source"`
 	// Version is the default pinned version for entries without an
 	// upstream version source (manual installs).
 	Version   string   `json:"version,omitempty"`
@@ -42,6 +41,11 @@ type Catalog struct {
 	// compiled from (informational).
 	Refs    map[string]string       `json:"refs,omitempty"`
 	Entries map[string]CatalogEntry `json:"entries"`
+	// aliases indexes alias -> entry name, built once at load so
+	// Lookup doesn't scan ~700 entries per aliased miss on hot
+	// inventory paths. Nil (a literal-constructed catalog) falls back
+	// to the linear scan.
+	aliases map[string]string
 }
 
 // loadCatalog reads the compiled tool catalog baked into the image. A
@@ -66,14 +70,32 @@ func loadCatalog(path string, log *slog.Logger) *Catalog {
 	if c.Entries == nil {
 		c.Entries = map[string]CatalogEntry{}
 	}
+	c.aliases = buildAliasIndex(c.Entries)
 	log.Info("toolbelt: catalog loaded", "entries", len(c.Entries))
 	return &c
+}
+
+// buildAliasIndex maps every alias to its entry name.
+func buildAliasIndex(entries map[string]CatalogEntry) map[string]string {
+	idx := make(map[string]string)
+	for name := range entries {
+		for _, a := range entries[name].Aliases {
+			idx[a] = name
+		}
+	}
+	return idx
 }
 
 // Lookup finds a catalog entry by name or alias.
 func (c *Catalog) Lookup(name string) (CatalogEntry, bool) {
 	if e, ok := c.Entries[name]; ok {
 		return e, true
+	}
+	if c.aliases != nil {
+		if n, ok := c.aliases[name]; ok {
+			return c.Entries[n], true
+		}
+		return CatalogEntry{}, false
 	}
 	for k := range c.Entries {
 		if slices.Contains(c.Entries[k].Aliases, name) {
@@ -169,8 +191,8 @@ func (c *Catalog) Featured() []CatalogEntry {
 // templates and claims linux support on both amd64 and arm64; for
 // manual sources an install command. One error per failing name; nil
 // means the catalog satisfies the requirement set. Consumers run this
-// at image build (cmd/toolcatalog verify) over their seed + migration
-// names so a registry drift fails the build instead of a boot job.
+// at image build (cmd/toolcatalog verify) over their required names so
+// a registry drift fails the build instead of a boot job.
 func VerifyCatalog(c *Catalog, require []string) []error {
 	var errs []error
 	for _, name := range require {

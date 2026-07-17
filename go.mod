@@ -1,4 +1,4 @@
-module github.com/cplieger/toolbelt
+module github.com/cplieger/toolbelt/v2
 
 go 1.26.5
 

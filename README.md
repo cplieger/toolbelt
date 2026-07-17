@@ -21,7 +21,7 @@ Three data artifacts, all on the consumer's persistent volume:
 | --- | --- | --- |
 | `tools.json` | user intent (engine-written, hand-editable) | which tools exist, versions, `pin`, `disabled` |
 | `tools-state.json` | engine | what is actually installed, owned bin names, last error |
-| `tool-catalog.json` | image build (`cmd/toolcatalog`) | install knowledge: sources, artifact templates, checksum locations, shims, dependencies |
+| `tool-catalog.json` | image build (`cmd/toolcatalog`) | install knowledge: sources, artifact templates, checksum locations, dependencies |
 
 Tool lifecycle is a three-state machine the reconciler enforces in both directions:
 
@@ -54,7 +54,7 @@ if job, _ := engine.Reconcile(toolbelt.ReconcileMissing); job != nil {
     _, _ = engine.Wait(ctx, job.ID)
 }
 
-// Add a tool by name; the catalog supplies source, version, shims, deps.
+// Add a tool by name; the catalog supplies source, version, deps.
 job, err := engine.Add(ctx, &toolbelt.AddRequest{Name: "gopls"})
 
 // The enable/disable toggle: disabling uninstalls, the template stays.
@@ -62,7 +62,7 @@ on := true
 job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &on})
 ```
 
-`DefaultSeed()` ships four disabled templates (`gopls`, `tsc-native`, `pyrefly`, `gh`): nothing downloads until a template is enabled, and install knowledge hydrates from the catalog at enable time, so the seed never goes stale.
+`DefaultSeed()` ships four disabled templates — the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `gh`): nothing downloads until a template is enabled, and install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded: the engine auto-adopts missing dependencies at install time, while a seeded-but-disabled dependency would refuse dependent installs (a disabled entry is user policy).
 
 ### The REST projection
 
@@ -89,7 +89,7 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog@latest \
     verify -catalog tool-catalog.json -require required-tools.txt
 ```
 
-`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at image build instead of in a boot job. The lane ships a base overlay set covering runtimes, forge CLIs, and language servers with the wrapper-script shims agent CLIs probe for (`typescript-language-server`, `pyright`, `pyright-langserver`).
+`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at image build instead of in a boot job. The lane ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers agent CLIs probe for (`gopls`, `typescript-language-server`, `pyright`).
 
 ## API
 
@@ -142,7 +142,7 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog@latest \
 | `OnJobChanged` / `OnJobOutput` | job lifecycle + coalesced output callbacks (must not block); nil is silent |
 | `Logger` | `slog` logger; nil uses the default |
 
-Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, `shims` (wrapper scripts, full command lines), and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites.
+Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites.
 
 ## Security model
 

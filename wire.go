@@ -42,18 +42,17 @@ type Job struct {
 // ToolInfo is one tool row in Inventory: the manifest entry joined with
 // the engine's install state.
 type ToolInfo struct {
-	Shims            map[string]string `json:"shims,omitempty"`
-	Name             string            `json:"name"`
-	Source           string            `json:"source,omitempty"`
-	Version          string            `json:"version,omitempty"`
-	Description      string            `json:"description,omitempty"`
-	Origin           string            `json:"origin,omitempty"`
-	InstalledVersion string            `json:"installed_version,omitempty"`
-	Latest           string            `json:"latest,omitempty"`
-	LastError        string            `json:"last_error,omitempty"`
-	Requires         []string          `json:"requires,omitempty"`
-	Pin              bool              `json:"pin,omitempty"`
-	Disabled         bool              `json:"disabled,omitempty"`
+	Name             string   `json:"name"`
+	Source           string   `json:"source,omitempty"`
+	Version          string   `json:"version,omitempty"`
+	Description      string   `json:"description,omitempty"`
+	Origin           string   `json:"origin,omitempty"`
+	InstalledVersion string   `json:"installed_version,omitempty"`
+	Latest           string   `json:"latest,omitempty"`
+	LastError        string   `json:"last_error,omitempty"`
+	Requires         []string `json:"requires,omitempty"`
+	Pin              bool     `json:"pin,omitempty"`
+	Disabled         bool     `json:"disabled,omitempty"`
 	// Lsp marks a language-server entry (catalog knowledge); consumers
 	// use it for the no-LSP-enabled warning and UI badges.
 	Lsp        bool `json:"lsp,omitempty"`

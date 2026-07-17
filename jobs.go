@@ -248,14 +248,20 @@ func (q *jobQueue) InstallingSet() map[string]bool {
 }
 
 // Wait blocks until the given job leaves the queue/active slot, then
-// returns its terminal view. Used by the synchronous EnsureInstalled
-// path and boot gates.
+// returns its terminal view. A job the queue doesn't know (never
+// enqueued, or evicted from terminal history) returns ErrUnknownJob
+// instead of polling to the ctx deadline. Used by the synchronous
+// EnsureInstalled path and boot gates.
 func (q *jobQueue) Wait(ctx context.Context, id string) (*Job, error) {
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if v := q.terminalView(id); v != nil {
+		v, known := q.lookup(id)
+		if v != nil {
 			return v, nil
+		}
+		if !known {
+			return nil, fmt.Errorf("%w: %s", ErrUnknownJob, id)
 		}
 		select {
 		case <-ctx.Done():
@@ -265,13 +271,23 @@ func (q *jobQueue) Wait(ctx context.Context, id string) (*Job, error) {
 	}
 }
 
-func (q *jobQueue) terminalView(id string) *Job {
+// lookup returns the terminal view when the job has finished, and
+// whether the queue knows the id at all (terminal, active, or pending).
+func (q *jobQueue) lookup(id string) (*Job, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if s, ok := q.terminal[id]; ok {
-		return s
+		return s, true
 	}
-	return nil
+	if q.active != nil && q.active.id == id {
+		return nil, true
+	}
+	for _, j := range q.pending {
+		if j.id == id {
+			return nil, true
+		}
+	}
+	return nil, false
 }
 
 // Close stops the worker after the current job (its context is
