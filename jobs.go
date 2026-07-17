@@ -373,6 +373,10 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 	err := q.run(ctx, j, output)
 	close(done)
 
+	// Finalize under the queue lock: Snapshot/Active read the active
+	// job's fields (via view) under q.mu, so unlocked writes here race
+	// with a concurrent jobs poll.
+	q.mu.Lock()
 	j.ended = time.Now()
 	switch {
 	case err == nil:
@@ -389,6 +393,7 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 		j.err = err.Error()
 		q.log.Warn("toolbelt: job failed", "job", j.id, "kind", j.kind, "error", err)
 	}
+	q.mu.Unlock()
 }
 
 // pushRecentLocked appends to history with the cap applied and records
