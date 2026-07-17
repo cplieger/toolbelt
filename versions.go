@@ -208,18 +208,20 @@ func parseTagVersion(tag, prefix string) *goversion.Version {
 }
 
 func (v *versionResolver) latestNpm(ctx context.Context, pkg string) (string, error) {
+	// The dist-tag endpoint returns just the tagged version manifest.
+	// Never fetch the full packument (/{pkg}): it carries every version
+	// ever published and blows the response-size cap on big packages
+	// (typescript's is >4 MiB — found enabling the seed template).
 	var doc struct {
-		DistTags struct {
-			Latest string `json:"latest"`
-		} `json:"dist-tags"`
+		Version string `json:"version"`
 	}
-	if err := v.getJSON(ctx, "https://registry.npmjs.org/"+url.PathEscape(pkg), &doc); err != nil {
+	if err := v.getJSON(ctx, "https://registry.npmjs.org/"+url.PathEscape(pkg)+"/latest", &doc); err != nil {
 		return "", err
 	}
-	if doc.DistTags.Latest == "" {
-		return "", fmt.Errorf("npm package %q has no latest tag", pkg)
+	if doc.Version == "" {
+		return "", fmt.Errorf("npm package %q has no latest version", pkg)
 	}
-	return doc.DistTags.Latest, nil
+	return doc.Version, nil
 }
 
 func (v *versionResolver) latestPyPI(ctx context.Context, pkg string) (string, error) {
