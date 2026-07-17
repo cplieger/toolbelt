@@ -6,8 +6,8 @@ github.com/cplieger/httpx/v3 v3.0.0 h1:9bXuJaKzJWO0fjCAPsJG7YsbgATdycozDkYZ2wXUh
 github.com/cplieger/httpx/v3 v3.0.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
-github.com/cplieger/toolbelt v1.0.1 h1:vVJ5tpW4sEEC3wUzPoFLy0xzWh3tMjjq/u6HrmFX/L4=
-github.com/cplieger/toolbelt v1.0.1/go.mod h1:a6dwWremzeNTGac0YMspNpdqerEOIANIURBFM5d5cNc=
+github.com/cplieger/toolbelt v1.0.2 h1:oaDImoLA95ZNC1+C2H9nTqgs1eh+yPUaI0mSdrDR1zg=
+github.com/cplieger/toolbelt v1.0.2/go.mod h1:wg5FAVgi1iHdIfvx4QHM2MT4UHvoIF8XEWqvKR8oRbs=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hashicorp/go-version v1.9.0 h1:CeOIz6k+LoN3qX9Z0tyQrPtiB1DFYRPfCIBtaXPSCnA=
