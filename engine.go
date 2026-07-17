@@ -24,6 +24,11 @@ var (
 	// Enabling is an explicit state change (Patch Disabled=false), never
 	// a side effect of a retry.
 	ErrDisabled = errors.New("tool is disabled")
+	// ErrUnknownJob marks a Wait on a job id the queue no longer knows:
+	// never enqueued, or its terminal view was evicted by the history
+	// cap. Without it a Wait on an evicted id would poll to ctx
+	// deadline.
+	ErrUnknownJob = errors.New("unknown job")
 )
 
 // DependentsError is the ErrHasDependents shape that names the enabled
@@ -83,7 +88,6 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool) 
 		Pin:              t.Pin,
 		Disabled:         t.Disabled,
 		Requires:         t.Requires,
-		Shims:            t.Shims,
 		Description:      t.Description,
 		Origin:           t.Origin,
 		Installed:        e.installedFor(name, t, s),
@@ -150,6 +154,7 @@ func (e *Engine) Search(query string) []CatalogEntry {
 	hits := e.catalog.Search(query)
 	m, err := e.store.Manifest()
 	if err != nil {
+		e.log.Warn("toolbelt: search: manifest unreadable, results unfiltered", "error", err)
 		return hits
 	}
 	out := hits[:0]
@@ -178,17 +183,16 @@ func (e *Engine) Wait(ctx context.Context, jobID string) (*Job, error) {
 // AddRequest is the Add call's body: intent for a new tool. Every field
 // except Name is optional when the catalog knows the name.
 type AddRequest struct {
-	Shims       map[string]string `json:"shims,omitempty"`
-	Name        string            `json:"name"`
-	Source      string            `json:"source,omitempty"`  // optional when the catalog knows the name
-	Version     string            `json:"version,omitempty"` // optional: resolve latest
-	Description string            `json:"description,omitempty"`
-	Origin      string            `json:"origin,omitempty"`
-	Install     string            `json:"install,omitempty"`
-	Uninstall   string            `json:"uninstall,omitempty"`
-	Probe       string            `json:"probe,omitempty"`
-	Requires    []string          `json:"requires,omitempty"`
-	Pin         bool              `json:"pin,omitempty"`
+	Name        string   `json:"name"`
+	Source      string   `json:"source,omitempty"`  // optional when the catalog knows the name
+	Version     string   `json:"version,omitempty"` // optional: resolve latest
+	Description string   `json:"description,omitempty"`
+	Origin      string   `json:"origin,omitempty"`
+	Install     string   `json:"install,omitempty"`
+	Uninstall   string   `json:"uninstall,omitempty"`
+	Probe       string   `json:"probe,omitempty"`
+	Requires    []string `json:"requires,omitempty"`
+	Pin         bool     `json:"pin,omitempty"`
 	// Disabled adds the entry as a template: recorded, not installed,
 	// no job enqueued (Add then returns a nil Job).
 	Disabled bool `json:"disabled,omitempty"`
@@ -244,7 +248,6 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		Pin:         req.Pin,
 		Disabled:    req.Disabled,
 		Requires:    req.Requires,
-		Shims:       req.Shims,
 		Description: strings.TrimSpace(req.Description),
 		Origin:      req.Origin,
 		Install:     strings.TrimSpace(req.Install),
@@ -298,9 +301,6 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 	if t.Requires == nil {
 		t.Requires = cat.Requires
 	}
-	if t.Shims == nil {
-		t.Shims = cat.Shims
-	}
 	if t.Install == "" {
 		t.Install = cat.Install
 	}
@@ -320,16 +320,16 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 // false→true uninstalls the engine-owned footprint and keeps the
 // template; true→false installs.
 type PatchRequest struct {
-	Version     *string            `json:"version,omitempty"`
-	Pin         *bool              `json:"pin,omitempty"`
-	Disabled    *bool              `json:"disabled,omitempty"`
-	Description *string            `json:"description,omitempty"`
-	Requires    *[]string          `json:"requires,omitempty"`
-	Shims       *map[string]string `json:"shims,omitempty"`
-	Install     *string            `json:"install,omitempty"`
-	Uninstall   *string            `json:"uninstall,omitempty"`
-	// Force permits disabling a tool that enabled entries require
-	// (mirrors Remove's force).
+	Version     *string   `json:"version,omitempty"`
+	Pin         *bool     `json:"pin,omitempty"`
+	Disabled    *bool     `json:"disabled,omitempty"`
+	Description *string   `json:"description,omitempty"`
+	Requires    *[]string `json:"requires,omitempty"`
+	Install     *string   `json:"install,omitempty"`
+	Uninstall   *string   `json:"uninstall,omitempty"`
+	// Force permits disabling a tool that enabled entries require,
+	// cascading the disable to those dependents (one level, mirroring
+	// Remove's force cascade).
 	Force bool `json:"force,omitempty"`
 }
 
@@ -337,6 +337,7 @@ type PatchRequest struct {
 // and rollback).
 type patchOutcome struct {
 	prevVersion     string
+	cascaded        []string
 	versionChanged  bool
 	disabledChanged bool
 	nowDisabled     bool
@@ -351,25 +352,44 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 		return nil, errors.New("invalid version string")
 	}
 	var out patchOutcome
-	var deps []string
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		t, ok := m.Tools[name]
-		if !ok {
-			return ErrNotFound
-		}
-		if req.Disabled != nil && *req.Disabled && !t.Disabled && !req.Force {
-			if deps = enabledDependents(m, name); len(deps) > 0 {
-				return &DependentsError{Dependents: deps}
-			}
-		}
-		out = applyPatch(&t, &req)
-		m.Tools[name] = t
-		return nil
+		return patchManifest(m, name, &req, &out)
 	})
 	if err != nil {
 		return nil, err
 	}
 	return e.patchJob(name, &out)
+}
+
+// patchManifest applies one PatchRequest to the manifest: the dependent
+// refusal (or, with Force, the one-level disable cascade mirroring
+// Remove's force) plus the field overlay. Records what changed in out.
+func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome) error {
+	t, ok := m.Tools[name]
+	if !ok {
+		return ErrNotFound
+	}
+	var deps []string
+	if req.Disabled != nil && *req.Disabled && !t.Disabled {
+		deps = enabledDependents(m, name)
+		if len(deps) > 0 && !req.Force {
+			return &DependentsError{Dependents: deps}
+		}
+	}
+	*out = applyPatch(&t, req)
+	m.Tools[name] = t
+	// A forced disable cascades to the enabled dependents (one level,
+	// mirroring Remove's force): a dependent left enabled would declare
+	// intent against a disabled prerequisite.
+	if out.disabledChanged && out.nowDisabled && req.Force {
+		for _, d := range deps {
+			dt := m.Tools[d]
+			dt.Disabled = true
+			m.Tools[d] = dt
+			out.cascaded = append(out.cascaded, d)
+		}
+	}
+	return nil
 }
 
 // applyPatch overlays the request's set fields onto t, reporting the
@@ -395,9 +415,6 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	if req.Requires != nil {
 		t.Requires = *req.Requires
 	}
-	if req.Shims != nil {
-		t.Shims = *req.Shims
-	}
 	if req.Install != nil {
 		t.Install = *req.Install
 	}
@@ -412,9 +429,12 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 func (e *Engine) patchJob(name string, out *patchOutcome) (*Job, error) {
 	switch {
 	case out.disabledChanged && out.nowDisabled:
-		jv, err := e.queue.Enqueue(JobKindDisable, []string{name})
+		names := append([]string{name}, out.cascaded...)
+		jv, err := e.queue.Enqueue(JobKindDisable, names)
 		if err != nil {
-			e.rollbackPatch(name, func(t *Tool) { t.Disabled = false })
+			for _, n := range names {
+				e.rollbackPatch(n, func(t *Tool) { t.Disabled = false })
+			}
 			return nil, err
 		}
 		return jv, nil
@@ -569,17 +589,19 @@ func (e *Engine) rollbackRemoval(removed map[string]Tool) {
 }
 
 // Reconcile enqueues the convergence job: install missing enabled
-// entries, uninstall the engine-owned footprint of disabled ones.
-// ReconcileFull additionally enqueues an update pass over unpinned
-// entries. Returns (nil, nil) when the manifest is empty (nothing to
-// converge). The returned job is the reconcile job; Wait on it to gate
-// consumer readiness (session creation, UI states).
+// entries, uninstall the engine-owned footprint of disabled ones and
+// of orphaned state rows (a manifest row deleted without its uninstall
+// job completing). ReconcileFull additionally enqueues an update pass
+// over unpinned entries. Returns (nil, nil) when the manifest is empty
+// and no state row exists (nothing to converge). The returned job is
+// the reconcile job; Wait on it to gate consumer readiness (session
+// creation, UI states).
 func (e *Engine) Reconcile(mode ReconcileMode) (*Job, error) {
 	m, err := e.store.Manifest()
 	if err != nil {
 		return nil, err
 	}
-	if len(m.Tools) == 0 {
+	if len(m.Tools) == 0 && len(e.store.State().Tools) == 0 {
 		return nil, nil
 	}
 	jv, err := e.queue.Enqueue(JobKindReconcile, nil)
@@ -686,7 +708,7 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 
 // hydrateStatic completes sparse manifest entries from the catalog:
 // every entry with no source gets the catalog's static fields merged
-// and persisted (source, shims, requires, install/uninstall/probe,
+// and persisted (source, requires, install/uninstall/probe,
 // description, default version). Purely offline — version resolution
 // for actively-installed tools happens per-tool in installTool. Names
 // the catalog doesn't know stay sparse; they fail their own install
@@ -1015,6 +1037,19 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 	if latest == t.Version {
 		return false, nil
 	}
+	// Validate the frozen definition can actually resolve the candidate
+	// BEFORE persisting the bump: registry drift between the upstream
+	// tag list and the baked aqua definition would otherwise pin the
+	// manifest to an uninstallable version (a persistent failed job
+	// until an image rebuild or a hand edit). Skipping keeps the old
+	// version working.
+	if aq := e.aquaDef(t.Source); aq != nil {
+		if _, rerr := aq.ResolveSpec(latest); rerr != nil {
+			output(fmt.Sprintf("%s: %s not resolvable by the baked definition, keeping %s: %v",
+				n, latest, t.Version, rerr))
+			return false, nil
+		}
+	}
 	output(fmt.Sprintf("%s: %s -> %s", n, t.Version, latest))
 	if err := e.store.MutateManifest(func(mm *Manifest) error {
 		cur, ok := mm.Tools[n]
@@ -1031,30 +1066,21 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 }
 
 // runReconcile converges disk state to manifest intent, both ways:
-// disabled-but-owned footprints are uninstalled first (freeing names),
-// then missing enabled entries install. Zero network when converged.
+// orphaned state rows are swept, disabled-but-owned footprints are
+// uninstalled (freeing names), then missing enabled entries install.
+// Zero network when converged.
 func (e *Engine) runReconcile(ctx context.Context, output func(string)) error {
 	m, err := e.store.Manifest()
 	if err != nil {
 		return err
 	}
-	st := e.store.State()
-	var missing, extras []string
-	for n := range m.Tools {
-		t := m.Tools[n]
-		status := st.Tools[n]
-		switch {
-		case t.Disabled && status.owned():
-			extras = append(extras, n)
-		case !t.Disabled && !e.probeInstalled(n, &t, &status):
-			missing = append(missing, n)
-		}
-	}
-	sort.Strings(missing)
-	sort.Strings(extras)
-	if len(missing) == 0 && len(extras) == 0 {
+	missing, extras, orphans := e.reconcilePlan(m)
+	if len(missing) == 0 && len(extras) == 0 && len(orphans) == 0 {
 		output("everything converged")
 		return nil
+	}
+	if err := e.sweepOrphans(ctx, orphans, output); err != nil {
+		return err
 	}
 	if len(extras) > 0 {
 		output(fmt.Sprintf("uninstalling disabled tools: %s", strings.Join(extras, ", ")))
@@ -1067,6 +1093,56 @@ func (e *Engine) runReconcile(ctx context.Context, output func(string)) error {
 		if err := e.runInstall(ctx, missing, output); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// reconcilePlan classifies the manifest and state rows into the
+// reconcile work sets: enabled-but-missing installs, disabled-but-owned
+// footprints, and orphaned state rows (owned footprint, no manifest
+// row).
+func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) {
+	st := e.store.State()
+	for n := range m.Tools {
+		t := m.Tools[n]
+		status := st.Tools[n]
+		switch {
+		case t.Disabled && status.owned():
+			extras = append(extras, n)
+		case !t.Disabled && !e.probeInstalled(n, &t, &status):
+			missing = append(missing, n)
+		}
+	}
+	for n := range st.Tools {
+		status := st.Tools[n]
+		if _, inManifest := m.Tools[n]; !inManifest && status.owned() {
+			orphans = append(orphans, n)
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(extras)
+	sort.Strings(orphans)
+	return missing, extras, orphans
+}
+
+// sweepOrphans uninstalls engine-owned footprints whose manifest row is
+// gone — the residue of a crash between Remove's manifest write and its
+// uninstall job. The real Tool definition died with the manifest row,
+// so cleanup runs with the manual-source fallback (recorded bins and
+// the opt dir are removed; a package-manager tree may remain, bounded
+// to engine-owned dirs).
+func (e *Engine) sweepOrphans(ctx context.Context, orphans []string, output func(string)) error {
+	for _, n := range orphans {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		output(fmt.Sprintf("sweeping orphaned install state: %s", n))
+		status := e.store.State().Tools[n]
+		t := Tool{Source: SourceManual}
+		if err := e.inst.uninstall(ctx, n, &t, &status); err != nil {
+			return err
+		}
+		e.store.dropToolStatus(n)
 	}
 	return nil
 }

@@ -1,7 +1,7 @@
 // Package toolbelt provisions developer tools onto a persistent volume,
 // declaratively. A manifest (tools.json) records intent: which tools, at
 // which versions, enabled or disabled. A compiled catalog carries install
-// knowledge (sources, artifact templates, checksum locations, shims,
+// knowledge (sources, artifact templates, checksum locations,
 // dependencies). The Engine reconciles installed state against intent
 // through a single-flight job queue: enabled-but-missing tools are
 // installed, disabled-but-installed tools are uninstalled (their template
@@ -16,7 +16,7 @@
 //	<ConfigDir>/tools-state.json — engine-owned machine state (installed
 //	                               version, owned bin names, last error).
 //	<ToolsDir>/opt/<name>/<ver>/ — versioned install trees.
-//	<ToolsDir>/bin               — the single PATH dir: symlinks + shims.
+//	<ToolsDir>/bin               — the single PATH dir (symlinks).
 //
 // The catalog (CatalogPath, compiled at image build by cmd/toolcatalog) is
 // read-only environment data; a missing catalog degrades to manual and
@@ -55,8 +55,8 @@ const (
 )
 
 // ManifestVersion is the manifest schema version this engine reads and
-// writes. Files without it (the retired sectioned v1 shape) are backed
-// up and replaced with the configured seed at engine start.
+// writes — the only version it accepts. A manifest with any other
+// version (or one that fails to parse) is an error at engine start.
 const ManifestVersion = 2
 
 // Config wires an Engine. ConfigDir and ToolsDir are required.
@@ -70,9 +70,8 @@ type Config struct {
 	OnJobOutput func(jobID string, lines []string)
 	// Logger receives engine-level log lines. Nil means slog.Default().
 	Logger *slog.Logger
-	// Seed is the manifest written when no valid one exists (fresh
-	// volume, or a retired-format file that was just backed up). Nil
-	// seeds an empty manifest. See DefaultSeed.
+	// Seed is the manifest written when none exists (fresh volume).
+	// Nil seeds an empty manifest. See DefaultSeed.
 	Seed *Manifest
 	// ConfigDir holds tools.json + tools-state.json (the persistent
 	// config volume root).
@@ -121,8 +120,8 @@ func (t urlPolicyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 }
 
 // New constructs and starts an Engine: initializes the manifest files
-// (seeding when absent, backing up a retired-format file) and launches
-// the job worker.
+// (seeding when absent; a manifest of any other schema version is an
+// error) and launches the job worker.
 func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
@@ -168,11 +167,16 @@ func New(cfg *Config) (*Engine, error) {
 // Close stops the job worker (cancelling any running job).
 func (e *Engine) Close() { e.queue.Close() }
 
-// DefaultSeed returns the shared starter manifest: language-server
-// templates for Go, TypeScript, and Python plus the GitHub CLI, all
-// disabled. Nothing downloads until an entry is enabled; install
-// knowledge (source, shims, dependencies, version) hydrates from the
-// catalog at enable time. Returns a fresh copy on every call.
+// DefaultSeed returns the shared starter manifest: the officially
+// supported language servers for Go, TypeScript, and Python plus the
+// GitHub CLI, all disabled. Nothing downloads until an entry is
+// enabled; install knowledge (source, dependencies, version) hydrates
+// from the catalog at enable time. Backend runtimes (node, go) and
+// required packages (typescript) are deliberately NOT seeded: the
+// engine auto-adopts missing dependencies at install time, whereas a
+// seeded-but-disabled dependency REFUSES dependent installs
+// ("dependency X is disabled; enable it first" — a disabled entry is
+// user policy). Returns a fresh copy on every call.
 func DefaultSeed() *Manifest {
 	return &Manifest{
 		Version: ManifestVersion,
@@ -180,14 +184,14 @@ func DefaultSeed() *Manifest {
 			"Tool templates. Entries with \"disabled\": true are preinstalled examples:",
 			"enable one to install it (set \"disabled\": false, or use the tools API/UI),",
 			"then restart or trigger a reconcile. Add more tools by name; install",
-			"knowledge (source, shims, dependencies, version) comes from the built-in",
+			"knowledge (source, dependencies, version) comes from the built-in",
 			"catalog.",
 		},
 		Tools: map[string]Tool{
-			"gopls":      {Disabled: true},
-			"tsc-native": {Disabled: true},
-			"pyrefly":    {Disabled: true},
-			"gh":         {Disabled: true},
+			"gopls":                      {Disabled: true},
+			"typescript-language-server": {Disabled: true},
+			"pyright":                    {Disabled: true},
+			"gh":                         {Disabled: true},
 		},
 	}
 }

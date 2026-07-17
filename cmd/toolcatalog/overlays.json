@@ -3,7 +3,7 @@
     "toolbelt's base catalog overlays: curated entries merged over the",
     "mise+aqua registry data by cmd/toolcatalog at a consumer's image",
     "build. Entries WITHOUT a source patch display fields (featured, lsp,",
-    "description, requires, shims, probe) onto the compiled entry;",
+    "description, requires, probe) onto the compiled entry;",
     "entries WITH a source replace/create the whole entry (aqua: sources",
     "pull their definition from the aqua registry checkout; manual",
     "sources carry an install command). Manual install commands run",
@@ -69,7 +69,7 @@
     "typescript-language-server": {
       "source": "npm:typescript-language-server",
       "featured": true,
-      "description": "TypeScript/JavaScript LSP (Microsoft canonical, via npm). Full tsc compatibility; pick tsc-native below for ~10x faster type-checking.",
+      "description": "TypeScript/JavaScript LSP (Microsoft canonical, via npm). What kiro-cli scans PATH for on TS projects.",
       "requires": [
         "typescript"
       ],
@@ -78,33 +78,7 @@
     "pyright": {
       "source": "npm:pyright",
       "featured": true,
-      "description": "Python LSP (Microsoft official, via npm). Full pyright fidelity; pick pyrefly below for native speed.",
-      "lsp": true
-    },
-    "pyrefly": {
-      "source": "manual",
-      "version": "1.1.1",
-      "featured": true,
-      "description": "Python LSP (Meta's pyrefly, native Rust binary, ~18 MB, no Node needed). Shimmed as pyright for kiro-cli; ~95% diagnostic-equivalent to Microsoft's pyright.",
-      "install": "curl -fsSL \"https://github.com/facebook/pyrefly/releases/download/${VERSION_NOPFX}/pyrefly-linux-${ARCH_X86_64_OR_ARM64}.tar.gz\" | tar -xz -C \"${BIN}\" pyrefly && chmod 755 \"${BIN}/pyrefly\"",
-      "probe": "pyrefly",
-      "shims": {
-        "pyright": "pyrefly lsp",
-        "pyright-langserver": "pyrefly lsp"
-      },
-      "lsp": true
-    },
-    "tsc-native": {
-      "source": "manual",
-      "version": "7.0.2",
-      "featured": true,
-      "description": "TypeScript 7 native compiler (Go-compiled tsc from the stable typescript package). Self-contained, no Node needed; shimmed as typescript-language-server for kiro-cli. Pick typescript-language-server above for 100% tsc fidelity.",
-      "install": "curl -fsSL \"https://registry.npmjs.org/@typescript/typescript-linux-${ARCH_X64_OR_ARM64}/-/typescript-linux-${ARCH_X64_OR_ARM64}-${VERSION}.tgz\" | tar -xz -C \"${OPT}\" --strip-components=2 --wildcards 'package/lib/tsc' 'package/lib/lib*.d.ts' && chmod 755 \"${OPT}/tsc\" && ln -sf \"${OPT}/tsc\" \"${BIN}/tsc\"",
-      "uninstall": "rm -f \"${BIN}/tsc\"",
-      "probe": "tsc",
-      "shims": {
-        "typescript-language-server": "tsc --lsp --stdio"
-      },
+      "description": "Python LSP (Microsoft official, via npm). What kiro-cli scans PATH for on Python projects.",
       "lsp": true
     },
     "gopls": {

@@ -228,7 +228,6 @@ func TestHydration_SparseEntryFromCatalog(t *testing.T) {
 		"x": {
 			Name: "x", Source: SourceManual, Version: "1.0.0",
 			Install: `printf x > "$BIN/x" && chmod 755 "$BIN/x"`, Probe: "x",
-			Shims: map[string]string{"x-alias": "x --serve"},
 		},
 	}}
 	e := newTestEngine(t, cat)
@@ -249,11 +248,8 @@ func TestHydration_SparseEntryFromCatalog(t *testing.T) {
 	}
 	m, _ := e.store.Manifest()
 	tl := m.Tools["x"]
-	if tl.Source != SourceManual || tl.Version != "1.0.0" || tl.Shims["x-alias"] == "" {
+	if tl.Source != SourceManual || tl.Version != "1.0.0" {
 		t.Fatalf("hydration did not persist catalog fields: %+v", tl)
-	}
-	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "x-alias")); err != nil {
-		t.Fatal("catalog shim not written")
 	}
 }
 
@@ -414,7 +410,7 @@ func TestManifest_CommentRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSeed_FreshVolumeAndV1Backup(t *testing.T) {
+func TestSeed_InitFiles(t *testing.T) {
 	t.Run("fresh volume", func(t *testing.T) {
 		dir := t.TempDir()
 		st := newStore(dir, DefaultSeed(), slog.Default())
@@ -425,7 +421,7 @@ func TestSeed_FreshVolumeAndV1Backup(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"gopls", "tsc-native", "pyrefly", "gh"} {
+		for _, name := range []string{"gopls", "typescript-language-server", "pyright", "gh"} {
 			tl, ok := m.Tools[name]
 			if !ok || !tl.Disabled {
 				t.Errorf("seed template %s missing or enabled: %+v", name, tl)
@@ -435,22 +431,29 @@ func TestSeed_FreshVolumeAndV1Backup(t *testing.T) {
 			t.Error("seed comment missing")
 		}
 	})
-	t.Run("v1 backup gets seed not empty", func(t *testing.T) {
+	t.Run("wrong-version manifest is an error, file untouched", func(t *testing.T) {
 		dir := t.TempDir()
-		v1 := `{"lsp":{"gopls":{"enabled":true}}}`
-		if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(v1), 0o644); err != nil {
+		retired := `{"lsp":{"gopls":{"enabled":true}}}`
+		if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(retired), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		st := newStore(dir, DefaultSeed(), slog.Default())
-		if err := st.initFiles(); err != nil {
+		if err := st.initFiles(); err == nil {
+			t.Fatal("initFiles accepted a versionless manifest")
+		}
+		raw, err := os.ReadFile(filepath.Join(dir, "tools.json"))
+		if err != nil || string(raw) != retired {
+			t.Fatalf("manifest rewritten on refusal: %s (%v)", raw, err)
+		}
+	})
+	t.Run("unparseable manifest is an error", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte("{nope"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := os.Stat(filepath.Join(dir, "tools.json.v1.bak")); err != nil {
-			t.Fatal("v1 backup missing")
-		}
-		m, _ := st.Manifest()
-		if len(m.Tools) != 4 {
-			t.Fatalf("v1 replacement should be the seed, got %d tools", len(m.Tools))
+		st := newStore(dir, DefaultSeed(), slog.Default())
+		if err := st.initFiles(); err == nil {
+			t.Fatal("initFiles accepted an unparseable manifest")
 		}
 	})
 	t.Run("nil seed stays empty", func(t *testing.T) {
@@ -617,5 +620,37 @@ func TestFindChecksum(t *testing.T) {
 				t.Fatalf("findChecksum(%s, %s) = %q, want %q", tc.asset, tc.alg, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestReconcile_SweepsOrphanedState pins the Remove crash-window
+// cleanup: an engine-owned footprint whose manifest row is gone (crash
+// between Remove's manifest write and its uninstall job) is swept by
+// the next reconcile instead of surviving forever.
+func TestReconcile_SweepsOrphanedState(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "orphan", nil)
+	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "orphan")); err != nil {
+		t.Fatalf("precondition: orphan not installed: %v", err)
+	}
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		delete(m.Tools, "orphan")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jv, err := e.Reconcile(ReconcileMissing)
+	if err != nil || jv == nil {
+		t.Fatalf("reconcile: %v %v", jv, err)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("reconcile job = %+v tail=%v", final, final.OutputTail)
+	}
+	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "orphan")); !os.IsNotExist(err) {
+		t.Fatal("orphaned binary not swept from bin/")
+	}
+	if st := e.store.State(); len(st.Tools["orphan"].Bins) > 0 || st.Tools["orphan"].InstalledVersion != "" {
+		t.Fatalf("orphaned state row survived the sweep: %+v", st.Tools["orphan"])
 	}
 }

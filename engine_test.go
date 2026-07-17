@@ -85,25 +85,15 @@ func addManual(t *testing.T, e *Engine, name string, requires []string) {
 	}
 }
 
-func TestStore_InitBacksUpV1(t *testing.T) {
+func TestNew_RefusesRetiredManifest(t *testing.T) {
 	dir := t.TempDir()
-	v1 := `{"runtimes":{"node":{"enabled":false,"version":"v26.5.0"}}}`
-	if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(v1), 0o644); err != nil {
+	retired := `{"runtimes":{"node":{"enabled":false,"version":"v26.5.0"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(retired), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	st := newStore(dir, nil, slog.Default())
-	if err := st.initFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "tools.json.v1.bak")); err != nil {
-		t.Fatalf("v1 backup missing: %v", err)
-	}
-	m, err := st.Manifest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.Version != ManifestVersion || len(m.Tools) != 0 {
-		t.Fatalf("fresh manifest = %+v", m)
+	_, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools")})
+	if err == nil || !strings.Contains(err.Error(), "manifest version") {
+		t.Fatalf("New accepted a retired-format manifest: %v", err)
 	}
 }
 
@@ -720,4 +710,111 @@ func TestValidToolName_ScopedEdgeCases(t *testing.T) {
 	if !validToolName("@scope/name") {
 		t.Error("@scope/name should be valid")
 	}
+}
+
+func TestPatch_ForceDisableCascades(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "base", nil)
+	addManual(t, e, "dep", []string{"base"})
+	on := true
+	if _, err := e.Patch("base", PatchRequest{Disabled: &on}); !errors.Is(err, ErrHasDependents) {
+		t.Fatalf("unforced disable with dependents: err = %v, want ErrHasDependents", err)
+	}
+	jv, err := e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+	if err != nil || jv == nil {
+		t.Fatalf("forced disable: %v %v", jv, err)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("disable job = %+v tail=%v", final, final.OutputTail)
+	}
+	m, err := e.store.Manifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.Tools["base"].Disabled || !m.Tools["dep"].Disabled {
+		t.Fatalf("force disable did not cascade: base=%+v dep=%+v", m.Tools["base"], m.Tools["dep"])
+	}
+	for _, bin := range []string{"base", "dep"} {
+		if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", bin)); !os.IsNotExist(err) {
+			t.Errorf("%s footprint not uninstalled by the cascade", bin)
+		}
+	}
+}
+
+func TestWait_UnknownJobErrors(t *testing.T) {
+	e := newTestEngine(t, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := e.Wait(ctx, "tj-nope"); !errors.Is(err, ErrUnknownJob) {
+		t.Fatalf("Wait on unknown id = %v, want ErrUnknownJob", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("Wait polled to deadline instead of returning immediately")
+	}
+}
+
+// TestUpdateOne_SkipsUnresolvableCandidate pins the drift-window guard:
+// a latest version the baked aqua definition cannot resolve must NOT be
+// persisted into the manifest (the old version keeps working; the
+// update is skipped with a log line).
+func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"tag_name":"v9.9.9"}`)
+	}))
+	defer srv.Close()
+	client := &http.Client{Transport: rewriteHost{target: srv.URL}}
+
+	constrained := &AquaPackage{
+		Type: aquaTypeGitHubRelease, RepoOwner: "o", RepoName: "r",
+		Asset:         "tool-{{.Version}}.tar.gz",
+		VersionConstr: `Version startsWith "1."`,
+	}
+	open := &AquaPackage{
+		Type: aquaTypeGitHubRelease, RepoOwner: "o", RepoName: "r2",
+		Asset: "tool2-{{.Version}}.tar.gz",
+	}
+	cat := &Catalog{Entries: map[string]CatalogEntry{
+		"tool":  {Name: "tool", Source: "aqua:o/r", Aqua: constrained},
+		"tool2": {Name: "tool2", Source: "aqua:o/r2", Aqua: open},
+	}}
+	e := newTestEngineClient(t, cat, client, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["tool"] = Tool{Source: "aqua:o/r", Version: "1.0.0"}
+		m.Tools["tool2"] = Tool{Source: "aqua:o/r2", Version: "1.0.0"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := e.store.Manifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var lines []string
+	collect := func(s string) { lines = append(lines, s) }
+
+	t.Run("unresolvable candidate skipped", func(t *testing.T) {
+		did, err := e.updateOne(context.Background(), m, "tool", false, collect)
+		if err != nil || did {
+			t.Fatalf("updateOne = %v %v, want skip without error", did, err)
+		}
+		cur, _ := e.store.Manifest()
+		if got := cur.Tools["tool"].Version; got != "1.0.0" {
+			t.Fatalf("manifest bumped to unresolvable version %q", got)
+		}
+		if !strings.Contains(strings.Join(lines, "\n"), "not resolvable") {
+			t.Fatalf("skip not reported: %v", lines)
+		}
+	})
+	t.Run("resolvable candidate still bumps", func(t *testing.T) {
+		did, err := e.updateOne(context.Background(), m, "tool2", false, collect)
+		if err != nil || !did {
+			t.Fatalf("updateOne = %v %v, want bump", did, err)
+		}
+		cur, _ := e.store.Manifest()
+		if got := cur.Tools["tool2"].Version; got != "v9.9.9" {
+			t.Fatalf("resolvable bump not persisted: %q", got)
+		}
+	})
 }

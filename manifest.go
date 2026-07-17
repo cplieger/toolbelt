@@ -10,7 +10,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
@@ -19,13 +18,9 @@ import (
 
 // Tool is one manifest entry: the user's intent for a single tool.
 // Every field except the map key (the tool name) is optional; empty
-// Source/Version/Shims/Requires hydrate from the catalog when the tool
-// is installed or updated.
+// Source/Version/Requires hydrate from the catalog when the tool is
+// installed or updated.
 type Tool struct {
-	// Shims maps extra bin names to command lines, written as wrapper
-	// scripts in the bin dir (e.g. typescript-language-server ->
-	// "tsc --lsp --stdio"). Shims are full command lines, not symlinks.
-	Shims map[string]string `json:"shims,omitempty"`
 	// Source locates the install definition: "aqua:cli/cli",
 	// "npm:pyright", "pip:x", "cargo:x", "go:golang.org/x/tools/gopls",
 	// or "manual". Empty = hydrate from the catalog.
@@ -83,8 +78,8 @@ type ToolStatus struct {
 	// LastError is the failure message of the most recent install
 	// attempt; cleared on success.
 	LastError string `json:"last_error,omitempty"`
-	// Bins are the names this tool owns in the bin dir (symlinks and
-	// shim wrappers), removed on uninstall.
+	// Bins are the names this tool owns in the bin dir (symlinks),
+	// removed on uninstall.
 	Bins []string `json:"bins,omitempty"`
 	// PMBins are package-manager bin names discovered by diffing the
 	// pm's bin dir (npm/pip), symlinked into the bin dir.
@@ -124,27 +119,19 @@ func newStore(configDir string, seed *Manifest, log *slog.Logger) *store {
 	}
 }
 
-// initFiles backs up a retired-format manifest (any JSON without
-// "version": 2) and writes the seed in its place; a missing file gets
-// the seed directly. Called once at engine start.
+// initFiles writes the seed when no manifest exists. Any existing file
+// must already be schema ManifestVersion: an unparseable or
+// wrong-version manifest is an error (the engine refuses to guess at
+// or rewrite user intent), surfaced from New. Called once at engine
+// start.
 func (s *store) initFiles() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.readManifestLocked()
-	if err == nil && m.Version == ManifestVersion {
-		return nil
+	_, err := s.readManifestLocked()
+	if errors.Is(err, fs.ErrNotExist) {
+		return s.writeManifestLocked(s.seedManifest())
 	}
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		// Unparseable or old-shape file: preserve it for the user.
-		backup := s.manifestPath + ".v1.bak"
-		if m != nil && m.Version != 0 && m.Version != ManifestVersion {
-			backup = s.manifestPath + ".v" + strconv.Itoa(m.Version) + ".bak"
-		}
-		if renameErr := os.Rename(s.manifestPath, backup); renameErr == nil {
-			s.log.Info("toolbelt: retired-format manifest backed up", "backup", backup)
-		}
-	}
-	return s.writeManifestLocked(s.seedManifest())
+	return err
 }
 
 // seedManifest returns a deep copy of the configured seed (or an empty
@@ -162,9 +149,8 @@ func (s *store) seedManifest() *Manifest {
 	return cp
 }
 
-// readManifestLocked parses tools.json. A retired-format file (no
-// matching version) yields an error so initFiles can back it up.
-// Caller holds mu.
+// readManifestLocked parses tools.json. A file whose version is not
+// ManifestVersion yields an error. Caller holds mu.
 func (s *store) readManifestLocked() (*Manifest, error) {
 	data, err := os.ReadFile(s.manifestPath)
 	if err != nil {
@@ -175,7 +161,7 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 		return nil, fmt.Errorf("parse %s: %w", s.manifestPath, err)
 	}
 	if m.Version != ManifestVersion {
-		return &m, fmt.Errorf("manifest version %d (want %d)", m.Version, ManifestVersion)
+		return &m, fmt.Errorf("%s: manifest version %d (want %d)", s.manifestPath, m.Version, ManifestVersion)
 	}
 	if m.Tools == nil {
 		m.Tools = map[string]Tool{}

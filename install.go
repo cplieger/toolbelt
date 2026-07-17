@@ -72,15 +72,6 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 	if err != nil {
 		return nil, nil, err
 	}
-	// Write the entry's shims (extra wrapper scripts) last so they can
-	// reference the just-installed binaries.
-	for shim, cmdline := range t.Shims {
-		if werr := in.writeShim(shim, cmdline); werr != nil {
-			return nil, nil, werr
-		}
-		in.logf("shim: %s -> %s", shim, cmdline)
-		bins = append(bins, shim)
-	}
 	return bins, pmBins, nil
 }
 
@@ -383,28 +374,6 @@ func (in *installer) linkBin(name, target string) error {
 	return os.Symlink(target, link)
 }
 
-// writeShim creates a wrapper script in bin that execs cmdline.
-func (in *installer) writeShim(name, cmdline string) error {
-	if err := os.MkdirAll(in.binDir(), 0o755); err != nil {
-		return err
-	}
-	body := fmt.Sprintf("#!/bin/sh\nexec %s \"$@\"\n", cmdline)
-	path := filepath.Join(in.binDir(), filepath.Base(name))
-	// Created 0o600; the Chmod grants exec (a shim must be runnable).
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = f.WriteString(body)
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o755)
-}
-
 // --- package-manager backends ---
 
 // pmEnv builds the environment for package-manager subprocesses: the
@@ -674,8 +643,8 @@ func (in *installer) runShell(ctx context.Context, command, version, optDir stri
 // --- uninstall ---
 
 // uninstall removes a tool's engine-owned footprint: recorded bin
-// symlinks/shims, versioned opt dirs, and (for pm backends) the
-// package itself. It never touches files the engine has no record of.
+// symlinks, versioned opt dirs, and (for pm backends) the package
+// itself. It never touches files the engine has no record of.
 func (in *installer) uninstall(ctx context.Context, name string, t *Tool, st *ToolStatus) error {
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	switch kind {
@@ -699,9 +668,6 @@ func (in *installer) uninstall(ctx context.Context, name string, t *Tool, st *To
 		if err := os.Remove(link); err == nil {
 			in.logf("removed %s", b)
 		}
-	}
-	for shim := range t.Shims {
-		_ = os.Remove(filepath.Join(in.binDir(), shim))
 	}
 	if err := os.RemoveAll(filepath.Join(in.optDir(), name)); err != nil {
 		return err

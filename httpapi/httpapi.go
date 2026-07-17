@@ -18,7 +18,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cplieger/toolbelt"
+	"github.com/cplieger/toolbelt/v2"
 	"github.com/cplieger/webhttp"
 )
 

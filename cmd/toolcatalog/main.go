@@ -6,7 +6,7 @@
 // install backends, descriptions, aliases; MIT, github.com/jdx/mise
 // /registry) with the aqua registry (per-package binary install
 // definitions; MIT, github.com/aquaproj/aqua-registry /pkgs) and one or
-// more overlay files (curated entries: LSP shims, runtimes, manual
+// more overlay files (curated entries: LSP servers, runtimes, manual
 // definitions), emitting one tool-catalog.json an Engine loads
 // read-only. The base overlay set (overlays.json, embedded in the
 // binary) applies first unless -no-base-overlays; consumers layer
@@ -403,7 +403,7 @@ func loadAquaDef(aquaDir, ref string) (*toolbelt.AquaPackage, error) {
 // overlayFile is an overlay document: entries keyed by tool name. An
 // entry with a source replaces/creates the whole catalog entry; an
 // entry without one patches display fields (featured, lsp,
-// description, requires, shims, probe) onto the compiled entry.
+// description, requires, probe) onto the compiled entry.
 type overlayFile struct {
 	Entries map[string]toolbelt.CatalogEntry `json:"entries"`
 }
@@ -457,9 +457,6 @@ func mergeOverlay(cur, patch *toolbelt.CatalogEntry) {
 	}
 	if patch.Requires != nil {
 		cur.Requires = patch.Requires
-	}
-	if patch.Shims != nil {
-		cur.Shims = patch.Shims
 	}
 	if patch.Probe != "" {
 		cur.Probe = patch.Probe

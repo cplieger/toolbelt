@@ -23,14 +23,14 @@ toggles, a loopback REST projection, a boot gate on `Reconcile`).
   files.** Uninstalls (disable, remove, reconcile-extras) act only on
   the engine-owned footprint recorded in `tools-state.json`
   (`ToolStatus.owned`). A same-name binary the engine never installed is
-  invisible to cleanup paths, deliberately: migration volumes carry
-  pre-engine binaries that must keep working.
+  invisible to cleanup paths, deliberately: volumes carry user-placed
+  binaries that must keep working.
 - **Hydration runs before any probe or plan.** Every install/update/
   reconcile job first completes sparse entries (no `source`) from the
-  catalog, under the store lock. Reordering this wedges migration
-  volumes: a legacy binary satisfies the probe, the entry stays
-  source-less, and the update path fails on an empty source forever.
-  `TestHydration_LegacyBinaryDoesNotWedge` pins this.
+  catalog, under the store lock. Reordering this wedges volumes with
+  pre-existing binaries: an unmanaged binary satisfies the probe, the
+  entry stays source-less, and the update path fails on an empty source
+  forever. `TestHydration_LegacyBinaryDoesNotWedge` pins this.
 - **Disabled entries stay offline.** Static catalog fields only; no
   version resolution, no fetches. `TestHydration_DisabledStaysOffline`
   pins it with a failing transport.
