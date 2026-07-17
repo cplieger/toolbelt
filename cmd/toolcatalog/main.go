@@ -39,7 +39,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -71,14 +70,14 @@ func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func runCompile(args []string) {
-	fs := flag.NewFlagSet("compile", flag.ExitOnError)
-	miseDir := fs.String("mise", "", "path to the mise registry dir (registry/*.toml)")
-	aquaDir := fs.String("aqua", "", "path to the aqua-registry pkgs dir")
+	fl := flag.NewFlagSet("compile", flag.ExitOnError)
+	miseDir := fl.String("mise", "", "path to the mise registry dir (registry/*.toml)")
+	aquaDir := fl.String("aqua", "", "path to the aqua-registry pkgs dir")
 	var overlays multiFlag
-	fs.Var(&overlays, "overlay", "overlay JSON path (repeatable; applied in order)")
-	refsFlag := fs.String("refs", "", "comma-separated name=ref pairs recorded in the catalog")
-	outPath := fs.String("out", "tool-catalog.json", "output path")
-	_ = fs.Parse(args)
+	fl.Var(&overlays, "overlay", "overlay JSON path (repeatable; applied in order)")
+	refsFlag := fl.String("refs", "", "comma-separated name=ref pairs recorded in the catalog")
+	outPath := fl.String("out", "tool-catalog.json", "output path")
+	_ = fl.Parse(args)
 	if *miseDir == "" || *aquaDir == "" {
 		log.Fatal("toolcatalog: -mise and -aqua are required")
 	}
@@ -97,10 +96,10 @@ func runCompile(args []string) {
 }
 
 func runVerify(args []string) {
-	fs := flag.NewFlagSet("verify", flag.ExitOnError)
-	catalogPath := fs.String("catalog", "tool-catalog.json", "compiled catalog to verify")
-	requirePath := fs.String("require", "", "requirements file (one tool name per line, # comments)")
-	_ = fs.Parse(args)
+	fl := flag.NewFlagSet("verify", flag.ExitOnError)
+	catalogPath := fl.String("catalog", "tool-catalog.json", "compiled catalog to verify")
+	requirePath := fl.String("require", "", "requirements file (one tool name per line, # comments)")
+	_ = fl.Parse(args)
 	if *requirePath == "" {
 		log.Fatal("toolcatalog verify: -require is required")
 	}
@@ -132,22 +131,17 @@ func readCatalog(path string) *toolbelt.Catalog {
 }
 
 func readRequirements(path string) []string {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Fatalf("toolcatalog verify: read requirements: %v", err)
 	}
-	defer f.Close()
 	var names []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	for line := range strings.SplitSeq(string(data), "\n") {
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		names = append(names, line)
-	}
-	if err := sc.Err(); err != nil {
-		log.Fatalf("toolcatalog verify: read requirements: %v", err)
 	}
 	if len(names) == 0 {
 		log.Fatal("toolcatalog verify: requirements file lists no tools")
