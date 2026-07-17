@@ -9,5 +9,5 @@ require (
 	github.com/cplieger/webhttp v1.9.0
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-version v1.9.0
-	golang.org/x/mod v0.32.0
+	golang.org/x/mod v0.38.0
 )
