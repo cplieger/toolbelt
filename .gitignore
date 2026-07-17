@@ -24,3 +24,6 @@ go.work.sum
 **/.judgement/
 **/.refactor/
 **/.steering-maintenance/
+
+# Compiled lane binary
+cmd/toolcatalog/toolcatalog

@@ -8,9 +8,9 @@
 // definitions; MIT, github.com/aquaproj/aqua-registry /pkgs) and one or
 // more overlay files (curated entries: LSP shims, runtimes, manual
 // definitions), emitting one tool-catalog.json an Engine loads
-// read-only. The library's base overlay ships in this directory
-// (overlays.json); consumers layer their own with repeated -overlay
-// flags.
+// read-only. The base overlay set (overlays.json, embedded in the
+// binary) applies first unless -no-base-overlays; consumers layer
+// app-specific overlays with repeated -overlay flags.
 //
 // Runs at image build time (the Dockerfile downloads both registry
 // tarballs at Renovate-pinned refs):
@@ -39,6 +39,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -69,12 +70,16 @@ type multiFlag []string
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
+//go:embed overlays.json
+var baseOverlays []byte
+
 func runCompile(args []string) {
 	fl := flag.NewFlagSet("compile", flag.ExitOnError)
 	miseDir := fl.String("mise", "", "path to the mise registry dir (registry/*.toml)")
 	aquaDir := fl.String("aqua", "", "path to the aqua-registry pkgs dir")
 	var overlays multiFlag
-	fl.Var(&overlays, "overlay", "overlay JSON path (repeatable; applied in order)")
+	fl.Var(&overlays, "overlay", "overlay JSON path (repeatable; applied after the base set)")
+	noBase := fl.Bool("no-base-overlays", false, "skip the embedded base overlay set (runtimes, forge CLIs, language servers)")
 	refsFlag := fl.String("refs", "", "comma-separated name=ref pairs recorded in the catalog")
 	outPath := fl.String("out", "tool-catalog.json", "output path")
 	_ = fl.Parse(args)
@@ -85,6 +90,11 @@ func runCompile(args []string) {
 	catalog := &toolbelt.Catalog{Refs: parseRefs(*refsFlag), Entries: map[string]toolbelt.CatalogEntry{}}
 	stats := compileMiseEntries(catalog, *miseDir, *aquaDir)
 
+	if !*noBase {
+		if err := applyOverlayData(catalog, baseOverlays, *aquaDir); err != nil {
+			log.Fatalf("toolcatalog: base overlays: %v", err)
+		}
+	}
 	for _, ov := range overlays {
 		if err := applyOverlay(catalog, ov, *aquaDir); err != nil {
 			log.Fatalf("toolcatalog: overlay %s: %v", ov, err)
@@ -403,6 +413,10 @@ func applyOverlay(catalog *toolbelt.Catalog, path, aquaDir string) error {
 	if err != nil {
 		return err
 	}
+	return applyOverlayData(catalog, data, aquaDir)
+}
+
+func applyOverlayData(catalog *toolbelt.Catalog, data []byte, aquaDir string) error {
 	var ov overlayFile
 	if err := json.Unmarshal(data, &ov); err != nil {
 		return err
