@@ -147,3 +147,28 @@ func TestConstraint_AquaParity(t *testing.T) {
 		}
 	}
 }
+
+// TestLatestNpm_UsesDistTagEndpoint pins the npm lookup to the slim
+// /{pkg}/latest dist-tag endpoint. The full packument (/{pkg}) carries
+// every version ever published and exceeds the response-size cap on
+// big packages (typescript's is >4 MiB — hit enabling the seed
+// template on a live volume).
+func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		fmt.Fprint(w, `{"version":"5.3.0"}`)
+	}))
+	defer srv.Close()
+	v := newVersionResolver(&http.Client{Transport: rewriteHost{target: srv.URL}})
+	got, err := v.Latest(context.Background(), "npm:typescript-language-server", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "5.3.0" {
+		t.Fatalf("latest = %q, want 5.3.0", got)
+	}
+	if gotPath != "/typescript-language-server/latest" {
+		t.Fatalf("endpoint = %q, want /typescript-language-server/latest", gotPath)
+	}
+}
