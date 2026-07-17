@@ -1,10 +1,10 @@
-module github.com/cplieger/toolbelt/cmd/toolcatalog
+module github.com/cplieger/toolbelt/cmd/toolcatalog/v2
 
 go 1.26.5
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/cplieger/toolbelt v1.0.3
+	github.com/cplieger/toolbelt/v2 v2.0.0
 	go.yaml.in/yaml/v3 v3.0.4
 )
 

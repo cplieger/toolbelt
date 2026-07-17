@@ -15,7 +15,7 @@
 // Runs at image build time (the Dockerfile downloads both registry
 // tarballs at Renovate-pinned refs):
 //
-//	go run github.com/cplieger/toolbelt/cmd/toolcatalog@<lane-tag> \
+//	go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@<lane-tag> \
 //	    -mise <mise-repo>/registry \
 //	    -aqua <aqua-registry-repo>/pkgs \
 //	    -overlay overlays.json [-overlay app-overlays.json] \
@@ -29,7 +29,7 @@
 // an install command). A gap exits non-zero so the image build fails
 // instead of a boot job:
 //
-//	go run github.com/cplieger/toolbelt/cmd/toolcatalog@<lane-tag> \
+//	go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@<lane-tag> \
 //	    verify -catalog tool-catalog.json -require required-tools.txt
 //
 // This directory is a nested Go module (its own release lane) so the
@@ -52,7 +52,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/cplieger/toolbelt"
+	"github.com/cplieger/toolbelt/v2"
 	"go.yaml.in/yaml/v3"
 )
 
