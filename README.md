@@ -4,6 +4,7 @@
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/toolbelt)](https://github.com/cplieger/toolbelt/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/coverage.json)](https://github.com/cplieger/toolbelt/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/mutation.json)](https://github.com/cplieger/toolbelt/issues?q=label%3Agremlins-tracker)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13646/badge)](https://www.bestpractices.dev/projects/13646)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/toolbelt/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/toolbelt)
 
 > Declarative dev-tool provisioning for container dev boxes: manifest + catalog + reconciler engine
@@ -89,6 +90,45 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog@latest \
 ```
 
 `verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at image build instead of in a boot job. The lane ships a base overlay set covering runtimes, forge CLIs, and language servers with the wrapper-script shims agent CLIs probe for (`typescript-language-server`, `pyright`, `pyright-langserver`).
+
+## API
+
+### Engine
+
+- `New(cfg *Config) (*Engine, error)` — construct + start (initializes the manifest files, seeding when absent and backing up a retired-format file; launches the job worker). `Close()` stops the worker.
+- `Inventory() (*Inventory, error)` — the full read-side snapshot: every manifest entry joined with install state, the system group, the active job.
+- `Search(q string) []CatalogEntry` — catalog lookup (empty query = the featured set), hiding names already in the manifest.
+- `Add(ctx, *AddRequest) (*Job, error)` — record a new tool and enqueue its install; present-and-enabled is the default intent. `Disabled: true` adds a template instead (no job, returns nil).
+- `Patch(name, PatchRequest) (*Job, error)` — merge fields; `Disabled` is the enable/disable toggle (false→true uninstalls and keeps the template, true→false installs), a version change enqueues a reinstall. `Force` permits disabling a tool enabled entries require.
+- `Install(name) (*Job, error)` — retry an existing, enabled entry. Refuses templates with `ErrDisabled` (install is policy-neutral).
+- `Update(names ...string) (*Job, error)` — refresh unpinned entries (or the named set).
+- `Remove(name string, force bool) (*Job, []string, error)` — uninstall + delete the entry; refuses with the dependents named unless forced (force cascades).
+- `Reconcile(mode) (*Job, error)` — converge disk to intent: `ReconcileMissing` installs missing enabled entries and uninstalls disabled-but-owned ones (zero network when converged); `ReconcileFull` also enqueues an update pass. Returns `(nil, nil)` on an empty manifest.
+- `Wait(ctx, jobID) (*Job, error)` — block until a job settles (boot gates, synchronous flows).
+- `EnsureInstalled(ctx, name) error` — synchronous "a product action needs this binary now": creates from the catalog, enables a disabled template, installs, waits.
+- `Jobs() (active *Job, recent []*Job)` / `CancelJob(id) bool` — queue introspection and cancellation.
+
+### Types and errors
+
+`Tool` (manifest entry), `Manifest`, `ToolStatus`/`State` (machine state), `CatalogEntry`/`Catalog` (+ `VerifyCatalog`), `Inventory`/`ToolInfo`/`SystemTool`/`Job` (result shapes; also the httpapi wire shapes), `DefaultSeed()`. Sentinels: `ErrNotFound`, `ErrDisabled`, `ErrHasDependents` (match with `errors.Is`; `*DependentsError` carries the blocking names for `errors.As`).
+
+### httpapi routes
+
+| Route | Engine call | Notes |
+| --- | --- | --- |
+| `GET {prefix}` | `Inventory` | |
+| `GET {prefix}/search?q=` | `Search` | results omit embedded install definitions |
+| `POST {prefix}` | `Add` | 202 `{job}` (null for template adds) |
+| `PATCH {prefix}/{name}` | `Patch` | the toggle verb; 409 `has_dependents` + names |
+| `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on templates |
+| `POST {prefix}/update` | `Update` | optional `{"names": [...]}` body |
+| `DELETE {prefix}/{name}?force=1` | `Remove` | 202 `{job, dependents}`; 409 without force |
+| `GET {prefix}/jobs` | `Jobs` | active job carries the output tail |
+| `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | |
+
+### toolcatalog (nested module lane)
+
+`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>` — exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Released on its own lane (`cmd/toolcatalog/vX.Y.Z`).
 
 ## Configuration reference
 
