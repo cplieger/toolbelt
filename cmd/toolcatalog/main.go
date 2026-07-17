@@ -52,7 +52,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	"github.com/cplieger/toolbelt"
+	"github.com/cplieger/toolbelt/v2"
 	"go.yaml.in/yaml/v3"
 )
 
