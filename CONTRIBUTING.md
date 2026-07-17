@@ -39,6 +39,11 @@ toggles, a loopback REST projection, a boot gate on `Reconcile`).
   `Patch{Disabled: false}`. The one sanctioned exception is
   `EnsureInstalled`, the programmatic "a product action needs this
   binary now" path, which enables and installs.
+- **Checksum handling fails closed.** A declared checksum source that
+  cannot be resolved, fetched, or matched aborts the install — never
+  downgrade to unverified. `findChecksum` is algorithm-aware (BSD
+  multi-algorithm tables, coreutils tables, bare digests); a format it
+  cannot attribute confidently returns nothing and the install refuses.
 - **The store is single-writer, in-process.** Every read-modify-write
   runs under the store mutex, and files are re-read per operation so
   out-of-band hand edits are picked up. Never link the library from a
@@ -56,26 +61,88 @@ resolution via httpx), `aqua.go` (registry-definition evaluator),
 `extract.go` (archive handling), `catalog.go` (reader + VerifyCatalog),
 `wire.go` (result shapes). `httpapi/` is the REST projection built on
 `webhttp` primitives. `cmd/toolcatalog/` is a nested Go module (its own
-release lane) so the TOML/YAML registry parsers never reach a consumer's
-`go.sum`; it depends on the root module for the schema types.
+release lane, tags `cmd/toolcatalog/vX.Y.Z`) so the TOML/YAML registry
+parsers never reach a consumer's `go.sum`; it depends on the root module
+for the schema types and embeds the base overlay set.
 
-## Tests
+## Local development
+
+The module targets the Go version pinned in `go.mod`. Use that toolchain
+or newer.
+
+```sh
+go build ./...
+go test -count=1 ./...
+go test -race -count=1 ./...
+```
+
+The `cmd/toolcatalog` lane builds independently (`cd cmd/toolcatalog &&
+go build ./...`); a `go.work` covering both modules makes cross-module
+edits pleasant locally (gitignored — create your own with a versioned
+replace: `replace github.com/cplieger/toolbelt v<latest> => .`).
+
+### Linting and formatting
+
+Lint config lives in `.golangci.yaml` (synced from `cplieger/ci`; change
+it upstream). Formatting is `gofumpt` plus `gci` import grouping;
+`golangci-lint run` reports unformatted files as issues, so format
+before pushing.
+
+```sh
+golangci-lint run ./...
+golangci-lint fmt
+```
+
+### Mutation testing
+
+`.gremlins.yaml` configures [Gremlins](https://gremlins.dev) mutation
+testing (synced from `cplieger/ci`). Run it locally to confirm new tests
+actually kill mutants:
+
+```sh
+gremlins unleash .
+```
+
+## Test suite conventions
 
 `go test -count=1 ./...` from the repo root. The suite runs real
 installs against `httptest` servers and temp dirs (manual bash installs,
 aqua artifact downloads with checksum verification, symlink-escape
 rejection) — no mocks. Offline assertions use a failing transport: if a
-path that must be network-free fetches anything, the test fails. The
-`cmd/toolcatalog` lane is exercised against real registry checkouts in
-CI-adjacent smoke runs; its JSON output contract with the root reader is
-pinned by the `testdata/` fixtures.
+path that must be network-free fetches anything, the test fails. Match
+the file to the unit:
 
-When adding an engine mutation, cover: the happy path job, the
+- `engine_test.go` — the ported behavioral suite: add/patch/remove,
+  dependents cascade, aqua end-to-end (download → verify → extract →
+  link → prune), queue-full rollbacks, symlink-escape rejection.
+- `reconcile_test.go` — the reconciler state machine, hydration
+  ordering, seeds, templates, checksum-file parsing.
+- `aqua_test.go` / `versions_test.go` — evaluator fixtures (real
+  registry files, JSON-converted so the root module needs no YAML
+  dependency) and resolver behavior.
+- `httpapi/httpapi_test.go` — route contract: status codes, the
+  webhttp error envelope, toggle transitions, the dependents 409.
+
+When adding an engine mutation, cover: the happy-path job, the
 queue-full rollback (the manifest must never claim state no job will
-realize), and the sentinel error mapping in `httpapi`.
+realize), and the sentinel error mapping in `httpapi`. The
+`cmd/toolcatalog` lane is exercised against real registry checkouts in
+its consumers' image builds (the `verify` gate), not unit-mocked here.
 
-## Conventions
+## Commits and PRs
 
-Conventional commits (the changelog is generated), gofumpt/gci via
-`golangci-lint fmt`, and the shared `.golangci.yaml` gate. CI configs
-sync from a central repo — do not hand-edit workflow files.
+Branch from `main`, keep changes focused with tests, and open a PR. This
+account uses [Conventional Commits](https://www.conventionalcommits.org/)
+parsed by git-cliff (`cliff.toml`), so the commit type drives the version
+bump: `feat:`, `fix:`, `sec:`, and `chore:`/`docs:`/`refactor:`/`test:`
+(no release). Write the subject as the changelog line a consumer would
+read. Commits touching only `cmd/toolcatalog/` release on the lane's own
+cadence, not the root module's.
+
+## Conduct & security
+
+By participating you agree to the org-wide
+[Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
+Report security issues through the
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+never in a public issue.
