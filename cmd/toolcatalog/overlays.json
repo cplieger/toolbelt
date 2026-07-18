@@ -42,7 +42,7 @@
     },
     "tea": {
       "source": "manual",
-      "version": "v0.11.0",
+      "version": "v0.14.2",
       "featured": true,
       "description": "Gitea/Codeberg CLI.",
       "install": "curl -fsSL -o \"${BIN}/tea\" \"https://dl.gitea.com/tea/${VERSION_NOPFX}/tea-${VERSION_NOPFX}-linux-${ARCH_AMD64_OR_ARM64}\" && chmod 755 \"${BIN}/tea\"",
