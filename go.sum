@@ -1,7 +1,7 @@
 github.com/cplieger/atomicfile/v2 v2.2.0 h1:JY8wEZ+DmcenfuaVvHOaCZJdVbwpSr6z4wT5y278FCM=
 github.com/cplieger/atomicfile/v2 v2.2.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
-github.com/cplieger/httpx/v3 v3.1.0 h1:KXbVxn9+c/7UbnXKQgH+Qh75syqqYiV9UH0GzwO0YR8=
-github.com/cplieger/httpx/v3 v3.1.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
+github.com/cplieger/httpx/v3 v3.1.1 h1:e/5Gl8TQyP/80MwFQcZowJt4XG7L90kpY7v5pH/nUX8=
+github.com/cplieger/httpx/v3 v3.1.1/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
 github.com/cplieger/webhttp v1.10.0 h1:OsrKM1AR9KqY9eBxzrRnIsLGTaa/coGcA/sZHXGOgQM=
