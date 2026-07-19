@@ -1,11 +1,11 @@
 github.com/cplieger/atomicfile/v2 v2.2.0 h1:JY8wEZ+DmcenfuaVvHOaCZJdVbwpSr6z4wT5y278FCM=
 github.com/cplieger/atomicfile/v2 v2.2.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
-github.com/cplieger/httpx/v3 v3.0.0 h1:9bXuJaKzJWO0fjCAPsJG7YsbgATdycozDkYZ2wXUhbc=
-github.com/cplieger/httpx/v3 v3.0.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
+github.com/cplieger/httpx/v3 v3.1.0 h1:KXbVxn9+c/7UbnXKQgH+Qh75syqqYiV9UH0GzwO0YR8=
+github.com/cplieger/httpx/v3 v3.1.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
-github.com/cplieger/webhttp v1.9.0 h1:CucYBDjIK3K0xolqu6bI8etUtMwiBtC+K53xYXUfVqE=
-github.com/cplieger/webhttp v1.9.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
+github.com/cplieger/webhttp v1.10.0 h1:OsrKM1AR9KqY9eBxzrRnIsLGTaa/coGcA/sZHXGOgQM=
+github.com/cplieger/webhttp v1.10.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hashicorp/go-version v1.9.0 h1:CeOIz6k+LoN3qX9Z0tyQrPtiB1DFYRPfCIBtaXPSCnA=
