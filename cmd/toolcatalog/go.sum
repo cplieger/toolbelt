@@ -6,8 +6,8 @@ github.com/cplieger/httpx/v3 v3.2.0 h1:vMqF0Bf06gkfJJMfZQNHnHyEnbtLo8DdnqZNLL0D+
 github.com/cplieger/httpx/v3 v3.2.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
-github.com/cplieger/toolbelt/v2 v2.0.3 h1:1PH+4vaubXH3l6U1uT8xsFKY22dIi5MlhT47CwTHU+M=
-github.com/cplieger/toolbelt/v2 v2.0.3/go.mod h1:rmpKB5yvYPZgJAAxrd1eI92e9w3DYJ8Thq9yf+xFS3k=
+github.com/cplieger/toolbelt/v2 v2.0.4 h1:nnW3smXPzNQn/wwQxRZQVzAKg6ogHaT09XznKx/dmus=
+github.com/cplieger/toolbelt/v2 v2.0.4/go.mod h1:4Lh5Yan8VlLkGmFFKzX6eqVH/4OBNuSvOX4f3IRRV4Q=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hashicorp/go-version v1.9.0 h1:CeOIz6k+LoN3qX9Z0tyQrPtiB1DFYRPfCIBtaXPSCnA=
