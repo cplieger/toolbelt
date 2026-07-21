@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/cplieger/toolbelt/v2 v2.0.3
+	github.com/cplieger/toolbelt/v2 v2.0.4
 	go.yaml.in/yaml/v3 v3.0.4
 )
 
