@@ -421,7 +421,7 @@ func TestSeed_InitFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"gopls", "typescript-language-server", "pyright", "gh"} {
+		for _, name := range []string{"gopls", "typescript-language-server", "pyright", "rust-analyzer", "gh"} {
 			tl, ok := m.Tools[name]
 			if !ok || !tl.Disabled {
 				t.Errorf("seed template %s missing or enabled: %+v", name, tl)

@@ -245,6 +245,7 @@ func DefaultSeed() *Manifest {
 			"gopls":                      {Disabled: true},
 			"typescript-language-server": {Disabled: true},
 			"pyright":                    {Disabled: true},
+			"rust-analyzer":              {Disabled: true},
 			"gh":                         {Disabled: true},
 		},
 	}
