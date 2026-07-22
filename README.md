@@ -67,7 +67,7 @@ on := true
 job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &on})
 ```
 
-`DefaultSeed()` ships four disabled templates — the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `gh`): nothing downloads until a template is enabled, and install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded: the engine auto-adopts missing dependencies at install time, while a seeded-but-disabled dependency would refuse dependent installs (a disabled entry is user policy).
+`DefaultSeed()` ships five disabled templates — the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, `gh`): nothing downloads until a template is enabled, and install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded: the engine auto-adopts missing dependencies at install time, while a seeded-but-disabled dependency would refuse dependent installs (a disabled entry is user policy).
 
 ### The REST projection
 
