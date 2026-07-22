@@ -50,6 +50,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/cplieger/toolbelt/v2"
@@ -87,22 +88,51 @@ func runCompile(args []string) {
 		log.Fatal("toolcatalog: -mise and -aqua are required")
 	}
 
-	catalog := &toolbelt.Catalog{Refs: parseRefs(*refsFlag), Entries: map[string]toolbelt.CatalogEntry{}}
+	catalog := &toolbelt.Catalog{
+		Refs:      parseRefs(*refsFlag),
+		Generated: time.Now().UTC().Format(time.RFC3339),
+		Licenses:  loadRegistryLicenses(*miseDir, *aquaDir),
+		Entries:   map[string]toolbelt.CatalogEntry{},
+	}
 	stats := compileMiseEntries(catalog, *miseDir, *aquaDir)
 
+	resolver := func(ref string) (*toolbelt.AquaPackage, error) { return loadAquaDef(*aquaDir, ref) }
 	if !*noBase {
-		if err := applyOverlayData(catalog, baseOverlays, *aquaDir); err != nil {
+		if err := toolbelt.ApplyOverlay(catalog, baseOverlays, resolver); err != nil {
 			log.Fatalf("toolcatalog: base overlays: %v", err)
 		}
 	}
 	for _, ov := range overlays {
-		if err := applyOverlay(catalog, ov, *aquaDir); err != nil {
+		data, err := os.ReadFile(ov)
+		if err != nil {
+			log.Fatalf("toolcatalog: overlay %s: %v", ov, err)
+		}
+		if err := toolbelt.ApplyOverlay(catalog, data, resolver); err != nil {
 			log.Fatalf("toolcatalog: overlay %s: %v", ov, err)
 		}
 	}
 
 	checkCatalogInvariants(catalog)
 	writeCatalog(catalog, *outPath, stats)
+}
+
+// loadRegistryLicenses reads both registries' LICENSE files (at the
+// checkout root, one level above the -mise registry dir / -aqua pkgs
+// dir). The compiled catalog embeds data derived from both registries
+// (MIT), and MIT requires the copyright + permission notice to travel
+// with copies — embedding the texts makes every downstream copy of the
+// catalog self-contained. Missing license files fail the compile: a
+// silent omission would ship a non-compliant artifact.
+func loadRegistryLicenses(miseDir, aquaDir string) map[string]string {
+	out := map[string]string{}
+	for name, dir := range map[string]string{"mise": miseDir, "aqua-registry": aquaDir} {
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(filepath.Clean(dir)), "LICENSE"))
+		if err != nil {
+			log.Fatalf("toolcatalog: %s LICENSE: %v (MIT notices must travel with the compiled catalog)", name, err)
+		}
+		out[name] = string(data)
+	}
+	return out
 }
 
 func runVerify(args []string) {
@@ -400,68 +430,11 @@ func loadAquaDef(aquaDir, ref string) (*toolbelt.AquaPackage, error) {
 	return &p, nil
 }
 
-// overlayFile is an overlay document: entries keyed by tool name. An
-// entry with a source replaces/creates the whole catalog entry; an
-// entry without one patches display fields (featured, lsp,
-// description, requires, probe) onto the compiled entry.
-type overlayFile struct {
-	Entries map[string]toolbelt.CatalogEntry `json:"entries"`
-}
-
-func applyOverlay(catalog *toolbelt.Catalog, path, aquaDir string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	return applyOverlayData(catalog, data, aquaDir)
-}
-
-func applyOverlayData(catalog *toolbelt.Catalog, data []byte, aquaDir string) error {
-	var ov overlayFile
-	if err := json.Unmarshal(data, &ov); err != nil {
-		return err
-	}
-	for name := range ov.Entries {
-		patch := ov.Entries[name]
-		if patch.Source == "" {
-			cur, ok := catalog.Entries[name]
-			if !ok {
-				return fmt.Errorf("overlay patches unknown tool %q", name)
-			}
-			mergeOverlay(&cur, &patch)
-			catalog.Entries[name] = cur
-			continue
-		}
-		patch.Name = name
-		if ref, ok := strings.CutPrefix(patch.Source, "aqua:"); ok && patch.Aqua == nil {
-			aq, err := loadAquaDef(aquaDir, ref)
-			if err != nil {
-				return fmt.Errorf("overlay %q: %w", name, err)
-			}
-			patch.Aqua = aq
-		}
-		catalog.Entries[name] = patch
-	}
-	return nil
-}
-
-func mergeOverlay(cur, patch *toolbelt.CatalogEntry) {
-	if patch.Featured {
-		cur.Featured = true
-	}
-	if patch.Lsp {
-		cur.Lsp = true
-	}
-	if patch.Description != "" {
-		cur.Description = patch.Description
-	}
-	if patch.Requires != nil {
-		cur.Requires = patch.Requires
-	}
-	if patch.Probe != "" {
-		cur.Probe = patch.Probe
-	}
-}
+// Overlay application (document shape, replace-vs-patch semantics, and
+// the aqua-definition resolution hook) lives in the root module as
+// toolbelt.ApplyOverlay, shared with the engine's runtime catalog
+// refresh; this command passes a registry-checkout resolver so overlay
+// entries with bare aqua: sources gain their embedded definitions.
 
 func firstLine(s string) string {
 	first, _, _ := strings.Cut(s, "\n")

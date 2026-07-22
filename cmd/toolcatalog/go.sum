@@ -4,10 +4,12 @@ github.com/cplieger/atomicfile/v2 v2.3.0 h1:KxGZFHhQu6brUxadPLAk6FtliZtQz1Uek7BT
 github.com/cplieger/atomicfile/v2 v2.3.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
 github.com/cplieger/httpx/v3 v3.2.0 h1:vMqF0Bf06gkfJJMfZQNHnHyEnbtLo8DdnqZNLL0D+yE=
 github.com/cplieger/httpx/v3 v3.2.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
+github.com/cplieger/scheduler/v3 v3.0.0 h1:vka8qTY7q6yK6pOQyoi8YXB+4fW59RqUD1XaMNIx0ZU=
+github.com/cplieger/scheduler/v3 v3.0.0/go.mod h1:CHPRYuZ+C5HDH0hviAuXHMIOVD9WZyn39HIs0oeFA1k=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
-github.com/cplieger/toolbelt/v2 v2.0.4 h1:nnW3smXPzNQn/wwQxRZQVzAKg6ogHaT09XznKx/dmus=
-github.com/cplieger/toolbelt/v2 v2.0.4/go.mod h1:4Lh5Yan8VlLkGmFFKzX6eqVH/4OBNuSvOX4f3IRRV4Q=
+github.com/cplieger/toolbelt/v2 v2.1.0 h1:fkOnjaFHojT8QjwDGuY6uZKKzTVFSy1wtI/OkLaeggY=
+github.com/cplieger/toolbelt/v2 v2.1.0/go.mod h1:dvL/BnvjTkiHTPkOUQfX9XEj3JpsJPMXMcgFOy0F+QU=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hashicorp/go-version v1.9.0 h1:CeOIz6k+LoN3qX9Z0tyQrPtiB1DFYRPfCIBtaXPSCnA=
