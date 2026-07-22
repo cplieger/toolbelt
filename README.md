@@ -87,18 +87,18 @@ The catalog is data on its own cadence: with `Config.Refresh` set, the engine fe
 
 ### The catalog compiler
 
-`cmd/toolcatalog` (a nested module, so its registry-parsing dependencies never enter your `go.sum`) compiles the catalog and verifies it against a required tool set. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it daily and publishes the artifact consumers fetch; images run `verify` against their own required list at build:
+`cmd/toolcatalog` (an ordinary command in this module — the compiler and the engine share one version stream, so a catalog is always compiled under exactly the schema and verification semantics of the engine release that consumes it) compiles the catalog and verifies it against a required tool set. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it on every registry bump and publishes the artifact consumers fetch; images run `verify` against their own required list at build. Its TOML/YAML registry parsers never reach consumer builds or binaries — Go's module graph pruning keeps commands you don't import out of everything but a few `go.sum` metadata lines:
 
 ```sh
-go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
+go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
     -mise mise-checkout/registry -aqua aqua-registry-checkout/pkgs \
     -overlay overlays.json -refs mise=<ref>,aqua=<ref> -out tool-catalog.json
 
-go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
+go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
     verify -catalog tool-catalog.json -require required-tools.txt
 ```
 
-`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at publish or image build instead of in a boot job. The lane ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers agent CLIs probe for (`gopls`, `typescript-language-server`, `pyright`); it stamps a `generated` timestamp and embeds both registries' MIT license texts into the artifact, so the notice travels with every copy. Overlay merge semantics are the root module's `ApplyOverlay`, shared with the runtime refresh.
+`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at publish or image build instead of in a boot job. The command ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers agent CLIs probe for (`gopls`, `typescript-language-server`, `pyright`); it stamps a `generated` timestamp and embeds both registries' MIT license texts into the artifact, so the notice travels with every copy. Overlay merge semantics are the root module's `ApplyOverlay`, shared with the runtime refresh.
 
 ## API
 
@@ -139,9 +139,9 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
 | `GET {prefix}/catalog` | `CatalogInfo` | provenance + freshness of the live catalog |
 | `POST {prefix}/catalog/refresh` | `RefreshCatalog` | 202 `{job}`; 409 `not_configured` without `Config.Refresh` |
 
-### toolcatalog (nested module lane)
+### toolcatalog (catalog compiler command)
 
-`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>` — exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Released on its own lane (`cmd/toolcatalog/vX.Y.Z`).
+`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>` — exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Versioned with the module (`go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@vX.Y.Z`); the historical `cmd/toolcatalog/vX.Y.Z` lane tags (≤ v2.2.0) remain resolvable for old builds.
 
 ## Configuration reference
 
