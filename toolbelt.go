@@ -32,12 +32,15 @@
 package toolbelt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cplieger/ssrf/v3"
@@ -80,8 +83,26 @@ type Config struct {
 	ToolsDir string
 	// CatalogPath is the compiled catalog baked into the consumer's
 	// image (optional; missing = degraded search + named install errors
-	// for catalog-dependent entries).
+	// for catalog-dependent entries). With Refresh configured this is
+	// the first-boot/offline fallback: a valid refresh cache under
+	// ConfigDir takes precedence at construction.
 	CatalogPath string
+	// Refresh, when non-nil, enables runtime catalog refresh: the
+	// engine fetches the published catalog at Refresh.URL (on the
+	// engine-owned schedule when Interval is positive, and on demand
+	// via RefreshCatalog), verifies it against Refresh.Require, caches
+	// it under ConfigDir, and swaps it in atomically. The last good
+	// catalog stands on any failure. Nil keeps the baked catalog
+	// static for the process lifetime (the pre-refresh behavior).
+	Refresh *CatalogRefresh
+	// CatalogOverlays are consumer overlay JSON files (see
+	// ApplyOverlay) applied in order to every catalog the engine
+	// loads: the baked file, the refresh cache, and each fetched
+	// refresh. This keeps app-specific display patches independent of
+	// the published artifact. Entries added by a runtime overlay must
+	// embed any aqua definition inline (there is no registry checkout
+	// to resolve from at runtime).
+	CatalogOverlays []string
 	// System names image-baked binaries surfaced read-only in
 	// Inventory's System group (informational; not managed).
 	System []string
@@ -94,15 +115,29 @@ type Config struct {
 // every other process (a CLI, an agent) must go through the consumer's
 // server rather than linking toolbelt against the same data dirs.
 type Engine struct {
-	store    *store
-	catalog  *Catalog
-	queue    *jobQueue
-	inst     *installer
-	versions *versionResolver
-	log      *slog.Logger
-	toolsDir string
-	system   []string
+	store *store
+	// catalog is the live catalog, swapped atomically by the refresh
+	// job. Readers take a snapshot via cat() and never see a partial
+	// swap; a snapshot taken before a swap stays internally consistent
+	// for the duration of that operation.
+	catalog         atomic.Pointer[Catalog]
+	refresh         *CatalogRefresh
+	stopRefresh     context.CancelFunc
+	client          *http.Client
+	queue           *jobQueue
+	inst            *installer
+	versions        *versionResolver
+	log             *slog.Logger
+	catalogOverlays []string
+	system          []string
+	configDir       string
+	toolsDir        string
+	catState        catalogState
+	refreshWG       sync.WaitGroup
 }
+
+// cat returns the current catalog snapshot.
+func (e *Engine) cat() *Catalog { return e.catalog.Load() }
 
 // urlPolicyTransport validates every request URL (including redirect
 // hops re-entering RoundTrip) against the SSRF URL policy before the
@@ -117,6 +152,26 @@ func (t urlPolicyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, err
 	}
 	return t.next.RoundTrip(req)
+}
+
+// newEngineClient builds the engine's outbound HTTP client. Downloads
+// and version checks go to registry-defined public URLs: validate every
+// initial target and redirect before SafeTransport enforces public
+// resolved and connected IPs at the dial boundary. Extracted so the
+// composition (URL policy + redirect policy + hardened transport) has
+// offline test coverage; the dial-time behavior stays covered by the
+// ssrf library's own suite.
+func newEngineClient() *http.Client {
+	return &http.Client{
+		Transport: urlPolicyTransport{
+			next:   ssrf.SafeTransport(ssrf.WithAllowedPorts(443)),
+			policy: ssrf.NewURLPolicy(),
+		},
+		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
+		// Per-attempt bound: retry loops (httpx.GetBytes / httpx.Do) sit
+		// OUTSIDE client.Do, so this caps one attempt, not the sequence.
+		Timeout: 15 * time.Minute,
+	}
 }
 
 // New constructs and starts an Engine: initializes the manifest files
@@ -134,38 +189,37 @@ func New(cfg *Config) (*Engine, error) {
 	if err := st.initFiles(); err != nil {
 		return nil, fmt.Errorf("toolbelt: init manifest: %w", err)
 	}
-	// Downloads and version checks go to registry-defined public URLs.
-	// Validate every initial target and redirect before SafeTransport
-	// enforces public resolved and connected IPs at the dial boundary.
-	policy := ssrf.NewURLPolicy()
-	client := &http.Client{
-		Transport: urlPolicyTransport{
-			next:   ssrf.SafeTransport(ssrf.WithAllowedPorts(443)),
-			policy: policy,
-		},
-		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
-		// Per-attempt bound: retry loops (httpx.GetBytes / httpx.Do) sit
-		// OUTSIDE client.Do, so this caps one attempt, not the sequence.
-		Timeout: 15 * time.Minute,
-	}
+	client := newEngineClient()
 	e := &Engine{
-		store:    st,
-		catalog:  loadCatalog(cfg.CatalogPath, log),
-		versions: newVersionResolver(client),
-		log:      log,
-		toolsDir: cfg.ToolsDir,
-		system:   cfg.System,
+		store:           st,
+		refresh:         cfg.Refresh,
+		catalogOverlays: cfg.CatalogOverlays,
+		client:          client,
+		versions:        newVersionResolver(client),
+		log:             log,
+		configDir:       cfg.ConfigDir,
+		toolsDir:        cfg.ToolsDir,
+		system:          cfg.System,
 	}
+	e.initCatalog(cfg)
 	e.queue = newJobQueue(cfg.OnJobChanged, cfg.OnJobOutput, log, e.executeJob)
 	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, output: func(string) {}}
 	if err := os.MkdirAll(filepath.Join(cfg.ToolsDir, "bin"), 0o755); err != nil {
 		return nil, err
 	}
+	e.startCatalogSchedule()
 	return e, nil
 }
 
-// Close stops the job worker (cancelling any running job).
-func (e *Engine) Close() { e.queue.Close() }
+// Close stops the catalog-refresh schedule, then the job worker
+// (cancelling any running job).
+func (e *Engine) Close() {
+	if e.stopRefresh != nil {
+		e.stopRefresh()
+	}
+	e.refreshWG.Wait()
+	e.queue.Close()
+}
 
 // DefaultSeed returns the shared starter manifest: the officially
 // supported language servers for Go, TypeScript, and Python plus the

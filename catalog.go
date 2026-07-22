@@ -39,13 +39,46 @@ type CatalogEntry struct {
 type Catalog struct {
 	// Refs records the upstream registry refs this catalog was
 	// compiled from (informational).
-	Refs    map[string]string       `json:"refs,omitempty"`
-	Entries map[string]CatalogEntry `json:"entries"`
+	Refs map[string]string `json:"refs,omitempty"`
+	// Licenses carries the upstream registries' license texts, keyed by
+	// registry name (mise, aqua-registry). The compiled catalog embeds
+	// data derived from both (MIT), and MIT requires the copyright +
+	// permission notice to travel with copies — embedding the texts
+	// makes every copy (baked, cached, fetched) self-contained.
+	Licenses map[string]string       `json:"licenses,omitempty"`
+	Entries  map[string]CatalogEntry `json:"entries"`
 	// aliases indexes alias -> entry name, built once at load so
 	// Lookup doesn't scan ~700 entries per aliased miss on hot
 	// inventory paths. Nil (a literal-constructed catalog) falls back
 	// to the linear scan.
 	aliases map[string]string
+	// Generated is the compile timestamp (RFC 3339 UTC), stamped by
+	// cmd/toolcatalog (informational).
+	Generated string `json:"generated,omitempty"`
+}
+
+// parseCatalog unmarshals a compiled catalog document and builds the
+// alias index. Nil entries normalize to an empty map (a degraded but
+// usable catalog); a syntactically broken document errors.
+func parseCatalog(data []byte) (*Catalog, error) {
+	var c Catalog
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, err
+	}
+	if c.Entries == nil {
+		c.Entries = map[string]CatalogEntry{}
+	}
+	c.aliases = buildAliasIndex(c.Entries)
+	return &c, nil
+}
+
+// loadCatalogFile reads and parses one compiled catalog file.
+func loadCatalogFile(path string) (*Catalog, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return parseCatalog(data)
 }
 
 // loadCatalog reads the compiled tool catalog baked into the image. A
@@ -57,22 +90,13 @@ func loadCatalog(path string, log *slog.Logger) *Catalog {
 	if path == "" {
 		return empty
 	}
-	data, err := os.ReadFile(path)
+	c, err := loadCatalogFile(path)
 	if err != nil {
 		log.Warn("toolbelt: catalog unavailable", "path", path, "error", err)
 		return empty
 	}
-	var c Catalog
-	if err := json.Unmarshal(data, &c); err != nil {
-		log.Error("toolbelt: catalog unreadable", "path", path, "error", err)
-		return empty
-	}
-	if c.Entries == nil {
-		c.Entries = map[string]CatalogEntry{}
-	}
-	c.aliases = buildAliasIndex(c.Entries)
 	log.Info("toolbelt: catalog loaded", "entries", len(c.Entries))
-	return &c
+	return c
 }
 
 // buildAliasIndex maps every alias to its entry name.
@@ -185,6 +209,23 @@ func (c *Catalog) Featured() []CatalogEntry {
 	return out
 }
 
+// ParseRequireList extracts tool names from a requirements list: one
+// name per line, # comments and blank lines ignored — the shape
+// required-tools.txt files use across the fleet (cmd/toolcatalog verify
+// reads the same format). Shared here so consumers embedding their list
+// for CatalogRefresh.Require parse it identically to the build gate.
+func ParseRequireList(raw string) []string {
+	var names []string
+	for line := range strings.SplitSeq(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		names = append(names, line)
+	}
+	return names
+}
+
 // VerifyCatalog checks that every required name resolves in the catalog
 // to install knowledge the engine can act on, offline: a non-empty
 // source; for aqua sources an embedded definition that parses its
@@ -231,4 +272,95 @@ func verifyEntry(c *Catalog, name string) error {
 		}
 	}
 	return nil
+}
+
+// overlayDoc is an overlay document: entries keyed by tool name. An
+// entry with a source replaces/creates the whole catalog entry; an
+// entry without one patches display fields (featured, lsp, description,
+// requires, probe) onto the compiled entry.
+type overlayDoc struct {
+	Entries map[string]CatalogEntry `json:"entries"`
+}
+
+// ApplyOverlay merges one overlay JSON document into the catalog.
+// Shared by cmd/toolcatalog (compile time: base + app overlays) and the
+// engine's catalog load/refresh pipeline (runtime: consumer overlay
+// files re-applied over every fetched catalog, so display patches
+// survive refreshes).
+//
+// resolveAqua, when non-nil, loads an aqua install definition for a
+// source-bearing `aqua:` entry that does not embed one — the compile
+// case, where cmd/toolcatalog passes a registry-checkout loader. At
+// runtime there is no registry checkout: pass nil, and source-bearing
+// aqua entries must carry their definition inline (display-field
+// patches, the common runtime overlay, need no definition at all).
+func ApplyOverlay(c *Catalog, data []byte, resolveAqua func(ref string) (*AquaPackage, error)) error {
+	var ov overlayDoc
+	if err := json.Unmarshal(data, &ov); err != nil {
+		return err
+	}
+	return applyOverlayDoc(c, ov, resolveAqua)
+}
+
+// applyOverlayDoc is ApplyOverlay's core over a parsed document.
+func applyOverlayDoc(c *Catalog, ov overlayDoc, resolveAqua func(ref string) (*AquaPackage, error)) error {
+	for name := range ov.Entries {
+		patch := ov.Entries[name]
+		if patch.Source == "" {
+			cur, ok := c.Entries[name]
+			if !ok {
+				return fmt.Errorf("overlay patches unknown tool %q", name)
+			}
+			mergeOverlayEntry(&cur, &patch)
+			c.Entries[name] = cur
+			continue
+		}
+		if err := overlayReplaceEntry(name, &patch, resolveAqua); err != nil {
+			return err
+		}
+		c.Entries[name] = patch
+	}
+	// Overlay entries may add names and aliases; rebuild the index.
+	c.aliases = buildAliasIndex(c.Entries)
+	return nil
+}
+
+// overlayReplaceEntry finalizes a source-bearing overlay entry in
+// place: stamps the name and resolves a bare aqua: source into an
+// embedded definition via the hook (compile time) or refuses (runtime,
+// nil hook).
+func overlayReplaceEntry(name string, patch *CatalogEntry, resolveAqua func(ref string) (*AquaPackage, error)) error {
+	patch.Name = name
+	ref, isAqua := strings.CutPrefix(patch.Source, "aqua:")
+	if !isAqua || patch.Aqua != nil {
+		return nil
+	}
+	if resolveAqua == nil {
+		return fmt.Errorf("overlay %q: aqua source without an embedded definition", name)
+	}
+	aq, err := resolveAqua(ref)
+	if err != nil {
+		return fmt.Errorf("overlay %q: %w", name, err)
+	}
+	patch.Aqua = aq
+	return nil
+}
+
+// mergeOverlayEntry patches display fields of a compiled entry.
+func mergeOverlayEntry(cur, patch *CatalogEntry) {
+	if patch.Featured {
+		cur.Featured = true
+	}
+	if patch.Lsp {
+		cur.Lsp = true
+	}
+	if patch.Description != "" {
+		cur.Description = patch.Description
+	}
+	if patch.Requires != nil {
+		cur.Requires = patch.Requires
+	}
+	if patch.Probe != "" {
+		cur.Probe = patch.Probe
+	}
 }

@@ -2,6 +2,8 @@ github.com/cplieger/atomicfile/v2 v2.3.0 h1:KxGZFHhQu6brUxadPLAk6FtliZtQz1Uek7BT
 github.com/cplieger/atomicfile/v2 v2.3.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
 github.com/cplieger/httpx/v3 v3.2.0 h1:vMqF0Bf06gkfJJMfZQNHnHyEnbtLo8DdnqZNLL0D+yE=
 github.com/cplieger/httpx/v3 v3.2.0/go.mod h1:aITrLHd0nPnJ5+Gu76xhRyOChC0KZEBCwslCELPHk+s=
+github.com/cplieger/scheduler/v3 v3.0.0 h1:vka8qTY7q6yK6pOQyoi8YXB+4fW59RqUD1XaMNIx0ZU=
+github.com/cplieger/scheduler/v3 v3.0.0/go.mod h1:CHPRYuZ+C5HDH0hviAuXHMIOVD9WZyn39HIs0oeFA1k=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
 github.com/cplieger/webhttp v1.10.0 h1:OsrKM1AR9KqY9eBxzrRnIsLGTaa/coGcA/sZHXGOgQM=

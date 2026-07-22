@@ -15,11 +15,12 @@ const (
 
 // Job kinds.
 const (
-	JobKindInstall   = "install"
-	JobKindUninstall = "uninstall" // Remove: footprint removed, entry deleted
-	JobKindDisable   = "disable"   // Patch disabled:true: footprint removed, entry kept
-	JobKindUpdate    = "update"
-	JobKindReconcile = "reconcile" // converge disk to intent (install missing + disable extras)
+	JobKindInstall        = "install"
+	JobKindUninstall      = "uninstall" // Remove: footprint removed, entry deleted
+	JobKindDisable        = "disable"   // Patch disabled:true: footprint removed, entry kept
+	JobKindUpdate         = "update"
+	JobKindReconcile      = "reconcile"       // converge disk to intent (install missing + disable extras)
+	JobKindCatalogRefresh = "catalog-refresh" // fetch + verify + swap the published catalog
 )
 
 // Job is one queued/running/finished unit of engine work.
@@ -86,3 +87,30 @@ const (
 	// unpinned entries (enqueued as a separate update job).
 	ReconcileFull
 )
+
+// CatalogInfo reports the live catalog's provenance and freshness (the
+// Engine.CatalogInfo return and the httpapi GET catalog body).
+type CatalogInfo struct {
+	// Refs are the upstream registry refs the catalog was compiled
+	// from; Generated its compile timestamp (RFC 3339 UTC). Both are
+	// informational pass-throughs of the catalog document.
+	Refs      map[string]string `json:"refs,omitempty"`
+	Generated string            `json:"generated,omitempty"`
+	// Source is where the live catalog came from: baked (the image
+	// file), cached (the refresh cache, reloaded at boot), remote
+	// (fetched this process lifetime), or none (degraded, no catalog).
+	Source string `json:"source"`
+	// URL is the configured refresh source (empty when refresh is not
+	// configured).
+	URL string `json:"url,omitempty"`
+	// LastError is the most recent refresh failure ("" after a
+	// successful refresh).
+	LastError string `json:"last_error,omitempty"`
+	Entries   int    `json:"entries"`
+	// FetchedAt is the last successful refresh (Unix milliseconds; 0
+	// before the first).
+	FetchedAt int64 `json:"fetched_at,omitempty"`
+	// Scheduled reports whether the engine-owned background refresh
+	// loop is running.
+	Scheduled bool `json:"scheduled"`
+}

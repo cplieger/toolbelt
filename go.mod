@@ -11,3 +11,5 @@ require (
 	github.com/hashicorp/go-version v1.9.0
 	golang.org/x/mod v0.38.0
 )
+
+require github.com/cplieger/scheduler/v3 v3.0.0
