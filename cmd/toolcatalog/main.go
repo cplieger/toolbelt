@@ -15,7 +15,7 @@
 // Runs at image build time (the Dockerfile downloads both registry
 // tarballs at Renovate-pinned refs):
 //
-//	go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@<lane-tag> \
+//	go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@<tag> \
 //	    -mise <mise-repo>/registry \
 //	    -aqua <aqua-registry-repo>/pkgs \
 //	    -overlay overlays.json [-overlay app-overlays.json] \
@@ -29,13 +29,13 @@
 // an install command). A gap exits non-zero so the image build fails
 // instead of a boot job:
 //
-//	go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@<lane-tag> \
+//	go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@<tag> \
 //	    verify -catalog tool-catalog.json -require required-tools.txt
 //
-// This directory is a nested Go module (its own release lane) so the
-// registry-parsing dependencies (TOML, YAML) never enter a consumer
-// app's go.sum; it depends on the root module for the catalog and aqua
-// schema types.
+// An ordinary command in the root module: it shares the engine's
+// catalog and aqua schema types by construction (one version stream, no
+// compiler/engine skew), and Go's module graph pruning keeps its
+// registry-parsing dependencies (TOML, YAML) out of consumer builds.
 package main
 
 import (

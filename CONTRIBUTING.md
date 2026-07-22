@@ -69,10 +69,15 @@ Flat root package: `toolbelt.go` (Config, New, DefaultSeed),
 resolution via httpx), `aqua.go` (registry-definition evaluator),
 `extract.go` (archive handling), `catalog.go` (reader + VerifyCatalog),
 `wire.go` (result shapes). `httpapi/` is the REST projection built on
-`webhttp` primitives. `cmd/toolcatalog/` is a nested Go module (its own
-release lane, tags `cmd/toolcatalog/vX.Y.Z`) so the TOML/YAML registry
-parsers never reach a consumer's `go.sum`; it depends on the root module
-for the schema types and embeds the base overlay set.
+`webhttp` primitives. `cmd/toolcatalog/` is the catalog compiler command
+(package main in this module — it shares the root's schema types and
+verification semantics by construction and embeds the base overlay set).
+Its TOML/YAML registry parsers stay out of consumer builds via module
+graph pruning; they cost consumers a few `go.sum` metadata lines only.
+It was a nested module with its own release lane until v2.2.x — folded
+because the lane's root-first-then-lane release ordering and its
+self-referential dependency bumps outweighed the go.sum hygiene, and a
+single version stream removes compiler/engine schema skew entirely.
 
 ## Local development
 
@@ -85,10 +90,9 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 ```
 
-The `cmd/toolcatalog` lane builds independently (`cd cmd/toolcatalog &&
-go build ./...`); a `go.work` covering both modules makes cross-module
-edits pleasant locally (gitignored — create your own with a versioned
-replace: `replace github.com/cplieger/toolbelt v<latest> => .`).
+`cmd/toolcatalog` is part of this module — `go build ./...` covers it,
+and `go run ./cmd/toolcatalog` runs your working tree's compiler
+directly (no go.work, no cross-module setup).
 
 ### Linting and formatting
 
@@ -135,8 +139,8 @@ the file to the unit:
 When adding an engine mutation, cover: the happy-path job, the
 queue-full rollback (the manifest must never claim state no job will
 realize), and the sentinel error mapping in `httpapi`. The
-`cmd/toolcatalog` lane is exercised against real registry checkouts in
-its consumers' image builds (the `verify` gate), not unit-mocked here.
+`cmd/toolcatalog` compiler is exercised against real registry checkouts
+in its consumers' image builds (the `verify` gate), not unit-mocked here.
 
 ## Commits and PRs
 
@@ -145,8 +149,8 @@ account uses [Conventional Commits](https://www.conventionalcommits.org/)
 parsed by git-cliff (`cliff.toml`), so the commit type drives the version
 bump: `feat:`, `fix:`, `sec:`, and `chore:`/`docs:`/`refactor:`/`test:`
 (no release). Write the subject as the changelog line a consumer would
-read. Commits touching only `cmd/toolcatalog/` release on the lane's own
-cadence, not the root module's.
+read. `cmd/toolcatalog` commits version with the module like any other
+package (use the `feat(toolcatalog):`/`fix(toolcatalog):` scope).
 
 ## Conduct & security
 
