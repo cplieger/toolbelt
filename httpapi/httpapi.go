@@ -85,6 +85,8 @@ func Handler(e *toolbelt.Engine, prefix string) http.Handler {
 	mux.HandleFunc("GET "+prefix, func(w http.ResponseWriter, r *http.Request) { getInventory(e, w, r) })
 	mux.HandleFunc("GET "+prefix+"/search", func(w http.ResponseWriter, r *http.Request) { getSearch(e, w, r) })
 	mux.HandleFunc("GET "+prefix+"/jobs", func(w http.ResponseWriter, _ *http.Request) { getJobs(e, w) })
+	mux.HandleFunc("GET "+prefix+"/catalog", func(w http.ResponseWriter, _ *http.Request) { getCatalog(e, w) })
+	mux.HandleFunc("POST "+prefix+"/catalog/refresh", func(w http.ResponseWriter, r *http.Request) { postCatalogRefresh(e, w, r) })
 	mux.HandleFunc("POST "+prefix, func(w http.ResponseWriter, r *http.Request) { postAdd(e, w, r) })
 	mux.HandleFunc("POST "+prefix+"/update", func(w http.ResponseWriter, r *http.Request) { postUpdate(e, w, r) })
 	mux.HandleFunc("PATCH "+prefix+"/{name}", func(w http.ResponseWriter, r *http.Request) { patchTool(e, w, r) })
@@ -125,6 +127,19 @@ func getJobs(e *toolbelt.Engine, w http.ResponseWriter) {
 		recent = []*toolbelt.Job{}
 	}
 	webhttp.WriteJSON(w, JobsResponse{Active: active, Recent: recent})
+}
+
+func getCatalog(e *toolbelt.Engine, w http.ResponseWriter) {
+	webhttp.WriteJSON(w, e.CatalogInfo())
+}
+
+func postCatalogRefresh(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+	job, err := e.RefreshCatalog()
+	if err != nil {
+		writeEngineError(w, r, err)
+		return
+	}
+	webhttp.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
 func postAdd(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
@@ -214,6 +229,8 @@ func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 		webhttp.WriteError(w, r, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, toolbelt.ErrDisabled):
 		webhttp.WriteError(w, r, http.StatusConflict, "disabled", err.Error())
+	case errors.Is(err, toolbelt.ErrRefreshNotConfigured):
+		webhttp.WriteError(w, r, http.StatusConflict, "not_configured", err.Error())
 	default:
 		webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 	}

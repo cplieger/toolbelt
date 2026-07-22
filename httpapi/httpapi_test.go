@@ -202,3 +202,63 @@ func TestRoutes_SearchAndBadBody(t *testing.T) {
 		t.Fatalf("bad body = %d", code)
 	}
 }
+
+// newRefreshServer is newServer with catalog refresh configured (an
+// unreachable URL: route-level tests need the enqueue, not the fetch).
+func newRefreshServer(t *testing.T) (*toolbelt.Engine, *httptest.Server) {
+	t.Helper()
+	dir := t.TempDir()
+	e, err := toolbelt.New(&toolbelt.Config{
+		ConfigDir: dir,
+		ToolsDir:  dir + "/tools",
+		Logger:    slog.Default(),
+		Refresh:   &toolbelt.CatalogRefresh{URL: "https://catalog.invalid/tool-catalog.json"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	h := Handler(e, "/api/tools")
+	mux := http.NewServeMux()
+	mux.Handle("/api/tools", h)
+	mux.Handle("/api/tools/", h)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return e, srv
+}
+
+func TestCatalogInfoRoute(t *testing.T) {
+	_, srv := newServer(t)
+	var info toolbelt.CatalogInfo
+	if code := call(t, srv, http.MethodGet, "/api/tools/catalog", "", &info); code != http.StatusOK {
+		t.Fatalf("GET catalog = %d", code)
+	}
+	if info.Source != toolbelt.CatalogSourceNone || info.Scheduled || info.Entries != 0 {
+		t.Errorf("info = %+v", info)
+	}
+}
+
+func TestCatalogRefreshRoute(t *testing.T) {
+	t.Run("unconfigured refuses with not_configured", func(t *testing.T) {
+		_, srv := newServer(t)
+		var errBody struct {
+			Code string `json:"code"`
+		}
+		code := call(t, srv, http.MethodPost, "/api/tools/catalog/refresh", "", &errBody)
+		if code != http.StatusConflict || errBody.Code != "not_configured" {
+			t.Errorf("POST refresh = %d code=%q, want 409 not_configured", code, errBody.Code)
+		}
+	})
+
+	t.Run("configured returns 202 with the job", func(t *testing.T) {
+		_, srv := newRefreshServer(t)
+		var jr JobResponse
+		code := call(t, srv, http.MethodPost, "/api/tools/catalog/refresh", "", &jr)
+		if code != http.StatusAccepted || jr.Job == nil {
+			t.Fatalf("POST refresh = %d job=%v, want 202 with job", code, jr.Job)
+		}
+		if jr.Job.Kind != toolbelt.JobKindCatalogRefresh {
+			t.Errorf("job kind = %q", jr.Job.Kind)
+		}
+	})
+}

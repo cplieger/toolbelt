@@ -48,6 +48,15 @@ toggles, a loopback REST projection, a boot gate on `Reconcile`).
   runs under the store mutex, and files are re-read per operation so
   out-of-band hand edits are picked up. Never link the library from a
   second process against the same data dir.
+- **A fetched catalog never degrades the engine.** The runtime refresh
+  (`catalogrefresh.go`) accepts a fetched catalog only after the full
+  pipeline passes — parse, consumer overlays, the structural entry
+  floor, and the consumer's `Require` verification; any failure keeps
+  the current catalog and fails only the refresh job. The in-memory
+  swap is an `atomic.Pointer` store; readers snapshot via `cat()` and
+  never mix two catalogs mid-operation. The cache file persists the
+  RAW fetched bytes (overlays re-apply at load), so the cache stays a
+  faithful copy of the published artifact.
 - **Job callbacks must not block.** `OnJobChanged` fires under the queue
   lock so transitions arrive in strict order; consumers fan out through
   their own non-blocking buffer (an SSE ring, a channel).

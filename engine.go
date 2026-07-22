@@ -95,7 +95,7 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool) 
 		Installing:       installing,
 		LastError:        s.LastError,
 	}
-	if cat, ok := e.catalog.Lookup(name); ok {
+	if cat, ok := e.cat().Lookup(name); ok {
 		v.Lsp = cat.Lsp
 	}
 	if latest := e.versions.Cached(t.Source); latest != "" && latest != t.Version {
@@ -151,7 +151,7 @@ func (e *Engine) systemTools() []SystemTool {
 // Search queries the catalog (empty query = featured set), hiding
 // entries already in the manifest.
 func (e *Engine) Search(query string) []CatalogEntry {
-	hits := e.catalog.Search(query)
+	hits := e.cat().Search(query)
 	m, err := e.store.Manifest()
 	if err != nil {
 		e.log.Warn("toolbelt: search: manifest unreadable, results unfiltered", "error", err)
@@ -254,7 +254,7 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		Uninstall:   strings.TrimSpace(req.Uninstall),
 		Probe:       strings.TrimSpace(req.Probe),
 	}
-	if cat, ok := e.catalog.Lookup(name); ok {
+	if cat, ok := e.cat().Lookup(name); ok {
 		mergeCatalogDefaults(&t, &cat)
 	}
 	if t.Disabled {
@@ -701,6 +701,11 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 		return e.runUpdate(ctx, j.names, output)
 	case JobKindReconcile:
 		return e.runReconcile(ctx, output)
+	case JobKindCatalogRefresh:
+		// No hydration first: the refresh REPLACES the knowledge
+		// hydration reads. Sparse entries pick up the fresh catalog on
+		// their next install/update/reconcile job.
+		return e.runCatalogRefresh(ctx, output)
 	default:
 		return fmt.Errorf("unknown job kind %q", j.kind)
 	}
@@ -720,7 +725,7 @@ func (e *Engine) hydrateStatic() error {
 			if t.Source != "" {
 				continue
 			}
-			cat, ok := e.catalog.Lookup(name)
+			cat, ok := e.cat().Lookup(name)
 			if !ok {
 				continue
 			}
@@ -1153,9 +1158,10 @@ func (e *Engine) aquaDef(source string) *AquaPackage {
 	if kind != SourceAqua {
 		return nil
 	}
-	for k := range e.catalog.Entries {
-		if e.catalog.Entries[k].Source == source && e.catalog.Entries[k].Aqua != nil {
-			return e.catalog.Entries[k].Aqua
+	c := e.cat()
+	for k := range c.Entries {
+		if c.Entries[k].Source == source && c.Entries[k].Aqua != nil {
+			return c.Entries[k].Aqua
 		}
 	}
 	// Fallback: synthesize a plain github_release definition so an

@@ -21,7 +21,7 @@ Three data artifacts, all on the consumer's persistent volume:
 | --- | --- | --- |
 | `tools.json` | user intent (engine-written, hand-editable) | which tools exist, versions, `pin`, `disabled` |
 | `tools-state.json` | engine | what is actually installed, owned bin names, last error |
-| `tool-catalog.json` | image build (`cmd/toolcatalog`) | install knowledge: sources, artifact templates, checksum locations, dependencies |
+| `tool-catalog.json` | image build (baked fallback) + runtime refresh (`tool-catalog.cached.json` under `ConfigDir`) | install knowledge: sources, artifact templates, checksum locations, dependencies, registry license texts |
 
 Tool lifecycle is a three-state machine the reconciler enforces in both directions:
 
@@ -41,8 +41,13 @@ Sources: `aqua:owner/repo` (binary artifacts with upstream checksum verification
 engine, err := toolbelt.New(&toolbelt.Config{
     ConfigDir:   "/config",                        // tools.json + tools-state.json
     ToolsDir:    "/config/tools",                  // bin/, opt/, npm/, python/
-    CatalogPath: "/opt/app/tool-catalog.json",     // compiled at image build
+    CatalogPath: "/opt/app/tool-catalog.json",     // baked fallback (image build)
     Seed:        toolbelt.DefaultSeed(),           // LSP templates, disabled
+    Refresh: &toolbelt.CatalogRefresh{             // optional: runtime catalog refresh
+        URL:      "https://example.com/tool-catalog.json",
+        Interval: 24 * time.Hour,                  // 0 = on-demand only
+        Require:  []string{"gopls", "gh"},         // verified before every swap
+    },
 })
 if err != nil {
     log.Fatal(err)
@@ -74,11 +79,15 @@ mux.Handle("/api/tools", h)
 mux.Handle("/api/tools/", h)
 ```
 
-Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`has_dependents` names the blockers, `disabled` marks install-on-a-template). Stream job progress via the `Config` callbacks or poll `GET .../jobs`.
+Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`has_dependents` names the blockers, `disabled` marks install-on-a-template, `not_configured` marks a catalog refresh without `Config.Refresh`). Stream job progress via the `Config` callbacks or poll `GET .../jobs`.
+
+### Runtime catalog refresh
+
+The catalog is data on its own cadence: with `Config.Refresh` set, the engine fetches the published catalog at construction and on the configured interval (and on demand via `RefreshCatalog` or the httpapi route), verifies it — a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify` — re-applies any `Config.CatalogOverlays` display patches, persists the raw copy under `ConfigDir` (`tool-catalog.cached.json`, preferred over the baked file at the next boot), and swaps it in atomically. The last good catalog stands on any failure: a bad fetch degrades to yesterday's knowledge, never to a broken engine. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
 
 ### The catalog compiler
 
-`cmd/toolcatalog` (a nested module, so its registry-parsing dependencies never enter your `go.sum`) compiles the catalog at image build and verifies it against your required tool set:
+`cmd/toolcatalog` (a nested module, so its registry-parsing dependencies never enter your `go.sum`) compiles the catalog and verifies it against a required tool set. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it daily and publishes the artifact consumers fetch; images run `verify` against their own required list at build:
 
 ```sh
 go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
@@ -89,7 +98,7 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
     verify -catalog tool-catalog.json -require required-tools.txt
 ```
 
-`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at image build instead of in a boot job. The lane ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers agent CLIs probe for (`gopls`, `typescript-language-server`, `pyright`).
+`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at publish or image build instead of in a boot job. The lane ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers agent CLIs probe for (`gopls`, `typescript-language-server`, `pyright`); it stamps a `generated` timestamp and embeds both registries' MIT license texts into the artifact, so the notice travels with every copy. Overlay merge semantics are the root module's `ApplyOverlay`, shared with the runtime refresh.
 
 ## API
 
@@ -107,6 +116,8 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
 - `Wait(ctx, jobID) (*Job, error)` — block until a job settles (boot gates, synchronous flows).
 - `EnsureInstalled(ctx, name) error` — synchronous "a product action needs this binary now": creates from the catalog, enables a disabled template, installs, waits.
 - `Jobs() (active *Job, recent []*Job)` / `CancelJob(id) bool` — queue introspection and cancellation.
+- `RefreshCatalog() (*Job, error)` — enqueue an on-demand catalog refresh (`ErrRefreshNotConfigured` without `Config.Refresh`).
+- `CatalogInfo() CatalogInfo` — the live catalog's provenance: refs, generation timestamp, entry count, source, last refresh outcome, schedule state.
 
 ### Types and errors
 
@@ -125,6 +136,8 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
 | `DELETE {prefix}/{name}?force=1` | `Remove` | 202 `{job, dependents}`; 409 without force |
 | `GET {prefix}/jobs` | `Jobs` | active job carries the output tail |
 | `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | |
+| `GET {prefix}/catalog` | `CatalogInfo` | provenance + freshness of the live catalog |
+| `POST {prefix}/catalog/refresh` | `RefreshCatalog` | 202 `{job}`; 409 `not_configured` without `Config.Refresh` |
 
 ### toolcatalog (nested module lane)
 
@@ -136,7 +149,9 @@ go run github.com/cplieger/toolbelt/cmd/toolcatalog/v2@latest \
 | --- | --- |
 | `ConfigDir` | directory holding `tools.json` + `tools-state.json` (required) |
 | `ToolsDir` | install tree root: `bin/` (the single PATH dir), `opt/<name>/<version>/`, `npm/`, `python/` (required) |
-| `CatalogPath` | compiled catalog path; missing degrades to manual/ecosystem sources with named errors for catalog-dependent entries |
+| `CatalogPath` | baked catalog path (the first-boot/offline fallback with `Refresh` set); missing degrades to manual/ecosystem sources with named errors for catalog-dependent entries |
+| `Refresh` | runtime catalog refresh: the published-catalog URL, the schedule interval (0 = on-demand only), and the required names verified before every swap; nil keeps the baked catalog static |
+| `CatalogOverlays` | consumer overlay files re-applied to every loaded catalog (display patches survive refreshes); entries they add must embed any aqua definition inline |
 | `Seed` | manifest written when none exists (fresh volume or retired-format backup); nil seeds empty |
 | `System` | image-baked binaries reported read-only in `Inventory` |
 | `OnJobChanged` / `OnJobOutput` | job lifecycle + coalesced output callbacks (must not block); nil is silent |

@@ -45,12 +45,14 @@ func newTestEngineClient(t *testing.T, cat *Catalog, client *http.Client, seed *
 		t.Fatal(err)
 	}
 	e := &Engine{
-		store:    st,
-		catalog:  cat,
-		versions: newVersionResolver(client),
-		log:      slog.Default(),
-		toolsDir: toolsDir,
+		store:     st,
+		client:    client,
+		versions:  newVersionResolver(client),
+		log:       slog.Default(),
+		configDir: dir,
+		toolsDir:  toolsDir,
 	}
+	e.catalog.Store(cat)
 	e.inst = &installer{toolsDir: toolsDir, client: client, output: func(string) {}}
 	e.queue = newJobQueue(nil, nil, slog.Default(), e.executeJob)
 	t.Cleanup(e.Close)
