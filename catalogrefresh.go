@@ -42,6 +42,41 @@ type CatalogRefresh struct {
 	Interval time.Duration
 }
 
+// DefaultCatalogURL is the published compiled catalog's stable
+// latest-download URL (the cplieger/tool-catalog release artifact).
+// The consumer contract lives here so every app defaults to the same
+// publisher and a publisher move is a one-line change; apps expose an
+// env override for forks and mirrors.
+const DefaultCatalogURL = "https://github.com/cplieger/tool-catalog/releases/latest/download/tool-catalog.json"
+
+// Canonical catalog refresh cadence policy, shared by every consumer.
+// The published artifact moves at most a few times per day, so the
+// default matches that cadence and the floor keeps an interval typo
+// from hammering the publisher; the ceiling keeps a fat-fingered unit
+// from silently freezing refreshes for months.
+const (
+	DefaultCatalogRefresh = 24 * time.Hour
+	MinCatalogRefresh     = time.Hour
+	MaxCatalogRefresh     = 30 * 24 * time.Hour
+)
+
+// ParseCatalogRefresh interprets a consumer's refresh env value into
+// the CatalogRefresh.Interval duration under the canonical policy:
+// empty or unparseable falls back to DefaultCatalogRefresh, positive
+// durations clamp to [MinCatalogRefresh, MaxCatalogRefresh], and
+// "off"/"disabled"/"0" return zero (schedule disabled; on-demand
+// refresh stays available). name is the env variable named in
+// fallback and clamp warnings.
+func ParseCatalogRefresh(raw, name string) time.Duration {
+	sched := scheduler.ParseInterval(raw, DefaultCatalogRefresh,
+		scheduler.WithName(name),
+		scheduler.WithBounds(MinCatalogRefresh, MaxCatalogRefresh))
+	if sched.Mode != scheduler.ModeBuiltin {
+		return 0
+	}
+	return sched.Interval
+}
+
 // Catalog sources reported by CatalogInfo.
 const (
 	CatalogSourceNone   = "none"   // no catalog available (degraded)

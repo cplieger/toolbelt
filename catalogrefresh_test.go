@@ -695,3 +695,26 @@ func TestParseRequireList(t *testing.T) {
 		t.Error("comment-only list should parse to nil")
 	}
 }
+
+func TestParseCatalogRefresh(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", DefaultCatalogRefresh},       // unset env -> canonical default
+		{"off", 0},                        // sentinel -> schedule disabled
+		{"OFF", 0},                        // sentinels are case-insensitive
+		{"disabled", 0},                   // second sentinel
+		{"0", 0},                          // zero duration -> disabled
+		{"12h", 12 * time.Hour},           // explicit cadence passes through
+		{"10m", MinCatalogRefresh},        // sub-floor typo clamps up
+		{"2400h", MaxCatalogRefresh},      // above-ceiling typo clamps down
+		{"weekly", DefaultCatalogRefresh}, // unparseable -> default, not off
+		{"-24h", DefaultCatalogRefresh},   // negative typo -> default, not off
+	}
+	for _, tc := range cases {
+		if got := ParseCatalogRefresh(tc.raw, "TEST_CATALOG_REFRESH"); got != tc.want {
+			t.Errorf("ParseCatalogRefresh(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
