@@ -35,10 +35,11 @@ type CatalogRefresh struct {
 	// skips the name check (the structural floor still applies).
 	Require []string
 	// Interval between background refreshes. Positive starts the
-	// engine-owned schedule (one refresh fired at construction, then
-	// every interval with jitter); zero disables the schedule while
-	// keeping on-demand refresh (RefreshCatalog / the httpapi route)
-	// available.
+	// engine-owned schedule (one refresh per interval, with jitter;
+	// deliberately no fire-on-start — consumers trigger the boot
+	// fetch via RefreshCatalog once their boot work is enqueued);
+	// zero disables the schedule while keeping on-demand refresh
+	// (RefreshCatalog / the httpapi route) available.
 	Interval time.Duration
 }
 
