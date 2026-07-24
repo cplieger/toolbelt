@@ -40,7 +40,7 @@ toggles, a loopback REST projection, a boot gate on `Reconcile`).
   `EnsureInstalled`, the programmatic "a product action needs this
   binary now" path, which enables and installs.
 - **Checksum handling fails closed.** A declared checksum source that
-  cannot be resolved, fetched, or matched aborts the install — never
+  cannot be resolved, fetched, or matched aborts the install; never
   downgrade to unverified. `findChecksum` is algorithm-aware (BSD
   multi-algorithm tables, coreutils tables, bare digests); a format it
   cannot attribute confidently returns nothing and the install refuses.
@@ -50,7 +50,7 @@ toggles, a loopback REST projection, a boot gate on `Reconcile`).
   second process against the same data dir.
 - **A fetched catalog never degrades the engine.** The runtime refresh
   (`catalogrefresh.go`) accepts a fetched catalog only after the full
-  pipeline passes — parse, consumer overlays, the structural entry
+  pipeline passes: parse, consumer overlays, the structural entry
   floor, and the consumer's `Require` verification; any failure keeps
   the current catalog and fails only the refresh job. The in-memory
   swap is an `atomic.Pointer` store; readers snapshot via `cat()` and
@@ -70,14 +70,10 @@ resolution via httpx), `aqua.go` (registry-definition evaluator),
 `extract.go` (archive handling), `catalog.go` (reader + VerifyCatalog),
 `wire.go` (result shapes). `httpapi/` is the REST projection built on
 `webhttp` primitives. `cmd/toolcatalog/` is the catalog compiler command
-(package main in this module — it shares the root's schema types and
+(package main in this module; it shares the root's schema types and
 verification semantics by construction and embeds the base overlay set).
 Its TOML/YAML registry parsers stay out of consumer builds via module
 graph pruning; they cost consumers a few `go.sum` metadata lines only.
-It was a nested module with its own release lane until v2.2.x — folded
-because the lane's root-first-then-lane release ordering and its
-self-referential dependency bumps outweighed the go.sum hygiene, and a
-single version stream removes compiler/engine schema skew entirely.
 
 ## Local development
 
@@ -90,7 +86,7 @@ go test -count=1 ./...
 go test -race -count=1 ./...
 ```
 
-`cmd/toolcatalog` is part of this module — `go build ./...` covers it,
+`cmd/toolcatalog` is part of this module: `go build ./...` covers it,
 and `go run ./cmd/toolcatalog` runs your working tree's compiler
 directly (no go.work, no cross-module setup).
 
@@ -121,19 +117,19 @@ gremlins unleash .
 `go test -count=1 ./...` from the repo root. The suite runs real
 installs against `httptest` servers and temp dirs (manual bash installs,
 aqua artifact downloads with checksum verification, symlink-escape
-rejection) — no mocks. Offline assertions use a failing transport: if a
+rejection); no mocks. Offline assertions use a failing transport: if a
 path that must be network-free fetches anything, the test fails. Match
 the file to the unit:
 
-- `engine_test.go` — the ported behavioral suite: add/patch/remove,
+- `engine_test.go`: the behavioral suite: add/patch/remove,
   dependents cascade, aqua end-to-end (download → verify → extract →
   link → prune), queue-full rollbacks, symlink-escape rejection.
-- `reconcile_test.go` — the reconciler state machine, hydration
+- `reconcile_test.go`: the reconciler state machine, hydration
   ordering, seeds, templates, checksum-file parsing.
-- `aqua_test.go` / `versions_test.go` — evaluator fixtures (real
+- `aqua_test.go` / `versions_test.go`: evaluator fixtures (real
   registry files, JSON-converted so the root module needs no YAML
   dependency) and resolver behavior.
-- `httpapi/httpapi_test.go` — route contract: status codes, the
+- `httpapi/httpapi_test.go`: route contract: status codes, the
   webhttp error envelope, toggle transitions, the dependents 409.
 
 When adding an engine mutation, cover: the happy-path job, the
@@ -157,5 +153,5 @@ package (use the `feat(toolcatalog):`/`fix(toolcatalog):` scope).
 By participating you agree to the org-wide
 [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
 Report security issues through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md),
 never in a public issue.
