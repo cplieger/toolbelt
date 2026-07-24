@@ -1,6 +1,6 @@
 # toolbelt
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/toolbelt.svg)](https://pkg.go.dev/github.com/cplieger/toolbelt)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/toolbelt/v2.svg)](https://pkg.go.dev/github.com/cplieger/toolbelt/v2)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/toolbelt)](https://github.com/cplieger/toolbelt/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/coverage.json)](https://github.com/cplieger/toolbelt/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/mutation.json)](https://github.com/cplieger/toolbelt/issues?q=label%3Agremlins-tracker)
@@ -33,7 +33,7 @@ Sources: `aqua:owner/repo` (binary artifacts with upstream checksum verification
 
 ## Install
 
-`go get github.com/cplieger/toolbelt@latest`
+`go get github.com/cplieger/toolbelt/v2@latest`
 
 ## Usage
 
@@ -67,7 +67,7 @@ on := true
 job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &on})
 ```
 
-`DefaultSeed()` ships five disabled templates — the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, `gh`): nothing downloads until a template is enabled, and install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded: the engine auto-adopts missing dependencies at install time, while a seeded-but-disabled dependency would refuse dependent installs (a disabled entry is user policy).
+`DefaultSeed()` ships five disabled templates: the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, `gh`). Nothing downloads until a template is enabled; install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded: the engine auto-adopts missing dependencies at install time, while a seeded-but-disabled dependency would refuse dependent installs (a disabled entry is user policy).
 
 ### The REST projection
 
@@ -83,11 +83,13 @@ Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`
 
 ### Runtime catalog refresh
 
-The catalog is data on its own cadence: with `Config.Refresh` set, the engine fetches the published catalog on the configured interval and on demand via `RefreshCatalog` or the httpapi route (deliberately no fetch at construction — consumers fire the boot refresh with `RefreshCatalog` once their boot work is enqueued, as both apps do right after their boot reconcile), verifies it — a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify` — re-applies any `Config.CatalogOverlays` display patches, persists the raw copy under `ConfigDir` (`tool-catalog.cached.json`, preferred over the baked file at the next boot), and swaps it in atomically. The last good catalog stands on any failure: a bad fetch degrades to yesterday's knowledge, never to a broken engine. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
+The catalog is data on its own cadence. With `Config.Refresh` set, the engine fetches the published catalog on the configured interval and on demand via `RefreshCatalog` or the httpapi route. There is deliberately no fetch at construction: call `RefreshCatalog` once your boot work is enqueued. Each fetch is verified (a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify`), re-overlaid with any `Config.CatalogOverlays` display patches, persisted raw under `ConfigDir` (`tool-catalog.cached.json`; at the next boot the newer of cache and baked wins), and swapped in atomically. The last good catalog stands on any failure: a bad fetch degrades to yesterday's knowledge, never to a broken engine. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
+
+Consumer defaults ship with the library. `DefaultCatalogURL` is the published catalog's latest-download URL. `ParseCatalogRefresh(raw, envName)` turns a refresh env value into the `Interval` under the canonical policy: default 24h, clamped to 1h–30d, and `off`/`disabled`/`0` disables the schedule while keeping on-demand refresh available. `ParseRequireList(raw)` parses a one-name-per-line requirements list (`#` comments and blank lines ignored) for `Require`.
 
 ### The catalog compiler
 
-`cmd/toolcatalog` (an ordinary command in this module — the compiler and the engine share one version stream, so a catalog is always compiled under exactly the schema and verification semantics of the engine release that consumes it) compiles the catalog and verifies it against a required tool set. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it on every registry bump and publishes the artifact consumers fetch; images run `verify` against their own required list at build. Its TOML/YAML registry parsers never reach consumer builds or binaries — Go's module graph pruning keeps commands you don't import out of everything but a few `go.sum` metadata lines:
+`cmd/toolcatalog` compiles the catalog and verifies it against a required tool set. The compiler versions with the engine in one module, so a catalog is always compiled under the schema and verification semantics of the engine release that consumes it. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it on every registry bump and publishes the artifact consumers fetch; images run `verify` against their own required list at build. Importing the library never pulls the compiler's TOML/YAML registry parsers into your build or binary (Go's module graph pruning); they cost consumers a few `go.sum` metadata lines only:
 
 ```sh
 go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
@@ -98,26 +100,26 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
     verify -catalog tool-catalog.json -require required-tools.txt
 ```
 
-`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at publish or image build instead of in a boot job. The command ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers agent CLIs probe for (`gopls`, `typescript-language-server`, `pyright`); it stamps a `generated` timestamp and embeds both registries' MIT license texts into the artifact, so the notice travels with every copy. Overlay merge semantics are the root module's `ApplyOverlay`, shared with the runtime refresh.
+`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at publish or image build instead of in a boot job. The command ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`); it stamps a `generated` timestamp and embeds both registries' MIT license texts into the artifact, so the notice travels with every copy. Overlay merge semantics are the root module's `ApplyOverlay`, shared with the runtime refresh.
 
 ## API
 
 ### Engine
 
-- `New(cfg *Config) (*Engine, error)` — construct + start (initializes the manifest files, seeding when absent and backing up a retired-format file; launches the job worker). `Close()` stops the worker.
-- `Inventory() (*Inventory, error)` — the full read-side snapshot: every manifest entry joined with install state, the system group, the active job.
-- `Search(q string) []CatalogEntry` — catalog lookup (empty query = the featured set), hiding names already in the manifest.
-- `Add(ctx, *AddRequest) (*Job, error)` — record a new tool and enqueue its install; present-and-enabled is the default intent. `Disabled: true` adds a template instead (no job, returns nil).
-- `Patch(name, PatchRequest) (*Job, error)` — merge fields; `Disabled` is the enable/disable toggle (false→true uninstalls and keeps the template, true→false installs), a version change enqueues a reinstall. `Force` permits disabling a tool enabled entries require.
-- `Install(name) (*Job, error)` — retry an existing, enabled entry. Refuses templates with `ErrDisabled` (install is policy-neutral).
-- `Update(names ...string) (*Job, error)` — refresh unpinned entries (or the named set).
-- `Remove(name string, force bool) (*Job, []string, error)` — uninstall + delete the entry; refuses with the dependents named unless forced (force cascades).
-- `Reconcile(mode) (*Job, error)` — converge disk to intent: `ReconcileMissing` installs missing enabled entries and uninstalls disabled-but-owned ones (zero network when converged); `ReconcileFull` also enqueues an update pass. Returns `(nil, nil)` on an empty manifest.
-- `Wait(ctx, jobID) (*Job, error)` — block until a job settles (boot gates, synchronous flows).
-- `EnsureInstalled(ctx, name) error` — synchronous "a product action needs this binary now": creates from the catalog, enables a disabled template, installs, waits.
-- `Jobs() (active *Job, recent []*Job)` / `CancelJob(id) bool` — queue introspection and cancellation.
-- `RefreshCatalog() (*Job, error)` — enqueue an on-demand catalog refresh (`ErrRefreshNotConfigured` without `Config.Refresh`).
-- `CatalogInfo() CatalogInfo` — the live catalog's provenance: refs, generation timestamp, entry count, source, last refresh outcome, schedule state.
+- `New(cfg *Config) (*Engine, error)`: construct and start (seed the manifest when absent, launch the job worker; a manifest of any other schema version is an error). `Close()` stops the worker.
+- `Inventory() (*Inventory, error)`: the full read-side snapshot (every manifest entry joined with install state, the system group, the active job).
+- `Search(q string) []CatalogEntry`: catalog lookup (empty query = the featured set), hiding names already in the manifest.
+- `Add(ctx, *AddRequest) (*Job, error)`: record a new tool and enqueue its install; present-and-enabled is the default intent. `Disabled: true` adds a template instead (no job, returns nil).
+- `Patch(name, PatchRequest) (*Job, error)`: merge fields. `Disabled` is the enable/disable toggle (false→true uninstalls and keeps the template, true→false installs), a version change enqueues a reinstall, and `Force` permits disabling a tool enabled entries require.
+- `Install(name) (*Job, error)`: retry an existing, enabled entry. Refuses templates with `ErrDisabled` (install is policy-neutral).
+- `Update(names ...string) (*Job, error)`: refresh unpinned entries (or the named set).
+- `Remove(name string, force bool) (*Job, []string, error)`: uninstall + delete the entry; refuses with the dependents named unless forced (force cascades).
+- `Reconcile(mode) (*Job, error)`: converge disk to intent. `ReconcileMissing` installs missing enabled entries and uninstalls disabled-but-owned ones (zero network when converged); `ReconcileFull` also enqueues an update pass. Returns `(nil, nil)` on an empty manifest.
+- `Wait(ctx, jobID) (*Job, error)`: block until a job settles (boot gates, synchronous flows).
+- `EnsureInstalled(ctx, name) error`: synchronous "a product action needs this binary now" path (creates from the catalog, enables a disabled template, installs, waits).
+- `Jobs() (active *Job, recent []*Job)` / `CancelJob(id) bool`: queue introspection and cancellation.
+- `RefreshCatalog() (*Job, error)`: enqueue an on-demand catalog refresh (`ErrRefreshNotConfigured` without `Config.Refresh`).
+- `CatalogInfo() CatalogInfo`: the live catalog's provenance (refs, generation timestamp, entry count, source, last refresh outcome, schedule state).
 
 ### Types and errors
 
@@ -141,7 +143,7 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 
 ### toolcatalog (catalog compiler command)
 
-`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>` — exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Versioned with the module (`go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@vX.Y.Z`); the historical `cmd/toolcatalog/vX.Y.Z` lane tags (≤ v2.2.0) remain resolvable for old builds.
+`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>`; exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Versioned with the module (`go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@vX.Y.Z`); the historical `cmd/toolcatalog/vX.Y.Z` lane tags (≤ v2.2.0) remain resolvable for old builds.
 
 ## Configuration reference
 
@@ -152,12 +154,12 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 | `CatalogPath` | baked catalog path (the first-boot/offline fallback with `Refresh` set); missing degrades to manual/ecosystem sources with named errors for catalog-dependent entries |
 | `Refresh` | runtime catalog refresh: the published-catalog URL, the schedule interval (0 = on-demand only), and the required names verified before every swap; nil keeps the baked catalog static |
 | `CatalogOverlays` | consumer overlay files re-applied to every loaded catalog (display patches survive refreshes); entries they add must embed any aqua definition inline |
-| `Seed` | manifest written when none exists (fresh volume or retired-format backup); nil seeds empty |
+| `Seed` | manifest written when none exists (fresh volume); nil seeds empty |
 | `System` | image-baked binaries reported read-only in `Inventory` |
 | `OnJobChanged` / `OnJobOutput` | job lifecycle + coalesced output callbacks (must not block); nil is silent |
 | `Logger` | `slog` logger; nil uses the default |
 
-Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites.
+Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites. The engine accepts only manifest schema version 2; any other version fails `New` (it never rewrites or backs up an unrecognized manifest).
 
 ## Security model
 
@@ -172,6 +174,11 @@ Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (
 - No apt/system-package backend: OS packages belong to the image or the consumer's entrypoint, not volume intent.
 - The manifest store's single-writer guarantee is in-process. Run one engine per data directory; other processes go through the consumer's server.
 
+## Contributing
+
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+conventions and how to run the checks locally.
+
 ## Disclaimer
 
 This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
@@ -180,4 +187,4 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0 — see [LICENSE](LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE).
