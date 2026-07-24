@@ -8,8 +8,8 @@ github.com/cplieger/scheduler/v3 v3.0.0 h1:vka8qTY7q6yK6pOQyoi8YXB+4fW59RqUD1XaM
 github.com/cplieger/scheduler/v3 v3.0.0/go.mod h1:CHPRYuZ+C5HDH0hviAuXHMIOVD9WZyn39HIs0oeFA1k=
 github.com/cplieger/ssrf/v3 v3.0.0 h1:wIrJ6rDkuMvsNqGQ1J25iTnn/xFxLD2fEwOsdiwNrYA=
 github.com/cplieger/ssrf/v3 v3.0.0/go.mod h1:887QK6H7IDoYavU5I/0K/0rFRX29bTfP9SeS1x75tls=
-github.com/cplieger/webhttp v1.13.0 h1:stXhd4aEEe/MKg5SO9qVGpPcxbmudlBs0gjoUvSr/0c=
-github.com/cplieger/webhttp v1.13.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
+github.com/cplieger/webhttp v1.15.0 h1:VJhxfsVbw2mGKVDgLtTIK9znq7hEU4yYWKO5JQ/pDeo=
+github.com/cplieger/webhttp v1.15.0/go.mod h1:RYtweYFUohqE5DIOt06Ypr0j9VHXjxSPBLIG3vM0H44=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
 github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hashicorp/go-version v1.9.0 h1:CeOIz6k+LoN3qX9Z0tyQrPtiB1DFYRPfCIBtaXPSCnA=
