@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/httpx/v3"
+	"github.com/cplieger/httpx/v4"
 	"github.com/cplieger/scheduler/v3"
 )
 
