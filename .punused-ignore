@@ -1,0 +1,103 @@
+# punused findings adjudicated as false positives. One literal substring per
+# line, matched against punused's output line; full-line `#` comments carry the
+# reason. Invalid-by-construction classes: `.kiro/steering/tools.md`.
+#
+# toolbelt is a LIBRARY (`github.com/cplieger/toolbelt/v2`) that also ships a
+# `main` package under cmd/toolcatalog, so the CI gate's app-mode detection
+# ("a main package exists") gates it on punused even though its exported
+# surface is a PUBLISHED API. punused resolves references through gopls
+# `textDocument/references` inside this module only -- its README's first
+# caveat, "It does not detect references from outside of your project" -- so
+# every API symbol whose production callers live in a consumer module is
+# reported EU1002 (no reference) or EU1001 (referenced only from this repo's
+# _test.go files). Consumer evidence below was taken against the two modules
+# whose go.mod requires this one (vibekit v2.2.12, web-terminal-kiro v2.2.8);
+# consumer line numbers are the snapshot at adjudication time, the file and
+# call shape are the durable part. Cross-checked: `deadcode -test ./...` and
+# `staticcheck -checks U1000 ./...` both report nothing in this module, so no
+# finding below is dead code hiding behind a published name.
+#
+# Engine lifecycle, the four calls a consumer app makes to own a tools engine.
+# New is the only constructor (toolbelt.go:192): vibekit
+# internal/composition/composition.go:477, web-terminal-kiro main.go:1056.
+# Close is the shutdown half (toolbelt.go:231): vibekit composition.go:288
+# (`a.tools.Close()`, field typed *toolbelt.Engine at composition.go:45),
+# web-terminal-kiro main.go:1007. Wait blocks on a job id (engine.go:158):
+# web-terminal-kiro main.go:1131 inside awaitBootConvergence, launched at
+# main.go:1108. Reconcile enqueues the convergence job (engine.go:583):
+# vibekit composition.go:505, web-terminal-kiro main.go:1089.
+function New
+method (*Engine).Close
+method (*Engine).Wait
+method (*Engine).Reconcile
+#
+# EnsureInstalled (engine.go:609) is the synchronous "a product action needs
+# this binary now" path. vibekit assigns it as a method VALUE rather than
+# calling it -- `forgesPkg.EnsureTool = toolsEngine.EnsureInstalled`,
+# internal/composition/composition.go:156 -- so even an in-module reference
+# search for a call expression would miss it; the forge login path invokes it
+# through that function field (internal/forges/install.go).
+method (*Engine).EnsureInstalled
+#
+# DefaultSeed (toolbelt.go:249) is the shared starter manifest every consumer
+# passes as Config.Seed: vibekit composition.go:483, web-terminal-kiro
+# main.go:1061. Deleting it would leave both apps with no manifest seed and
+# duplicate the language-server starter set into each of them.
+function DefaultSeed
+#
+# ReconcileMissing (wire.go:129) is doubly invalid: it is the mode
+# web-terminal-kiro's boot reconcile passes (main.go:1089), AND it is the
+# iota-0 sentinel of ReconcileMode (wire.go:126-133), so deleting it would
+# renumber ReconcileFull -- a wire-level behavior change for any consumer that
+# has the old value compiled in, not a cleanup.
+constant ReconcileMissing
+#
+# The three consumer-contract helpers, each with two call sites and no
+# in-module production caller by design (they exist FOR the consumer):
+# ParseRequireList (catalog.go:222) -- vibekit main.go:67, web-terminal-kiro
+# main.go:1049, both feeding CatalogRefresh.Require from an embedded
+# required-tools.txt; DefaultCatalogURL (catalogrefresh.go:51) -- the env
+# default at vibekit internal/composition/config.go:96 and web-terminal-kiro
+# main.go:340, the one place a publisher move stays a one-line change;
+# ParseCatalogRefresh (catalogrefresh.go:71) -- vibekit config.go:97,
+# web-terminal-kiro main.go:203, which owns the clamp policy both apps apply
+# to their refresh env var.
+function ParseRequireList
+constant DefaultCatalogURL
+function ParseCatalogRefresh
+#
+# httpapi.Handler (httpapi/httpapi.go:82) is the entire purpose of the
+# httpapi package: the REST projection a consumer mounts on its own mux.
+# vibekit internal/server/server.go:224 (`httpapi.Handler(s.tools,
+# "/api/tools")`, field typed *toolbelt.Engine at server.go:43),
+# web-terminal-kiro routes.go:177 behind loopbackOnly. Nothing in this module
+# mounts a mux, so an in-module reference can only ever come from a test.
+function Handler
+#
+# flag.Value contract, not an API symbol: multiFlag is an UNEXPORTED type in
+# package main (cmd/toolcatalog/main.go:69) whose two exported methods exist
+# solely to satisfy stdlib `flag.Value` at the `fl.Var(&overlays, "overlay",
+# ...)` registration on main.go:82. punused strips the receiver and tests only
+# the method name (run.go's handleSymbol), so it reports them as unused
+# exported symbols although no other package can reach them; the use is a
+# compile-time interface satisfaction, which gopls references does not model.
+# Deleting either one breaks the build, not just the -overlay flag.
+method (*multiFlag).String
+method (*multiFlag).Set
+#
+# errors.Is contract: (*DependentsError).Is (engine.go:43) is the method
+# `errors.Is` looks for through its `interface{ Is(error) bool }` type
+# assertion, which is a runtime dispatch gopls cannot resolve to a reference.
+# It is what makes `errors.Is(err, ErrHasDependents)` match the *DependentsError
+# returned by engine.go:360 and engine.go:545, and it is documented as the
+# published comparison contract at engine.go:13. Test-covered at
+# engine_test.go:255, engine_test.go:945 and reconcile_test.go:112, so deleting
+# it fails the suite rather than silently, but it is still not dead: it is the
+# only reason the sentinel comparison this package documents works at all.
+method (*DependentsError).Is
+#
+# NOT adjudicated here: probe.go's `(*cappedBuffer).Write`, an io.Writer assigned
+# to exec.Cmd's Stdout/Stderr. That file is untracked as of this commit, so an
+# entry for it would claim an adjudication about code the repo does not contain.
+# Add one when probe.go lands -- same finding and same reason as
+# docker-rsync-scheduler's entry for its own cappedBuffer.
