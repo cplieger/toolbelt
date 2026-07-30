@@ -1,17 +1,20 @@
 package toolbelt
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
 // FuzzValidToolName verifies validToolName returns true only for
 // strings of [a-zA-Z0-9._\-+@]{1,80}, plus at most one '/' and only in
-// @scope/name form (npm scoped packages).
+// @scope/name form (npm scoped packages), and only when every
+// slash-separated part is a usable path component.
 //
 // Bug class: charset bypass via multi-byte UTF-8 runes that appear as
 // valid ASCII bytes, length confusion between bytes and runes, slash
-// smuggling into filesystem paths.
+// smuggling into filesystem paths, and a dot component that redirects
+// the opt-dir join the name is used to build.
 func FuzzValidToolName(f *testing.F) {
 	f.Add("my-tool")
 	f.Add("tool.v2")
@@ -24,6 +27,11 @@ func FuzzValidToolName(f *testing.F) {
 	f.Add("tool;inject")
 	f.Add("\x00hidden")
 	f.Add("../escape")
+	f.Add("..")
+	f.Add(".")
+	f.Add("...")
+	f.Add("..extras")
+	f.Add("@a/..")
 
 	f.Fuzz(func(t *testing.T, name string) {
 		got := validToolName(name)
@@ -53,6 +61,15 @@ func FuzzValidToolName(f *testing.F) {
 			}
 			if slashes == 1 && !strings.HasPrefix(name, "@") {
 				t.Fatalf("validToolName(%q)=true with unscoped slash", name)
+			}
+			// Invariant 5: the name is used as a path component under
+			// the opt dir, and uninstall removes that join, so an
+			// accepted name must not be able to redirect it. Asserted on
+			// the JOIN rather than on the string: filepath.Clean is the
+			// authority on what the name resolves to.
+			const root = "/opt"
+			if joined := filepath.Join(root, name); joined != root+"/"+name {
+				t.Fatalf("validToolName(%q)=true but Join(%q, name)=%q, not a child of the root", name, root, joined)
 			}
 		}
 

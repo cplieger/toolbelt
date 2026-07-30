@@ -71,7 +71,7 @@ job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &on})
 
 ### The REST projection
 
-`toolbelt/httpapi` serves the engine over HTTP: inventory, catalog search, add, patch (the toggle verb), install, update, remove, jobs, cancel. It is a pure projection: no auth, no middleware; wrap it in your own stack (an origin-checked chain, a loopback-only gate).
+`toolbelt/httpapi` serves the engine over HTTP: inventory, catalog search, add, patch (the toggle verb), install, update, remove, jobs, cancel. It is a pure projection: no auth, and the only middleware it carries is its own cache policy (below); wrap it in your own stack (an origin-checked chain, a loopback-only gate).
 
 ```go
 h := httpapi.Handler(engine, "/api/tools")
@@ -80,6 +80,8 @@ mux.Handle("/api/tools/", h)
 ```
 
 Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`has_dependents` names the blockers, `disabled` marks install-on-a-template, `not_configured` marks a catalog refresh without `Config.Refresh`). Stream job progress via the `Config` callbacks or poll `GET .../jobs`.
+
+**The handler owns its cache policy** (a behaviour change: earlier releases set no cache header at all): every response it produces carries `Cache-Control: no-store` — success bodies, decode rejections, engine errors, and the router's own 404/405/redirects alike — so a consumer no longer needs to wrap it in a no-store middleware of its own. This is a mutable control plane that lists jobs and accepts installs, so a stored response is always wrong. A `Cache-Control` your own stack has already set on the response is left untouched, on the same rule `webhttp.JSONHeaders` applies to `X-Content-Type-Options`: stating the policy yourself keeps you its single writer, whether you want something stricter (`no-store, no-cache, must-revalidate`) or, deliberately, something weaker.
 
 ### Runtime catalog refresh
 
@@ -123,7 +125,7 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 
 ### Types and errors
 
-`Tool` (manifest entry), `Manifest`, `ToolStatus`/`State` (machine state), `CatalogEntry`/`Catalog` (+ `VerifyCatalog`), `Inventory`/`ToolInfo`/`SystemTool`/`Job` (result shapes; also the httpapi wire shapes), `DefaultSeed()`. Sentinels: `ErrNotFound`, `ErrDisabled`, `ErrHasDependents` (match with `errors.Is`; `*DependentsError` carries the blocking names for `errors.As`).
+`Tool` (manifest entry), `Manifest`, `ToolStatus`/`State` (machine state), `CatalogEntry`/`Catalog` (+ `VerifyCatalog`), `Inventory`/`ToolInfo`/`SystemTool`/`Job` (result shapes; also the httpapi wire shapes), `CancelCause` (`CancelShutdown`/`CancelCaller`, zero value `CancelUnknown`), `DefaultSeed()`. Sentinels: `ErrNotFound`, `ErrDisabled`, `ErrHasDependents` (match with `errors.Is`; `*DependentsError` carries the blocking names for `errors.As`).
 
 ### httpapi routes
 
@@ -136,10 +138,12 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on templates |
 | `POST {prefix}/update` | `Update` | optional `{"names": [...]}` body |
 | `DELETE {prefix}/{name}?force=1` | `Remove` | 202 `{job, dependents}`; 409 without force |
-| `GET {prefix}/jobs` | `Jobs` | active job carries the output tail |
-| `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | |
+| `GET {prefix}/jobs` | `Jobs` | active job carries the output tail; a cancelled job carries `cancel_cause` |
+| `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | the job reports `cancel_cause: caller` |
 | `GET {prefix}/catalog` | `CatalogInfo` | provenance + freshness of the live catalog |
 | `POST {prefix}/catalog/refresh` | `RefreshCatalog` | 202 `{job}`; 409 `not_configured` without `Config.Refresh` |
+
+Every response above — and every response the router itself generates for a path or method the table does not cover — carries `Cache-Control: no-store` unless your stack already set the header.
 
 ### toolcatalog (catalog compiler command)
 
@@ -156,14 +160,18 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 | `CatalogOverlays` | consumer overlay files re-applied to every loaded catalog (display patches survive refreshes); entries they add must embed any aqua definition inline |
 | `Seed` | manifest written when none exists (fresh volume); nil seeds empty |
 | `System` | image-baked binaries reported read-only in `Inventory` |
+| `KeepVersions` | how many superseded versions to retain under `opt/<name>/` for rollback (0 = the default 1; negative = keep none) |
 | `OnJobChanged` / `OnJobOutput` | job lifecycle + coalesced output callbacks (must not block); nil is silent |
 | `Logger` | `slog` logger; nil uses the default |
 
-Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites. The engine accepts only manifest schema version 2; any other version fails `New` (it never rewrites or backs up an unrecognized manifest).
+Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, `version_args` (the arguments that make the tool print its version, e.g. `["--version"]`, which makes the install probe verify the reported version), and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites. The engine accepts only manifest schema version 2; any other version fails `New` (it never rewrites or backs up an unrecognized manifest).
 
 ## Security model
 
-- Aqua-sourced artifacts verify against the checksum source their registry definition declares (upstream `checksums.txt` and equivalents); an install without one is logged as unverified.
+- Aqua-sourced artifacts verify against the checksum source their registry definition declares (upstream `checksums.txt` and equivalents). A declared checksum that cannot be fetched, parsed, or matched REFUSES the install: there is no downgrade to unverified. Only a definition that declares none (or whose upstream disabled checksums) installs unverified, and that install is warned about on the engine logger and recorded as `"checksum": "unverified"` in `tools-state.json`.
+- Installs are probed by execution, not by file presence: the recorded bins must exist and the tool must answer when run (with `version_args`, the answer must carry the recorded version). A binary that is truncated, of the wrong architecture, or at the wrong version reads as not installed and is reinstalled; a recorded bin that cannot be executed at all falls back to presence and is warned about.
+- Published trees are durable: every extracted file and the staging directory are flushed before the rename that publishes a version, the parent directory after it, and the state record before any superseded version is pruned. A flush failure (a full disk included) fails the install and leaves the previous version live.
+- Cancelled jobs are attributed: a `cancelled` job carries `cancel_cause` naming who stopped it — `shutdown` (`Close`, the engine going down, including the running job's cancelled context) or `caller` (`CancelJob`, which is also the `POST {prefix}/jobs/{id}/cancel` route). The field is additive and omitted when a cancellation path names no cause, so an unknown cause is never reported as shutdown. Consumer contract: a shutdown cancellation is routine and should not alert; a caller cancellation is deliberate and may.
 - Fetches ride an SSRF-guarded client (public-IP enforcement at the dial boundary, redirect policy, port allowlist) with transient-failure retry and rate-limit handling via [`cplieger/httpx`](https://github.com/cplieger/httpx).
 - Downloads are size-capped (1 GiB); archive extraction rejects symlink members that escape the install tree; installs land in versioned directories swapped atomically.
 - The `manual` source runs arbitrary bash by design: it is an operator escape hatch for single-principal volumes, equivalent in trust to editing the manifest itself.

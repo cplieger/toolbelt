@@ -13,6 +13,45 @@ const (
 	JobCancelled = "cancelled"
 )
 
+// CancelCause identifies WHO cancelled a job. The cause is known inside
+// the engine at every cancellation site, and it is the distinction a
+// consumer needs to decide whether a cancellation deserves an alert: a
+// shutdown cancellation is routine (the process is going down and the
+// engine cancels what it was running), a caller cancellation is a
+// deliberate act. Without it both arrive as a bare JobCancelled and the
+// consumer has to invent its own shutdown flag.
+//
+// Meaningful only for a job whose State is JobCancelled — a job that
+// finished, failed, or timed out always carries CancelUnknown, even if a
+// cancellation was requested and lost the race.
+type CancelCause string
+
+const (
+	// CancelUnknown is the zero value: no cause was recorded. A
+	// cancelled job carrying it was stopped through a path that names no
+	// cause. Deliberately NOT equal to CancelShutdown or CancelCaller,
+	// so a cancellation path added later cannot be silently read as
+	// either one.
+	CancelUnknown CancelCause = ""
+	// CancelShutdown is cancellation initiated by Engine.Close: the
+	// running job's context is cancelled and queued jobs are drained
+	// because the engine is shutting down. Routine.
+	CancelShutdown CancelCause = "shutdown"
+	// CancelCaller is cancellation initiated through Engine.CancelJob —
+	// the httpapi POST {prefix}/jobs/{id}/cancel route, or product code
+	// calling it directly. Deliberate.
+	CancelCaller CancelCause = "caller"
+)
+
+// String renders a cause for logs, naming the zero value instead of
+// printing an empty string.
+func (c CancelCause) String() string {
+	if c == CancelUnknown {
+		return "unknown"
+	}
+	return string(c)
+}
+
 // Job kinds.
 const (
 	JobKindInstall        = "install"
@@ -30,6 +69,11 @@ type Job struct {
 	State string   `json:"state"`
 	Error string   `json:"error,omitempty"`
 	Names []string `json:"names,omitempty"`
+	// CancelCause names who cancelled the job (State JobCancelled only).
+	// Additive on the wire: omitted whenever the cause is unknown, so a
+	// consumer that ignores the field sees exactly the payload it saw
+	// before — JobCancelled keeps its meaning and value.
+	CancelCause CancelCause `json:"cancel_cause,omitempty"`
 	// OutputTail carries the job's most recent output lines; populated
 	// by Jobs() snapshots only (live output streams via the
 	// Config.OnJobOutput callback).

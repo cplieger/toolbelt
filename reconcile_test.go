@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -28,7 +27,7 @@ func offlineClient() *http.Client { return &http.Client{Transport: failingTransp
 func manualEntry(name string) Tool {
 	return Tool{
 		Source: SourceManual, Version: "1",
-		Install: fmt.Sprintf(`printf x > "$BIN/%s" && chmod 755 "$BIN/%s"`, name, name),
+		Install: binStub(name),
 	}
 }
 
@@ -227,7 +226,7 @@ func TestHydration_SparseEntryFromCatalog(t *testing.T) {
 	cat := &Catalog{Entries: map[string]CatalogEntry{
 		"x": {
 			Name: "x", Source: SourceManual, Version: "1.0.0",
-			Install: `printf x > "$BIN/x" && chmod 755 "$BIN/x"`, Probe: "x",
+			Install: binStub("x"), Probe: "x",
 		},
 	}}
 	e := newTestEngine(t, cat)
@@ -261,11 +260,14 @@ func TestHydration_LegacyBinaryDoesNotWedge(t *testing.T) {
 	cat := &Catalog{Entries: map[string]CatalogEntry{
 		"legacy": {
 			Name: "legacy", Source: SourceManual, Version: "2.0.0",
-			Install: `printf y > "$BIN/legacy" && chmod 755 "$BIN/legacy"`, Probe: "legacy",
+			Install: binStub("legacy"), Probe: "legacy",
 		},
 	}}
 	e := newTestEngine(t, cat)
-	if err := os.WriteFile(filepath.Join(e.toolsDir, "bin", "legacy"), []byte("old"), 0o755); err != nil {
+	// The pre-existing binary is a real program: it answers the probe, so
+	// the reconciler has no reason to touch it.
+	legacyBin := filepath.Join(e.toolsDir, "bin", "legacy")
+	if err := os.WriteFile(legacyBin, []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	err := e.store.MutateManifest(func(m *Manifest) error {
@@ -287,7 +289,7 @@ func TestHydration_LegacyBinaryDoesNotWedge(t *testing.T) {
 		t.Fatal("legacy entry left source-less (the wedge)")
 	}
 	// The unmanaged binary satisfied the probe: reconcile leaves it.
-	if data, _ := os.ReadFile(filepath.Join(e.toolsDir, "bin", "legacy")); string(data) != "old" {
+	if data, _ := os.ReadFile(legacyBin); !strings.Contains(string(data), "echo old") {
 		t.Fatal("reconcile overwrote an unmanaged binary")
 	}
 	// An explicit install takes ownership.

@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,8 +29,40 @@ type installer struct {
 	client *http.Client
 	// output receives human-readable progress lines (wired to the
 	// running job's ring buffer + the OnJobOutput callback).
-	output   func(line string)
+	output func(line string)
+	// log carries operator-facing lines that must outlive the job's
+	// output ring: a refused install, an artifact installed without
+	// checksum verification. Nil falls back to slog.Default().
+	log      *slog.Logger
 	toolsDir string
+}
+
+// Checksum outcomes recorded on ToolStatus.Checksum.
+const (
+	// checksumVerified: the definition declared a checksum source and
+	// the downloaded artifact's digest matched it.
+	checksumVerified = "verified"
+	// checksumUnverified: the definition declared no checksum source,
+	// so the artifact was installed on the transport's word alone.
+	checksumUnverified = "unverified"
+)
+
+// installOutcome is what one install produced: the bins the tool now
+// owns in the bin dir, the package-manager-owned bins, and how the
+// artifact's integrity was established (aqua artifacts only; empty for
+// the ecosystem backends, which carry their own integrity checks).
+type installOutcome struct {
+	checksum string
+	bins     []string
+	pmBins   []string
+}
+
+// logger returns the operator-facing logger (slog.Default when unset).
+func (in *installer) logger() *slog.Logger {
+	if in.log == nil {
+		return slog.Default()
+	}
+	return in.log
 }
 
 func (in *installer) binDir() string    { return filepath.Join(in.toolsDir, "bin") }
@@ -44,94 +78,163 @@ func (in *installer) logf(format string, args ...any) {
 // ~200 MB; anything past this is a broken or hostile URL.
 const maxArtifactSize = 1 << 30
 
+// Transient suffixes inside a tool's opt dir: the extraction target
+// before a publish, and the superseded tree kept during one. Neither is
+// ever a retention candidate.
+const (
+	stagingSuffix = ".staging"
+	backupSuffix  = ".old"
+)
+
+// DefaultKeepVersions is how many superseded versions of a tool the
+// engine retains when Config.KeepVersions is unset: one, so a bad update
+// always has a previous tree under <ToolsDir>/opt/<name>/ to fall back
+// to instead of only a re-download.
+const DefaultKeepVersions = 1
+
 // downloadAttemptBudget bounds a single download attempt (the retry
 // loop sits outside it).
 const downloadAttemptBudget = 10 * time.Minute
 
-// install dispatches one tool install and returns the bins it now owns
-// in the bin dir (symlinks/wrappers) plus pm-owned bins. prevPM is the
-// tool's previously recorded pm bin set (ownership survives updates).
-func (in *installer) install(ctx context.Context, name string, t *Tool, aq *AquaPackage, prevPM []string) (bins, pmBins []string, err error) {
+// install dispatches one tool install and returns what it produced: the
+// bins it now owns in the bin dir (symlinks/wrappers), the pm-owned
+// bins, and the artifact's verification outcome. prevPM is the tool's
+// previously recorded pm bin set (ownership survives updates).
+func (in *installer) install(ctx context.Context, name string, t *Tool, aq *AquaPackage, prevPM []string) (installOutcome, error) {
+	var out installOutcome
+	var err error
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	switch kind {
 	case SourceAqua:
-		bins, err = in.installAqua(ctx, name, t.Version, aq)
+		out.bins, out.checksum, err = in.installAqua(ctx, name, t.Version, aq)
 	case SourceNpm:
-		pmBins, err = in.installNpm(ctx, ref, t.Version, prevPM)
+		out.pmBins, err = in.installNpm(ctx, ref, t.Version, prevPM)
 	case SourcePip:
-		pmBins, err = in.installPip(ctx, ref, t.Version, prevPM)
+		out.pmBins, err = in.installPip(ctx, ref, t.Version, prevPM)
 	case SourceCargo:
-		bins, err = in.installCargo(ctx, ref, t.Version)
+		out.bins, err = in.installCargo(ctx, ref, t.Version)
 	case SourceGo:
-		bins, err = in.installGo(ctx, ref, t.Version)
+		out.bins, err = in.installGo(ctx, ref, t.Version)
 	case SourceManual:
-		bins, err = in.installManual(ctx, name, t)
+		out.bins, err = in.installManual(ctx, name, t)
 	default:
-		return nil, nil, fmt.Errorf("unknown source %q", t.Source)
+		return installOutcome{}, fmt.Errorf("unknown source %q", t.Source)
 	}
 	if err != nil {
-		return nil, nil, err
+		return installOutcome{}, err
 	}
-	return bins, pmBins, nil
+	return out, nil
 }
 
 // --- aqua / http artifacts ---
 
 // installAqua downloads and places a binary artifact per the resolved
-// aqua spec: download, checksum verify when the definition declares a
-// source, extract into a versioned opt dir, symlink the declared files
-// into bin.
-func (in *installer) installAqua(ctx context.Context, name, version string, aq *AquaPackage) ([]string, error) {
+// aqua spec: download, checksum verify (mandatory when the definition
+// declares a source), extract into a versioned opt dir, symlink the
+// declared files into bin. It returns the linked bins and the
+// verification outcome; pruning superseded versions is the caller's,
+// deliberately deferred until the new version's state record is durable.
+func (in *installer) installAqua(ctx context.Context, name, version string, aq *AquaPackage) (bins []string, checksum string, err error) {
 	if aq == nil {
-		return nil, fmt.Errorf("no aqua definition for %s (catalog missing?)", name)
+		return nil, "", fmt.Errorf("no aqua definition for %s (catalog missing?)", name)
 	}
 	spec, err := aq.ResolveSpec(version)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	in.logf("downloading %s", spec.URL)
 
 	tmp, err := os.MkdirTemp(in.toolsDir, ".dl-"+name+"-*")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer os.RemoveAll(tmp)
 
 	artifact := filepath.Join(tmp, lastPathSegment(spec.URL))
 	if derr := in.download(ctx, spec.URL, artifact); derr != nil {
-		return nil, derr
+		return nil, "", derr
 	}
-	if spec.ChecksumURL != "" {
-		if verr := in.verifyChecksum(ctx, artifact, spec); verr != nil {
-			return nil, verr
-		}
-		in.logf("checksum verified (%s)", spec.ChecksumAlg)
-	} else {
-		in.logf("no checksum source declared; installing unverified")
+	checksum, err = in.verifyArtifact(ctx, name, version, artifact, spec)
+	if err != nil {
+		return nil, "", err
 	}
 
 	versDir, err := in.extractAndSwap(ctx, name, version, spec, artifact)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	bins, err := in.linkDeclaredFiles(versDir, spec.Files)
+	bins, err = in.linkDeclaredFiles(versDir, spec.Files)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-
-	// Prune superseded versions now that the new one is linked.
-	in.pruneOldVersions(name, version)
 	in.logf("installed %s %s (%s)", name, version, strings.Join(bins, ", "))
-	return bins, nil
+	return bins, checksum, nil
+}
+
+// verifyArtifact enforces the checksum invariant before a byte of the
+// download is extracted or published, and reports how integrity was
+// established.
+//
+// A definition that DECLARES a checksum source must produce a matching
+// digest: a source that resolved to nothing, a checksum file that cannot
+// be fetched or parsed, and a mismatched digest all REFUSE the install,
+// loudly, at the engine logger as well as in the job output. There is no
+// path from a declared checksum to an installed artifact that was not
+// verified against it.
+//
+// A definition that declares none (or whose upstream explicitly disabled
+// checksums) still installs, unchanged — but the unverified path is now
+// explicit: a Warn on the engine logger names the tool, version and URL,
+// and installTool records "unverified" in tools-state.json, so "this
+// tool was installed unverified" is observable rather than inferred from
+// a definition an operator would have to go read.
+func (in *installer) verifyArtifact(ctx context.Context, name, version, artifact string, spec *InstallSpec) (string, error) {
+	switch {
+	case spec.ChecksumURL != "":
+		if verr := in.verifyChecksum(ctx, artifact, spec); verr != nil {
+			return "", in.refuseUnverified(name, version, spec.URL, verr)
+		}
+		in.logf("checksum verified (%s)", spec.ChecksumAlg)
+		return checksumVerified, nil
+	case spec.ChecksumDeclared:
+		// Declared but unobtainable: resolution produced no source to
+		// fetch. Never downgrade to an unverified install.
+		return "", in.refuseUnverified(name, version, spec.URL,
+			errors.New("the definition declares a checksum source but it resolved to no URL"))
+	default:
+		in.logger().Warn("toolbelt: installing UNVERIFIED artifact: the definition declares no checksum source",
+			"tool", name, "version", version, "url", spec.URL)
+		in.logf("WARNING: no checksum source declared for %s %s; installing UNVERIFIED from %s",
+			name, version, spec.URL)
+		return checksumUnverified, nil
+	}
+}
+
+// refuseUnverified logs the refusal where an operator will see it and
+// returns the error that fails the install.
+func (in *installer) refuseUnverified(name, version, url string, cause error) error {
+	in.logger().Error("toolbelt: REFUSING install: declared checksum not verified",
+		"tool", name, "version", version, "url", url, "error", cause)
+	in.logf("REFUSING to install %s %s: declared checksum not verified: %v", name, version, cause)
+	return fmt.Errorf("refusing to install %s %s unverified: %w", name, version, cause)
 }
 
 // extractAndSwap extracts the artifact into a fresh staging dir and
 // atomically swaps it into the versioned opt dir. The backup rename
 // means a same-version reinstall never has a window where the tool is
 // deleted but the replacement rename hasn't happened.
+//
+// Durability protocol (a published tree must survive a power loss, or
+// the state file that names it would reference contents that never
+// reached disk): every extracted file's contents and every staged
+// directory's entry list are flushed BEFORE the publishing rename, and
+// the parent directory's entry list is flushed AFTER it. A barrier
+// failure — ENOSPC included — fails the install and restores the
+// previous version, rather than leaving a tree the engine would go on to
+// record and prune around.
 func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, error) {
 	versDir := filepath.Join(in.optDir(), name, version)
-	staging := versDir + ".staging"
+	staging := versDir + stagingSuffix
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
 	}
@@ -145,7 +248,10 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 	if err := extractArtifact(ctx, artifact, spec.Format, staging, binName); err != nil {
 		return "", err
 	}
-	backup := versDir + ".old"
+	if err := syncTree(staging); err != nil {
+		return "", fmt.Errorf("flush staged install of %s %s: %w", name, version, err)
+	}
+	backup := versDir + backupSuffix
 	if err := os.RemoveAll(backup); err != nil {
 		return "", err
 	}
@@ -155,13 +261,28 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 		}
 	}
 	if err := os.Rename(staging, versDir); err != nil {
-		if _, berr := os.Stat(backup); berr == nil {
-			_ = os.Rename(backup, versDir) // restore on failure
-		}
+		restoreBackup(versDir, backup)
 		return "", err
+	}
+	if err := fsyncDir(filepath.Dir(versDir)); err != nil {
+		// The rename is visible but not committed: undo it so the
+		// previous version stays the live one and the install fails.
+		_ = os.RemoveAll(versDir)
+		restoreBackup(versDir, backup)
+		return "", fmt.Errorf("commit install of %s %s: %w", name, version, err)
 	}
 	_ = os.RemoveAll(backup)
 	return versDir, nil
+}
+
+// restoreBackup puts a superseded version tree back after a failed
+// publish. Best-effort: the failure path already returns an error, and a
+// missing backup simply means there was no previous version.
+func restoreBackup(versDir, backup string) {
+	if _, err := os.Stat(backup); err != nil {
+		return
+	}
+	_ = os.Rename(backup, versDir)
 }
 
 // linkDeclaredFiles resolves and symlinks each declared binary from the
@@ -345,33 +466,100 @@ func isHexDigest(s string, n int) bool {
 }
 
 // pruneOldVersions removes superseded versioned install dirs, keeping
-// only current. Best-effort.
-func (in *installer) pruneOldVersions(name, current string) {
+// the current version plus the `keep` most recent previous ones so a bad
+// update has something to fall back to (see retained for how keep is
+// normalized). Transient staging/backup residue is never retained.
+// Best-effort: a prune failure is logged and leaves disk as it is.
+func (in *installer) pruneOldVersions(name, current string, keep int) {
 	root := filepath.Join(in.optDir(), name)
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
-		if e.Name() == current {
+	for _, victim := range prunable(entries, current, keep) {
+		if err := os.RemoveAll(filepath.Join(root, victim)); err != nil {
+			in.logf("could not prune %s/%s: %v", name, victim, err)
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(root, e.Name())); err == nil {
-			in.logf("pruned old version %s/%s", name, e.Name())
-		}
+		in.logf("pruned old version %s/%s", name, victim)
 	}
 }
 
-// linkBin force-replaces bin/<name> with a symlink to target.
+// prunable selects the entries under a tool's opt root that go: the
+// current version never does, transient .staging/.old residue always
+// does, and the remaining superseded versions are ordered newest-first
+// (mtime, name as the deterministic tiebreak) with the first `retained`
+// of them kept.
+func prunable(entries []os.DirEntry, current string, keep int) []string {
+	type candidate struct {
+		modTime time.Time
+		name    string
+	}
+	var victims []string
+	var supers []candidate
+	for _, e := range entries {
+		switch name := e.Name(); {
+		case name == current:
+		case strings.HasSuffix(name, stagingSuffix), strings.HasSuffix(name, backupSuffix):
+			victims = append(victims, name)
+		default:
+			var mod time.Time
+			if fi, err := e.Info(); err == nil {
+				mod = fi.ModTime()
+			}
+			supers = append(supers, candidate{modTime: mod, name: name})
+		}
+	}
+	slices.SortFunc(supers, func(a, b candidate) int {
+		if !a.modTime.Equal(b.modTime) {
+			return b.modTime.Compare(a.modTime)
+		}
+		return strings.Compare(b.name, a.name)
+	})
+	for _, c := range supers[min(retained(keep), len(supers)):] {
+		victims = append(victims, c.name)
+	}
+	return victims
+}
+
+// retained normalizes a configured retention count: 0 (unset) means
+// DefaultKeepVersions, and a negative value keeps none (the
+// prune-everything-superseded behavior).
+func retained(keep int) int {
+	switch {
+	case keep == 0:
+		return DefaultKeepVersions
+	case keep < 0:
+		return 0
+	default:
+		return keep
+	}
+}
+
+// linkBin force-replaces bin/<name> with a symlink to target and flushes
+// the bin dir's entry list, so a published PATH entry survives a crash.
+// A failed barrier restores the previous link: the install is failing, and
+// the tool that was on PATH before must stay the one on PATH.
 func (in *installer) linkBin(name, target string) error {
 	if err := os.MkdirAll(in.binDir(), 0o755); err != nil {
 		return err
 	}
 	link := filepath.Join(in.binDir(), name)
+	prev, hadPrev := os.Readlink(link)
 	if err := os.RemoveAll(link); err != nil {
 		return err
 	}
-	return os.Symlink(target, link)
+	if err := os.Symlink(target, link); err != nil {
+		return err
+	}
+	if err := fsyncDir(in.binDir()); err != nil {
+		_ = os.Remove(link)
+		if hadPrev == nil {
+			_ = os.Symlink(prev, link)
+		}
+		return fmt.Errorf("commit bin link %s: %w", name, err)
+	}
+	return nil
 }
 
 // --- package-manager backends ---

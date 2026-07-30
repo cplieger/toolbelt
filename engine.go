@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -116,28 +114,8 @@ func (e *Engine) installedFor(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeInstalled(name, t, s)
 }
 
-// probeInstalled checks the tool's bin presence: every recorded bin
-// (or the derived probe name before first status write) resolves in
-// the bin dir.
-func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
-	bins := append(append([]string{}, s.Bins...), s.PMBins...)
-	if len(bins) == 0 {
-		// No recorded bins (never installed by this engine): fall back
-		// to the derived probe name so pre-seeded volumes still read
-		// as installed when the binary exists.
-		probe := t.Probe
-		if probe == "" {
-			probe = pkgBinName(strings.TrimPrefix(name, "@"))
-		}
-		bins = []string{probe}
-	}
-	for _, b := range bins {
-		if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", b)); err != nil {
-			return false
-		}
-	}
-	return true
-}
+// probeInstalled lives in probe.go: presence plus a bounded execution
+// of the tool, and a version match when the definition declares one.
 
 func (e *Engine) systemTools() []SystemTool {
 	out := make([]SystemTool, 0, len(e.system))
@@ -169,7 +147,10 @@ func (e *Engine) Search(query string) []CatalogEntry {
 // Jobs returns the active job (with output tail) and recent history.
 func (e *Engine) Jobs() (active *Job, recent []*Job) { return e.queue.Snapshot() }
 
-// CancelJob aborts a queued or running job.
+// CancelJob aborts a queued or running job. The cancellation is
+// attributed to the caller: the job's CancelCause reports CancelCaller,
+// distinguishing a deliberate cancel (this call, including the httpapi
+// cancel route) from the CancelShutdown cancellations Close produces.
 func (e *Engine) CancelJob(id string) bool { return e.queue.Cancel(id) }
 
 // Wait blocks until the job reaches a terminal state and returns its
@@ -300,6 +281,9 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 	}
 	if t.Requires == nil {
 		t.Requires = cat.Requires
+	}
+	if t.VersionArgs == nil {
+		t.VersionArgs = cat.VersionArgs
 	}
 	if t.Install == "" {
 		t.Install = cat.Install
@@ -866,6 +850,11 @@ func (e *Engine) depsOf(name string, t *Tool) []string {
 // version, recording status either way. A sparse entry resolves its
 // version to latest here (and persists it); an entry the catalog
 // couldn't hydrate fails with a named error.
+//
+// The status write is the install's COMMIT POINT: superseded versions are
+// pruned only after the new tree and its state record are both durable,
+// so a crash (or a full disk) can never leave a pruned previous version
+// next to a state file that was never written.
 func (e *Engine) installTool(ctx context.Context, name string, output func(string)) error {
 	m, err := e.store.Manifest()
 	if err != nil {
@@ -898,18 +887,44 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		return nil
 	}
 	output(fmt.Sprintf("installing %s %s (%s)", name, t.Version, t.Source))
-	bins, pmBins, err := e.inst.install(ctx, name, &t, e.aquaDef(t.Source), st.PMBins)
+	res, err := e.inst.install(ctx, name, &t, e.aquaDef(t.Source), st.PMBins)
 	if err != nil {
-		e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = err.Error() })
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: install error not recorded", "tool", name, "error", serr)
+		}
 		return err
 	}
-	e.store.setToolStatus(name, func(s *ToolStatus) {
+	if serr := e.store.setToolStatus(name, func(s *ToolStatus) {
 		s.InstalledVersion = t.Version
-		s.Bins = bins
-		s.PMBins = pmBins
+		s.Bins = res.bins
+		s.PMBins = res.pmBins
+		s.Checksum = res.checksum
 		s.LastError = ""
-	})
+	}); serr != nil {
+		// The install landed on disk but the engine cannot durably
+		// record it: fail the job with the PREVIOUS state intact and
+		// nothing pruned, so a retry converges.
+		return fmt.Errorf("record install state for %s: %w", name, serr)
+	}
+	e.probes.forget(name)
+	e.pruneSuperseded(name, &t)
 	return nil
+}
+
+// recordFailure stores an install failure on the tool's status row.
+func (e *Engine) recordFailure(name string, cause error) error {
+	return e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = cause.Error() })
+}
+
+// pruneSuperseded applies the retention policy to a tool's versioned
+// install trees, after its new version is durably recorded. Only aqua
+// sources publish versioned trees; the other backends own a single
+// unversioned dir that must never be swept.
+func (e *Engine) pruneSuperseded(name string, t *Tool) {
+	if kind, _, _ := strings.Cut(t.Source, ":"); kind != SourceAqua {
+		return
+	}
+	e.inst.pruneOldVersions(name, t.Version, e.keepVersions)
 }
 
 // persistVersion records a freshly resolved version on the manifest
@@ -945,7 +960,10 @@ func (e *Engine) runUninstall(ctx context.Context, j *job) error {
 		if err := e.inst.uninstall(ctx, n, &t, &status); err != nil {
 			return err
 		}
-		e.store.dropToolStatus(n)
+		if err := e.store.dropToolStatus(n); err != nil {
+			return fmt.Errorf("drop install state for %s: %w", n, err)
+		}
+		e.probes.forget(n)
 	}
 	return nil
 }
@@ -978,7 +996,10 @@ func (e *Engine) runDisable(ctx context.Context, names []string, output func(str
 		if err := e.inst.uninstall(ctx, n, &t, &status); err != nil {
 			return err
 		}
-		e.store.dropToolStatus(n)
+		if err := e.store.dropToolStatus(n); err != nil {
+			return fmt.Errorf("drop install state for %s: %w", n, err)
+		}
+		e.probes.forget(n)
 	}
 	return nil
 }
@@ -1147,7 +1168,10 @@ func (e *Engine) sweepOrphans(ctx context.Context, orphans []string, output func
 		if err := e.inst.uninstall(ctx, n, &t, &status); err != nil {
 			return err
 		}
-		e.store.dropToolStatus(n)
+		if err := e.store.dropToolStatus(n); err != nil {
+			return fmt.Errorf("drop orphaned install state for %s: %w", n, err)
+		}
+		e.probes.forget(n)
 	}
 	return nil
 }
@@ -1184,8 +1208,34 @@ func validToolName(name string) bool {
 	if !validSlashForm(name) {
 		return false
 	}
+	if !validNameComponents(name) {
+		return false
+	}
 	for _, r := range name {
 		if !validToolNameRune(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// validNameComponents requires every slash-separated part of the name to
+// be a usable single path component: not empty, not "." and not "..".
+//
+// The name is not only a key. It is joined onto the opt dir as a path
+// component (`opt/<name>/<version>`) and uninstall hands the whole join
+// to os.RemoveAll, so a dot component aims that removal at a directory
+// the tool does not own: "." at the shared opt tree, ".." at its parent,
+// "@a/.." at the opt tree again. Only an EXACT dot component is
+// traversal — "tool.v2", "..extras" and "..." are ordinary names and stay
+// valid, which a leading-dot or contains-".." test would refuse.
+//
+// Splitting on '/' alone is right here rather than a general separator
+// split, because validToolNameRune admits no other separator, on any
+// platform.
+func validNameComponents(name string) bool {
+	for part := range strings.SplitSeq(name, "/") {
+		if part == "" || part == "." || part == ".." {
 			return false
 		}
 	}

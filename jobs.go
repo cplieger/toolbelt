@@ -27,11 +27,16 @@ const (
 
 // job is the internal mutable job record.
 type job struct {
-	id      string
-	kind    string
-	names   []string
-	state   string
-	err     string
+	id    string
+	kind  string
+	names []string
+	state string
+	err   string
+	// cause records WHO cancelled the job. It is written at the
+	// cancellation site BEFORE the job's context is cancelled, so the
+	// finalizer in runOne can attribute a cancellation it only observes
+	// as a dead context. CancelUnknown until a site names it.
+	cause   CancelCause
 	created time.Time
 	started time.Time
 	ended   time.Time
@@ -74,12 +79,13 @@ func (j *job) tail() []string {
 
 func (j *job) view(withTail bool) *Job {
 	v := &Job{
-		ID:        j.id,
-		Kind:      j.kind,
-		Names:     append([]string{}, j.names...),
-		State:     j.state,
-		Error:     j.err,
-		CreatedAt: j.created.UnixMilli(),
+		ID:          j.id,
+		Kind:        j.kind,
+		Names:       append([]string{}, j.names...),
+		State:       j.state,
+		Error:       j.err,
+		CancelCause: j.cause,
+		CreatedAt:   j.created.UnixMilli(),
 	}
 	if !j.started.IsZero() {
 		v.StartedAt = j.started.UnixMilli()
@@ -174,12 +180,33 @@ func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool)
 	return view, nil
 }
 
-// Cancel aborts a queued or running job by id.
+// noteCancelLocked attributes a cancellation to cause. Caller holds the
+// queue lock.
+//
+// Two rules keep the attribution honest. A job that already reached a
+// terminal state is left alone: a Close that arrives after the worker
+// finalized a successful job must not stamp a cancel cause on it. And
+// the FIRST cause wins: when an operator cancels a job and the engine
+// closes before the worker finalizes, the operator's cancel is why the
+// job stopped, so it stays attributed to the caller.
+func (j *job) noteCancelLocked(cause CancelCause) {
+	if j.state != JobQueued && j.state != JobRunning {
+		return
+	}
+	if j.cause == CancelUnknown {
+		j.cause = cause
+	}
+}
+
+// Cancel aborts a queued or running job by id. This is the
+// Engine.CancelJob path (the httpapi cancel route and direct callers),
+// so the cancellation is attributed to CancelCaller.
 func (q *jobQueue) Cancel(id string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.active != nil && q.active.id == id && q.active.cancel != nil {
-		q.active.cancel() // worker finalizes state + notifies
+		q.active.noteCancelLocked(CancelCaller) // recorded before the context dies
+		q.active.cancel()                       // worker finalizes state + notifies
 		return true
 	}
 	for i, j := range q.pending {
@@ -187,13 +214,20 @@ func (q *jobQueue) Cancel(id string) bool {
 			continue
 		}
 		q.pending = append(q.pending[:i], q.pending[i+1:]...)
-		j.state = JobCancelled
-		j.ended = time.Now()
-		q.pushRecentLocked(j)
-		q.notifyLocked(j)
+		q.dropQueuedLocked(j, CancelCaller)
 		return true
 	}
 	return false
+}
+
+// dropQueuedLocked finalizes a job that never ran as cancelled, with its
+// cause attributed, and publishes the transition. Caller holds mu.
+func (q *jobQueue) dropQueuedLocked(j *job, cause CancelCause) {
+	j.noteCancelLocked(cause)
+	j.state = JobCancelled
+	j.ended = time.Now()
+	q.pushRecentLocked(j)
+	q.notifyLocked(j)
 }
 
 // Active returns the running (or oldest queued) job, if any.
@@ -291,11 +325,14 @@ func (q *jobQueue) lookup(id string) (*Job, bool) {
 }
 
 // Close stops the worker after the current job (its context is
-// cancelled so shutdown isn't held for a slow download).
+// cancelled so shutdown isn't held for a slow download). Every job the
+// shutdown cancels — the running one and the queued ones the worker
+// drains — is attributed to CancelShutdown.
 func (q *jobQueue) Close() {
 	q.mu.Lock()
 	q.stopped = true
 	if q.active != nil && q.active.cancel != nil {
+		q.active.noteCancelLocked(CancelShutdown)
 		q.active.cancel()
 	}
 	q.mu.Unlock()
@@ -313,10 +350,7 @@ func (q *jobQueue) worker() {
 		if q.stopped {
 			// Drain queued jobs as cancelled so waiters unblock.
 			for _, j := range q.pending {
-				j.state = JobCancelled
-				j.ended = time.Now()
-				q.pushRecentLocked(j)
-				q.notifyLocked(j)
+				q.dropQueuedLocked(j, CancelShutdown)
 			}
 			q.pending = nil
 			q.mu.Unlock()
@@ -400,6 +434,10 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 	case errors.Is(ctx.Err(), context.Canceled):
 		j.state = JobCancelled
 		j.err = "cancelled"
+		// The cause was recorded by whoever cancelled; a context killed
+		// by a path that names none stays unknown rather than defaulting
+		// to shutdown.
+		q.log.Info("toolbelt: job cancelled", "job", j.id, "kind", j.kind, "cause", j.cause.String())
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		j.state = JobFailed
 		j.err = fmt.Sprintf("timed out after %s", jobTimeout)
@@ -408,6 +446,12 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 		j.state = JobFailed
 		j.err = err.Error()
 		q.log.Warn("toolbelt: job failed", "job", j.id, "kind", j.kind, "error", err)
+	}
+	if j.state != JobCancelled {
+		// A cancellation that lost the race (the job finished, timed out,
+		// or failed first) must not leave a cause on a result that was
+		// not a cancellation.
+		j.cause = CancelUnknown
 	}
 	q.mu.Unlock()
 }
