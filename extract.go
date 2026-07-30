@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/cplieger/pathinside"
 )
 
 // extractArtifact unpacks a downloaded artifact into destDir according
@@ -110,19 +112,37 @@ func runQuiet(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
-// mustRel returns target relative to base, or a string that safeJoin
-// will reject when target is not under base.
-func mustRel(base, target string) string {
-	rel, err := filepath.Rel(base, target)
-	if err != nil {
-		return ".." // guaranteed rejection
-	}
-	return rel
+// insideStrictly reports whether target lies STRICTLY beneath base:
+// lexically within the tree, and not base itself.
+//
+// pathinside.Inside owns the containment half — a separator-precise
+// comparison that refuses the prefix sibling (opt/rg/14.1.1-evil against
+// opt/rg/14.1.1) and answers false for a pair that cannot be compared
+// lexically at all, such as a relative target against an absolute base.
+//
+// The equality half stays here, spelled out, because it is this package's
+// rule and not the predicate's: Inside admits a root as part of its own
+// tree by contract (a scan or a watch legitimately starts at the root),
+// while both callers need a FILE. linkDeclaredFiles chmods the result
+// 0o755 and publishes bin/<name> as a symlink to it, so a registry entry
+// naming the version directory itself must be refused.
+//
+// The judgment is LEXICAL: it says nothing about symlinks, which is why
+// linkDeclaredFiles resolves with filepath.EvalSymlinks first and tests
+// the resolved path.
+func insideStrictly(base, target string) bool {
+	return pathinside.Inside(base, target) && filepath.Clean(target) != filepath.Clean(base)
 }
 
 // safeJoin joins base and rel, rejecting any path that escapes base
-// (absolute rel or .. traversal). Guards files[].src from the registry
-// against writing outside the tool's install dir.
+// (absolute rel or .. traversal) and any path that resolves to base
+// itself. Guards files[].src from the registry against writing outside
+// the tool's install dir.
+//
+// Absoluteness is refused on its own grounds rather than left to the
+// containment test: filepath.Clean CLAMPS a traversal at the filesystem
+// root ("/.." cleans to "/") while filepath.Join re-attaches it to a
+// relative base, and an absolute name deserves its own message anyway.
 func safeJoin(base, rel string) (string, error) {
 	if rel == "" {
 		return "", errors.New("empty path")
@@ -131,8 +151,7 @@ func safeJoin(base, rel string) (string, error) {
 		return "", fmt.Errorf("absolute path %q not allowed", rel)
 	}
 	joined := filepath.Join(base, rel)
-	cleanBase := filepath.Clean(base) + string(os.PathSeparator)
-	if !strings.HasPrefix(joined, cleanBase) {
+	if !insideStrictly(base, joined) {
 		return "", fmt.Errorf("path %q escapes install dir", rel)
 	}
 	return joined, nil
