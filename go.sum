@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/cplieger/atomicfile/v2 v2.4.0 h1:+r6l4GupYEze8pfhs+Ocvb7u6iarMLeoNFntKGNXTlQ=
-github.com/cplieger/atomicfile/v2 v2.4.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
+github.com/cplieger/atomicfile/v2 v2.5.0 h1:487E64mT93XeFb1h4GnXyKTJH37xxWH36RcLXyhwed8=
+github.com/cplieger/atomicfile/v2 v2.5.0/go.mod h1:jgwJ7oU3qahL4NwiF+1iBIzPRpR8LwXnicSalGoJeVA=
 github.com/cplieger/httpx/v4 v4.2.1 h1:KrkuZKrOVWD8EoDXW16DJhvN+68Zm+FbSEVtn4ZNvQg=
 github.com/cplieger/httpx/v4 v4.2.1/go.mod h1:bfJDGEQRWEwLu6mlwk49PfDIAETABwhlp+DAWFXo8XE=
 github.com/cplieger/scheduler/v3 v3.0.0 h1:vka8qTY7q6yK6pOQyoi8YXB+4fW59RqUD1XaMNIx0ZU=
