@@ -66,7 +66,7 @@ function ParseRequireList
 constant DefaultCatalogURL
 function ParseCatalogRefresh
 #
-# httpapi.Handler (httpapi/httpapi.go:82) is the entire purpose of the
+# httpapi.Handler (httpapi/httpapi.go:148) is the entire purpose of the
 # httpapi package: the REST projection a consumer mounts on its own mux.
 # vibekit internal/server/server.go:224 (`httpapi.Handler(s.tools,
 # "/api/tools")`, field typed *toolbelt.Engine at server.go:43),

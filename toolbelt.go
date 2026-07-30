@@ -106,6 +106,13 @@ type Config struct {
 	// System names image-baked binaries surfaced read-only in
 	// Inventory's System group (informational; not managed).
 	System []string
+	// KeepVersions is how many SUPERSEDED versions of a tool to retain
+	// under <ToolsDir>/opt/<name>/ when an install publishes a new one
+	// (the current version is always kept). An update that turns out bad
+	// can then be rolled back to a tree that is still on disk. 0 (unset)
+	// means DefaultKeepVersions; a negative value keeps none, pruning
+	// every superseded tree as soon as the new one is committed.
+	KeepVersions int
 }
 
 // Engine is the tools subsystem: the single owner of the manifest and
@@ -132,8 +139,13 @@ type Engine struct {
 	system          []string
 	configDir       string
 	toolsDir        string
-	catState        catalogState
-	refreshWG       sync.WaitGroup
+	// probes memoizes install probes: presence is always re-checked, the
+	// execution verdict is cached per binary fingerprint.
+	probes    probeCache
+	catState  catalogState
+	refreshWG sync.WaitGroup
+	// keepVersions mirrors Config.KeepVersions (0 = DefaultKeepVersions).
+	keepVersions int
 }
 
 // cat returns the current catalog snapshot.
@@ -200,10 +212,11 @@ func New(cfg *Config) (*Engine, error) {
 		configDir:       cfg.ConfigDir,
 		toolsDir:        cfg.ToolsDir,
 		system:          cfg.System,
+		keepVersions:    cfg.KeepVersions,
 	}
 	e.initCatalog(cfg)
 	e.queue = newJobQueue(cfg.OnJobChanged, cfg.OnJobOutput, log, e.executeJob)
-	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, output: func(string) {}}
+	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, log: log, output: func(string) {}}
 	if err := os.MkdirAll(filepath.Join(cfg.ToolsDir, "bin"), 0o755); err != nil {
 		return nil, err
 	}
@@ -212,7 +225,9 @@ func New(cfg *Config) (*Engine, error) {
 }
 
 // Close stops the catalog-refresh schedule, then the job worker
-// (cancelling any running job).
+// (cancelling any running job and draining the queued ones). Every job
+// it cancels reports CancelShutdown as its CancelCause, so a consumer
+// can tell an ordinary shutdown from an operator's deliberate cancel.
 func (e *Engine) Close() {
 	if e.stopRefresh != nil {
 		e.stopRefresh()

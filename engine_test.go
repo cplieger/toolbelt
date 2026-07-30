@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,7 +15,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -71,12 +74,22 @@ func waitJob(t *testing.T, e *Engine, id string) *Job {
 	return v
 }
 
+// binStub is a manual install command that writes a RUNNABLE stub for
+// name into $BIN, reporting the version being installed. The install
+// probe executes what it finds in bin/, so a fixture has to be a real
+// (if trivial) program — a file whose only property is existing reads as
+// not installed, exactly as a truncated download would.
+func binStub(name string) string {
+	return fmt.Sprintf(`printf "#!/bin/sh\necho %s $VERSION\n" > "$BIN/%s" && chmod 755 "$BIN/%s"`,
+		name, name, name)
+}
+
 // addManual creates and installs a trivial manual tool.
 func addManual(t *testing.T, e *Engine, name string, requires []string) {
 	t.Helper()
 	job, err := e.Add(context.Background(), &AddRequest{
 		Name: name, Source: SourceManual, Version: "1", Requires: requires,
-		Install: fmt.Sprintf(`printf x > "$BIN/%s" && chmod 755 "$BIN/%s"`, name, name),
+		Install: binStub(name),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +109,58 @@ func TestNew_RefusesRetiredManifest(t *testing.T) {
 	_, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools")})
 	if err == nil || !strings.Contains(err.Error(), "manifest version") {
 		t.Fatalf("New accepted a retired-format manifest: %v", err)
+	}
+}
+
+// TestStore_RefusesTraversingManifestKey covers the read path, which is the
+// half Add's validation cannot reach: tools.json is hand-editable and re-read
+// per operation, so a key that never went through Add reaches the installer
+// unchecked. A ".." key resolves opt/<name> to the opt tree's PARENT, and
+// uninstall hands that join to os.RemoveAll.
+//
+// The whole document is refused rather than the one entry dropped, matching
+// the version check above: the engine reports what it cannot use instead of
+// silently editing user intent.
+func TestStore_RefusesTraversingManifestKey(t *testing.T) {
+	for _, name := range []string{"..", ".", "@a/..", "a b"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			doc := fmt.Sprintf(`{"version":%d,"tools":{%q:{"source":"manual","install":"true"}}}`, ManifestVersion, name)
+			if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(doc), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			st := newStore(dir, nil, slog.Default())
+			m, err := st.Manifest()
+			if err == nil {
+				t.Fatalf("Manifest() accepted tool name %q: %+v", name, m)
+			}
+			if !strings.Contains(err.Error(), "invalid tool name") {
+				t.Errorf("error %q does not name the invalid key", err)
+			}
+			if _, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools")}); err == nil {
+				t.Errorf("New accepted a manifest holding tool name %q", name)
+			}
+		})
+	}
+}
+
+// TestStore_AcceptsDottedManifestKey is the guard against over-tightening the
+// read path: a dot is a legal name character, so a hand-written entry whose
+// name merely CONTAINS dots must still load.
+func TestStore_AcceptsDottedManifestKey(t *testing.T) {
+	dir := t.TempDir()
+	doc := fmt.Sprintf(`{"version":%d,"tools":{"tool.v2":{"source":"manual","install":"true"},"..extras":{"source":"manual","install":"true"}}}`, ManifestVersion)
+	if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := newStore(dir, nil, slog.Default()).Manifest()
+	if err != nil {
+		t.Fatalf("Manifest() refused a legitimate dotted name: %v", err)
+	}
+	for _, name := range []string{"tool.v2", "..extras"} {
+		if _, ok := m.Tools[name]; !ok {
+			t.Errorf("entry %q was dropped: %+v", name, m.Tools)
+		}
 	}
 }
 
@@ -184,7 +249,7 @@ func TestAdd_DuplicateRejected(t *testing.T) {
 	e := newTestEngine(t, nil)
 	req := AddRequest{
 		Name: "dup", Source: SourceManual, Version: "1",
-		Install: `printf x > "$BIN/dup" && chmod 755 "$BIN/dup"`,
+		Install: binStub("dup"),
 	}
 	if _, err := e.Add(context.Background(), &req); err != nil {
 		t.Fatal(err)
@@ -198,7 +263,7 @@ func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 	e := newTestEngine(t, nil)
 	job, err := e.Add(context.Background(), &AddRequest{
 		Name: "t", Source: SourceManual, Version: "1.0.0",
-		Install: `printf x > "$BIN/t" && chmod 755 "$BIN/t"`, Probe: "t",
+		Install: binStub("t"), Probe: "t",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +333,7 @@ func TestInstallOrder_BackendDepFromCatalog(t *testing.T) {
 	cat := &Catalog{Entries: map[string]CatalogEntry{
 		"node": {
 			Name: "node", Source: SourceManual, Version: "1.0.0",
-			Install: `printf x > "$BIN/node" && chmod 755 "$BIN/node"`, Probe: "node",
+			Install: binStub("node"), Probe: "node",
 		},
 	}}
 	e := newTestEngine(t, cat)
@@ -363,9 +428,17 @@ func TestInstallAqua_EndToEnd(t *testing.T) {
 	}}
 	e := newTestEngine(t, cat)
 
-	// Simulate a stale previous version to prune.
+	// Two superseded versions: retention keeps the newest one (a bad
+	// update needs a tree to fall back to) and prunes the rest.
+	older := filepath.Join(e.toolsDir, "opt", "mytool", "v1.0.0")
 	old := filepath.Join(e.toolsDir, "opt", "mytool", "v1.1.0")
-	if err := os.MkdirAll(old, 0o755); err != nil {
+	for _, dir := range []string{older, old} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(older, stale, stale); err != nil {
 		t.Fatal(err)
 	}
 
@@ -386,12 +459,18 @@ func TestInstallAqua_EndToEnd(t *testing.T) {
 	if want := filepath.Join(e.toolsDir, "opt", "mytool", "v1.2.0", "mytool-1.2.0", "bin", "mytool"); target != want {
 		t.Errorf("link target = %s, want %s", target, want)
 	}
-	if _, err := os.Stat(old); !os.IsNotExist(err) {
-		t.Error("old version not pruned")
+	if _, err := os.Stat(old); err != nil {
+		t.Errorf("previous version not retained for rollback: %v", err)
+	}
+	if _, err := os.Stat(older); !os.IsNotExist(err) {
+		t.Error("version beyond the retention window not pruned")
 	}
 	st := e.store.State().Tools["mytool"]
 	if st.InstalledVersion != "v1.2.0" || len(st.Bins) != 1 {
 		t.Errorf("state = %+v", st)
+	}
+	if st.Checksum != checksumVerified {
+		t.Errorf("state checksum = %q, want %q", st.Checksum, checksumVerified)
 	}
 }
 
@@ -436,7 +515,7 @@ func TestJobs_CancelQueued(t *testing.T) {
 	// Occupy the worker with a slow manual install.
 	slow, err := e.Add(context.Background(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
-		Install: `sleep 5 && printf x > "$BIN/slow"`,
+		Install: `sleep 5 && ` + binStub("slow"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -459,6 +538,202 @@ func TestJobs_CancelQueued(t *testing.T) {
 	}
 	if e.CancelJob("tj-nope") {
 		t.Fatal("cancel unknown succeeded")
+	}
+}
+
+// busyQueue occupies the worker with a long-running install and leaves
+// one job queued behind it, so a cancellation test can drive the running
+// path and the queued path from the same engine.
+func busyQueue(t *testing.T, e *Engine) (running, queued *Job) {
+	t.Helper()
+	running, err := e.Add(context.Background(), &AddRequest{
+		Name: "slow", Source: SourceManual, Version: "1",
+		Install: `sleep 3 && ` + binStub("slow"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the worker actually picked it up: a job still pending
+	// would be cancelled through the queued path, not the running one.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if a := e.queue.Active(); a != nil && a.ID == running.ID && a.State == JobRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job %s never started", running.ID)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	queued, err = e.Update()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return running, queued
+}
+
+// cancelActiveContext kills the running job's context WITHOUT going
+// through Cancel or Close — the shape a cancellation path added later
+// would have before it learns to name its cause. Nothing may infer
+// shutdown from it.
+func cancelActiveContext(t *testing.T, e *Engine, _, _ *Job) {
+	t.Helper()
+	e.queue.mu.Lock()
+	active := e.queue.active
+	var cancel context.CancelFunc
+	if active != nil {
+		cancel = active.cancel
+	}
+	e.queue.mu.Unlock()
+	if cancel == nil {
+		t.Fatal("no active job context to cancel")
+	}
+	cancel()
+}
+
+// TestJobCancelCause pins WHO each cancellation path reports. A consumer
+// keys its alerting on the cause, so a shutdown must never read as a
+// caller cancel, a caller cancel must never read as shutdown, and a path
+// that names no cause must stay unknown instead of defaulting to either.
+func TestJobCancelCause(t *testing.T) {
+	// want is the expected outcome for one of the two jobs busyQueue
+	// leaves behind: "running" holds the worker, "queued" sits behind it.
+	type want struct {
+		job   string
+		cause CancelCause
+	}
+	cases := map[string]struct {
+		cancel func(t *testing.T, e *Engine, running, queued *Job)
+		want   []want
+	}{
+		"caller cancel of the running job": {
+			cancel: func(t *testing.T, e *Engine, running, _ *Job) {
+				if !e.CancelJob(running.ID) {
+					t.Fatal("cancel running failed")
+				}
+			},
+			want: []want{{job: "running", cause: CancelCaller}},
+		},
+		"caller cancel of a queued job": {
+			cancel: func(t *testing.T, e *Engine, _, queued *Job) {
+				if !e.CancelJob(queued.ID) {
+					t.Fatal("cancel queued failed")
+				}
+			},
+			want: []want{{job: "queued", cause: CancelCaller}},
+		},
+		"shutdown cancels the running job and drains the queue": {
+			cancel: func(_ *testing.T, e *Engine, _, _ *Job) { e.Close() },
+			want: []want{
+				{job: "running", cause: CancelShutdown},
+				{job: "queued", cause: CancelShutdown},
+			},
+		},
+		"a context cancelled by no named path stays unknown": {
+			cancel: cancelActiveContext,
+			want:   []want{{job: "running", cause: CancelUnknown}},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			running, queued := busyQueue(t, e)
+			tc.cancel(t, e, running, queued)
+			for _, w := range tc.want {
+				id := running.ID
+				if w.job == "queued" {
+					id = queued.ID
+				}
+				v := waitJob(t, e, id)
+				if v.State != JobCancelled {
+					t.Errorf("%s job state = %s (%s), want %s", w.job, v.State, v.Error, JobCancelled)
+					continue
+				}
+				if v.CancelCause != w.cause {
+					t.Errorf("%s job cause = %q, want %q", w.job, v.CancelCause, w.cause)
+				}
+			}
+		})
+	}
+}
+
+// TestJobCancelAttribution pins the two attribution rules that only a
+// race can reach through the public API: a job that already reached a
+// terminal state is never stamped with a cancel cause (a Close arriving
+// after a successful finish must not mark it cancelled-by-shutdown), and
+// the FIRST cause wins (an operator cancel followed by a shutdown stays
+// attributed to the operator, because their cancel is why it stopped).
+func TestJobCancelAttribution(t *testing.T) {
+	cases := map[string]struct {
+		state string
+		have  CancelCause
+		note  CancelCause
+		want  CancelCause
+	}{
+		"running job takes the cause":     {state: JobRunning, have: CancelUnknown, note: CancelShutdown, want: CancelShutdown},
+		"queued job takes the cause":      {state: JobQueued, have: CancelUnknown, note: CancelCaller, want: CancelCaller},
+		"first cause wins over shutdown":  {state: JobRunning, have: CancelCaller, note: CancelShutdown, want: CancelCaller},
+		"finished job is never stamped":   {state: JobDone, have: CancelUnknown, note: CancelShutdown, want: CancelUnknown},
+		"failed job is never stamped":     {state: JobFailed, have: CancelUnknown, note: CancelCaller, want: CancelUnknown},
+		"cancelled job keeps its verdict": {state: JobCancelled, have: CancelCaller, note: CancelShutdown, want: CancelCaller},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			j := &job{state: tc.state, cause: tc.have}
+			j.noteCancelLocked(tc.note)
+			if j.cause != tc.want {
+				t.Errorf("cause = %q, want %q", j.cause, tc.want)
+			}
+		})
+	}
+}
+
+// TestCancelCause_ValuesAndJSON pins the type's contract: the zero value
+// means unknown and equals neither real cause, every cause names itself
+// for logs, and the wire field is additive — the label appears on a
+// cancelled job, nothing appears when the cause is unknown, and
+// JobCancelled keeps its value either way.
+func TestCancelCause_ValuesAndJSON(t *testing.T) {
+	var zero CancelCause
+	if zero != CancelUnknown {
+		t.Fatalf("zero value = %q, want CancelUnknown", zero)
+	}
+	if zero == CancelShutdown || zero == CancelCaller {
+		t.Fatal("the zero value must not equal a real cause")
+	}
+	cases := map[string]struct {
+		cause CancelCause
+		// wantLog is the log/String rendering; wantJSON is the expected
+		// wire fragment ("" = the key must be absent entirely).
+		wantLog  string
+		wantJSON string
+	}{
+		"unknown":  {cause: CancelUnknown, wantLog: "unknown", wantJSON: ""},
+		"shutdown": {cause: CancelShutdown, wantLog: "shutdown", wantJSON: `"cancel_cause":"shutdown"`},
+		"caller":   {cause: CancelCaller, wantLog: "caller", wantJSON: `"cancel_cause":"caller"`},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.cause.String(); got != tc.wantLog {
+				t.Errorf("String() = %q, want %q", got, tc.wantLog)
+			}
+			raw, err := json.Marshal(&Job{
+				ID: "tj-1", Kind: JobKindInstall, State: JobCancelled, CancelCause: tc.cause,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := string(raw)
+			if !strings.Contains(body, `"state":"cancelled"`) {
+				t.Errorf("payload lost the cancelled state: %s", body)
+			}
+			switch {
+			case tc.wantJSON == "" && strings.Contains(body, "cancel_cause"):
+				t.Errorf("an unknown cause must not reach the wire: %s", body)
+			case tc.wantJSON != "" && !strings.Contains(body, tc.wantJSON):
+				t.Errorf("payload = %s, want it to carry %s", body, tc.wantJSON)
+			}
+		})
 	}
 }
 
@@ -553,7 +828,7 @@ func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 	// Occupy the worker, then fill the queue to its cap.
 	slow, err := e.Add(context.Background(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
-		Install: `sleep 3 && printf x > "$BIN/slow"`,
+		Install: `sleep 3 && ` + binStub("slow"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -594,7 +869,7 @@ func TestUninstall_UsesRemovedDefinitions(t *testing.T) {
 	marker := filepath.Join(e.toolsDir, "uninstall-ran")
 	job, err := e.Add(context.Background(), &AddRequest{
 		Name: "m", Source: SourceManual, Version: "1",
-		Install:   `printf x > "$BIN/m" && chmod 755 "$BIN/m"`,
+		Install:   binStub("m"),
 		Uninstall: fmt.Sprintf(`touch %q`, marker),
 	})
 	if err != nil {
@@ -714,6 +989,45 @@ func TestValidToolName_ScopedEdgeCases(t *testing.T) {
 	}
 }
 
+// TestValidToolName_PathComponents pins the half of the rule the charset
+// alone cannot express: the name becomes a path component under opt/, and
+// uninstall hands the whole join to os.RemoveAll, so a dot component would
+// aim that removal at the shared opt tree ("." / "@a/..") or at its parent
+// ("..") instead of at one tool's own directory.
+//
+// The accepted half is as load-bearing as the rejected one: dots and
+// leading dots are legal in a tool name, and only an EXACT "." or ".."
+// component is traversal.
+func TestValidToolName_PathComponents(t *testing.T) {
+	reject := map[string]string{
+		"..":       "the parent of the opt tree",
+		".":        "the opt tree itself",
+		"":         "empty",
+		"@a/..":    "a scoped name whose second component is the parent",
+		"a/../b":   "a traversal spelled mid-name",
+		"..\\evil": "a backslash is not an allowed name character, so it can never be a separator here",
+	}
+	for name, why := range reject {
+		if validToolName(name) {
+			t.Errorf("validToolName(%q) = true, want false (%s)", name, why)
+		}
+	}
+	accept := map[string]string{
+		"tool.v2":       "an embedded dot is an ordinary name character",
+		"..extras":      "two leading dots are not a traversal component",
+		"...":           "three dots is a directory name",
+		"a..b":          "adjacent dots mid-name are ordinary",
+		"@scope/a.b":    "a scoped name with a dotted second component",
+		"@../x":         "`@..` is a directory name, not a traversal component: Join keeps it",
+		"golangci-lint": "the ordinary shape",
+	}
+	for name, why := range accept {
+		if !validToolName(name) {
+			t.Errorf("validToolName(%q) = false, want true (%s)", name, why)
+		}
+	}
+}
+
 func TestPatch_ForceDisableCascades(t *testing.T) {
 	e := newTestEngine(t, nil)
 	addManual(t, e, "base", nil)
@@ -819,4 +1133,291 @@ func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
 			t.Fatalf("resolvable bump not persisted: %q", got)
 		}
 	})
+}
+
+// logCapture collects slog records so a test can assert on the
+// operator-facing log lines that are the only observable trace of some
+// paths (an artifact installed without checksum verification, a probe
+// that could not execute a recorded bin).
+type logCapture struct {
+	lines []string
+	mu    sync.Mutex
+}
+
+func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s", r.Level, r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Fprintf(&b, " %s=%v", a.Key, a.Value)
+		return true
+	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, b.String())
+	return nil
+}
+
+func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *logCapture) WithGroup(string) slog.Handler      { return c }
+
+// has reports whether any captured line carries every substring.
+func (c *logCapture) has(parts ...string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, line := range c.lines {
+		hit := true
+		for _, p := range parts {
+			if !strings.Contains(line, p) {
+				hit = false
+				break
+			}
+		}
+		if hit {
+			return true
+		}
+	}
+	return false
+}
+
+// captureLogs points an engine's loggers at a capture handler.
+func captureLogs(e *Engine) *logCapture {
+	cap := &logCapture{}
+	log := slog.New(cap)
+	e.log = log
+	e.inst.log = log
+	return cap
+}
+
+// TestInstallAqua_ChecksumOutcomes pins the checksum invariant end to
+// end. A DECLARED checksum source must produce a matching digest or the
+// install is refused — an unfetchable checksum file, a file that does not
+// list the asset, and a mismatching digest all abort with nothing linked
+// and no state row. Only a definition that declares nothing (or whose
+// upstream disabled verification) installs unverified, and that path is
+// recorded in tools-state.json and warned about on the engine logger, so
+// "this tool was installed unverified" is observable rather than inferred.
+func TestInstallAqua_ChecksumOutcomes(t *testing.T) {
+	payload := "#!/bin/sh\necho tool\n"
+	sum := sha256.Sum256([]byte(payload))
+	digest := hex.EncodeToString(sum[:])
+	asset := "tool_1.0.0_linux_" + runtime.GOARCH + ".raw"
+	off := false
+
+	var checksumBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "sums.txt") {
+			if checksumBody == "" {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write([]byte(checksumBody))
+			return
+		}
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer srv.Close()
+
+	cases := []struct {
+		name      string
+		checksum  *AquaChecksum
+		body      string
+		wantErr   string
+		wantState string
+		wantWarn  bool
+	}{
+		{
+			name:      "declared and matching digest verifies",
+			checksum:  &AquaChecksum{Type: aquaTypeHTTP, URL: srv.URL + "/sums.txt", Algorithm: "sha256"},
+			body:      digest + "  " + asset + "\n",
+			wantState: checksumVerified,
+		},
+		{
+			name:     "declared but the checksum file cannot be fetched",
+			checksum: &AquaChecksum{Type: aquaTypeHTTP, URL: srv.URL + "/sums.txt", Algorithm: "sha256"},
+			body:     "", // 404
+			wantErr:  "refusing to install",
+		},
+		{
+			name:     "declared but the file does not list the asset",
+			checksum: &AquaChecksum{Type: aquaTypeHTTP, URL: srv.URL + "/sums.txt", Algorithm: "sha256"},
+			body:     digest + "  something-else.raw\n",
+			wantErr:  "refusing to install",
+		},
+		{
+			name:     "declared but the digest mismatches",
+			checksum: &AquaChecksum{Type: aquaTypeHTTP, URL: srv.URL + "/sums.txt", Algorithm: "sha256"},
+			body:     strings.Repeat("0", 64) + "  " + asset + "\n",
+			wantErr:  "checksum mismatch",
+		},
+		{
+			name:      "no checksum declared installs unverified, loudly",
+			checksum:  nil,
+			wantState: checksumUnverified,
+			wantWarn:  true,
+		},
+		{
+			name: "upstream disabled verification installs unverified, loudly",
+			checksum: &AquaChecksum{
+				Type: aquaTypeHTTP, URL: srv.URL + "/sums.txt", Algorithm: "sha256", Enabled: &off,
+			},
+			body:      digest + "  " + asset + "\n",
+			wantState: checksumUnverified,
+			wantWarn:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			checksumBody = tc.body
+			aq := &AquaPackage{
+				Type: aquaTypeHTTP, RepoOwner: "o", RepoName: "tool",
+				URL:      srv.URL + "/tool_{{trimV .Version}}_{{.OS}}_{{.Arch}}.raw",
+				Format:   formatRaw,
+				Files:    []AquaFile{{Name: "tool"}},
+				Checksum: tc.checksum,
+			}
+			e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{
+				"tool": {Name: "tool", Source: "aqua:o/tool", Aqua: aq},
+			}})
+			logs := captureLogs(e)
+
+			job, err := e.Add(context.Background(), &AddRequest{Name: "tool", Version: "v1.0.0"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+			st := e.store.State().Tools["tool"]
+
+			if tc.wantErr != "" {
+				if final.State != JobFailed || !strings.Contains(final.Error, tc.wantErr) {
+					t.Fatalf("job = %+v, want failure containing %q", final, tc.wantErr)
+				}
+				if _, err := os.Lstat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
+					t.Error("bin linked despite a failed checksum")
+				}
+				if st.InstalledVersion != "" {
+					t.Errorf("state records an install that was refused: %+v", st)
+				}
+				if !logs.has("ERROR", "REFUSING install", "tool=tool") {
+					t.Error("refusal not logged at ERROR on the engine logger")
+				}
+				return
+			}
+			if final.State != JobDone {
+				t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+			}
+			if st.Checksum != tc.wantState {
+				t.Errorf("state checksum = %q, want %q", st.Checksum, tc.wantState)
+			}
+			if got := logs.has("WARN", "UNVERIFIED", "tool=tool"); got != tc.wantWarn {
+				t.Errorf("unverified warning logged = %v, want %v", got, tc.wantWarn)
+			}
+		})
+	}
+}
+
+// TestVerifyArtifact_DeclaredWithoutSourceRefuses: a definition that
+// DECLARES a checksum but whose source resolved to no URL must refuse the
+// install. Nothing in the resolver is supposed to produce that spec, and
+// that is the point — the install path no longer trusts an empty
+// ChecksumURL to mean "this artifact needs no verification", so a future
+// checksum type that forgets to error cannot silently install unverified.
+func TestVerifyArtifact_DeclaredWithoutSourceRefuses(t *testing.T) {
+	dir := t.TempDir()
+	logs := &logCapture{}
+	in := &installer{toolsDir: dir, output: func(string) {}, log: slog.New(logs)}
+	artifact := filepath.Join(dir, "artifact")
+	if err := os.WriteFile(artifact, []byte("bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name     string
+		spec     *InstallSpec
+		wantErr  string
+		wantMark string
+	}{
+		{
+			name:     "declared but unresolved refuses",
+			spec:     &InstallSpec{URL: "https://example.com/x", ChecksumDeclared: true},
+			wantErr:  "declares a checksum source",
+			wantMark: "",
+		},
+		{
+			name:     "undeclared installs unverified",
+			spec:     &InstallSpec{URL: "https://example.com/x"},
+			wantMark: checksumUnverified,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := in.verifyArtifact(context.Background(), "tool", "v1", artifact, tc.spec)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("verifyArtifact = %q, %v; want error containing %q", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.wantMark {
+				t.Fatalf("verifyArtifact = %q, %v; want %q, nil", got, err, tc.wantMark)
+			}
+		})
+	}
+}
+
+// TestPruneOldVersions_Retention pins the retention policy: the current
+// version always stays, the configured number of most recent previous
+// versions stay with it (so a bad update has something to fall back to),
+// and transient staging/backup residue is never retained.
+func TestPruneOldVersions_Retention(t *testing.T) {
+	cases := []struct {
+		name string
+		keep int
+		want []string
+	}{
+		{name: "unset keeps one previous", keep: 0, want: []string{"v3.0.0", "v2.0.0"}},
+		{name: "explicit two", keep: 2, want: []string{"v3.0.0", "v2.0.0", "v1.0.0"}},
+		{name: "explicit one", keep: 1, want: []string{"v3.0.0", "v2.0.0"}},
+		{name: "negative keeps none", keep: -1, want: []string{"v3.0.0"}},
+		{name: "more than exist keeps all", keep: 9, want: []string{"v3.0.0", "v2.0.0", "v1.0.0", "v0.9.0"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			in := &installer{toolsDir: dir, output: func(string) {}}
+			root := filepath.Join(in.optDir(), "tool")
+			// Oldest first, with distinct mtimes: retention is newest-first.
+			ages := map[string]time.Duration{
+				"v0.9.0": 96 * time.Hour, "v1.0.0": 72 * time.Hour,
+				"v2.0.0": 48 * time.Hour, "v3.0.0": 0,
+				"v3.0.0" + stagingSuffix: 0, "v2.0.0" + backupSuffix: 0,
+			}
+			for name, age := range ages {
+				p := filepath.Join(root, name)
+				if err := os.MkdirAll(p, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				when := time.Now().Add(-age)
+				if err := os.Chtimes(p, when, when); err != nil {
+					t.Fatal(err)
+				}
+			}
+			in.pruneOldVersions("tool", "v3.0.0", tc.keep)
+
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var left []string
+			for _, e := range entries {
+				left = append(left, e.Name())
+			}
+			slices.Sort(left)
+			want := append([]string{}, tc.want...)
+			slices.Sort(want)
+			if !slices.Equal(left, want) {
+				t.Fatalf("surviving versions = %v, want %v", left, want)
+			}
+		})
+	}
 }

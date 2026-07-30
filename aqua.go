@@ -101,9 +101,16 @@ type AquaChecksum struct {
 type InstallSpec struct {
 	URL         string
 	Format      string // tar.gz | tar.xz | tar.zst | zip | gz | xz | raw
-	ChecksumURL string // empty = no verification
+	ChecksumURL string // empty = nothing to fetch; see ChecksumDeclared
 	ChecksumAlg string
 	Files       []AquaFile
+	// ChecksumDeclared records that the definition DECLARES checksum
+	// verification for this version (a checksum block that upstream did
+	// not disable). It travels separately from ChecksumURL so the
+	// install path can tell "this artifact is not meant to be verified"
+	// from "verification was declared and we failed to obtain it" — the
+	// second must refuse the install, never install unverified.
+	ChecksumDeclared bool
 }
 
 // templateVars is the variable set aqua templates reference.
@@ -233,12 +240,18 @@ func (d *flatDef) resolveFiles(p *AquaPackage, spec *InstallSpec, vars *template
 // checksum. A CONFIGURED checksum must resolve or the install fails —
 // silently downgrading to an unverified install on a template error or
 // unknown type would hide exactly the tampering the checksum exists to
-// catch.
+// catch. The declaration is recorded on the spec even when resolution
+// fails, so no later stage can mistake it for an artifact that was never
+// meant to be verified.
 func (d *flatDef) resolveChecksum(p *AquaPackage, spec *InstallSpec, vars *templateVars) error {
 	c := d.checksum
 	if c == nil || (c.Enabled != nil && !*c.Enabled) {
+		// No declaration, or upstream explicitly disabled verification
+		// for this package: the install path logs the unverified path
+		// loudly instead of resolving anything here.
 		return nil
 	}
+	spec.ChecksumDeclared = true
 	if c.Algorithm == "" {
 		return errors.New("aqua: checksum configured without an algorithm")
 	}
@@ -247,7 +260,10 @@ func (d *flatDef) resolveChecksum(p *AquaPackage, spec *InstallSpec, vars *templ
 		return fmt.Errorf("aqua: checksum url: %w", err)
 	}
 	if cu == "" {
-		return fmt.Errorf("aqua: unsupported checksum type %q", c.Type)
+		// Defensive: checksumURL errors on every empty case, so this can
+		// only fire if a future type is added without one. Refuse rather
+		// than hand the install path a declared-but-empty source.
+		return fmt.Errorf("aqua: checksum source resolved to no URL (type %q)", c.Type)
 	}
 	spec.ChecksumURL = cu
 	spec.ChecksumAlg = c.Algorithm
@@ -401,23 +417,33 @@ func (d *flatDef) artifactURL(p *AquaPackage, vars *templateVars) (string, error
 	}
 }
 
-// checksumURL renders the checksum artifact URL.
+// checksumURL renders the checksum artifact URL. Every failure mode —
+// an unsupported type, a template error, a template that renders empty —
+// is an error, never an empty URL the install path could read as "this
+// artifact needs no verification".
 func (d *flatDef) checksumURL(p *AquaPackage, c *AquaChecksum, vars *templateVars) (string, error) {
 	switch c.Type {
 	case aquaTypeGitHubRelease:
 		asset, err := renderTemplate(c.Asset, vars)
-		if err != nil || asset == "" {
+		if err != nil {
 			return "", err
+		}
+		if asset == "" {
+			return "", errors.New("checksum asset template rendered empty")
 		}
 		return fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s",
 			p.RepoOwner, p.RepoName, vars.Version, asset), nil
 	case aquaTypeHTTP:
-		return renderTemplate(c.URL, vars)
+		u, err := renderTemplate(c.URL, vars)
+		if err != nil {
+			return "", err
+		}
+		if u == "" {
+			return "", errors.New("checksum url template rendered empty")
+		}
+		return u, nil
 	default:
-		// Unsupported checksum type: the empty URL is NOT a silent
-		// skip — resolveChecksum fails closed on it when the
-		// definition declares a checksum.
-		return "", nil
+		return "", fmt.Errorf("unsupported checksum type %q", c.Type)
 	}
 }
 

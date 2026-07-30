@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -48,6 +49,15 @@ type Tool struct {
 	// Backend-level needs (npm->node, pip->uv, cargo->rust, go->go)
 	// are implied and need not be listed.
 	Requires []string `json:"requires,omitempty"`
+	// VersionArgs are the arguments that make this tool print its
+	// version, e.g. ["--version"] or ["version"]. Declaring them makes
+	// the install probe verify the ANSWER: the tool is executed and its
+	// output must contain the recorded version, so a binary that is
+	// present but is the wrong version counts as not installed and is
+	// reinstalled. Empty means the probe runs the tool with --version
+	// and only requires that it answers at all (the version stays
+	// unproven). Hydrated from the catalog when unset.
+	VersionArgs []string `json:"version_args,omitempty"`
 	// Pin freezes the version: update runs skip this tool.
 	Pin bool `json:"pin,omitempty"`
 	// Disabled marks the entry a template: recorded intent whose
@@ -78,6 +88,13 @@ type ToolStatus struct {
 	// LastError is the failure message of the most recent install
 	// attempt; cleared on success.
 	LastError string `json:"last_error,omitempty"`
+	// Checksum records how the installed artifact's integrity was
+	// established: "verified" (the definition declared a checksum
+	// source and the digest matched) or "unverified" (it declared
+	// none). Empty for sources without artifact checksums (npm, pip,
+	// cargo, go, manual). This is the durable answer to "was this tool
+	// installed unverified?".
+	Checksum string `json:"checksum,omitempty"`
 	// Bins are the names this tool owns in the bin dir (symlinks),
 	// removed on uninstall.
 	Bins []string `json:"bins,omitempty"`
@@ -166,6 +183,19 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 	if m.Tools == nil {
 		m.Tools = map[string]Tool{}
 	}
+	// tools.json is hand-editable and re-read per operation, so a key
+	// here has not necessarily been through Add's validation — and the
+	// key IS a path component: it is joined onto the opt dir and the
+	// join is handed to os.RemoveAll on uninstall. Validate on the way
+	// in, at the one place every read path goes through, rather than
+	// trusting the file. Refusing the document (like the version check
+	// above) beats dropping the entry: the engine reports intent it
+	// cannot use instead of silently rewriting it.
+	for _, name := range slices.Sorted(maps.Keys(m.Tools)) {
+		if !validToolName(name) {
+			return nil, fmt.Errorf("%s: invalid tool name %q", s.manifestPath, name)
+		}
+	}
 	return &m, nil
 }
 
@@ -174,9 +204,34 @@ func (s *store) writeManifestLocked(m *Manifest) error {
 	if err != nil {
 		return err
 	}
-	_, err = atomicfile.WriteFile(context.Background(), s.manifestPath, append(data, '\n'),
+	durable, err := atomicWrite(s.manifestPath, append(data, '\n'))
+	if err != nil {
+		return err
+	}
+	if !durable {
+		// Intent is recoverable (the file is user-editable and re-read
+		// per operation), so a non-durable manifest commit is reported
+		// rather than failed — unlike the state file below, which gates
+		// pruning and must never claim more than it can stand behind.
+		s.log.Warn("toolbelt: manifest write not durable", "path", s.manifestPath, "error", errNotDurable)
+	}
+	return nil
+}
+
+// atomicWrite publishes one engine-owned JSON file and reports whether
+// the commit reached stable storage. It is a package var so durability
+// tests can inject a failing write (ENOSPC) and a non-durable commit at
+// the state-write barrier.
+var atomicWrite = realAtomicWrite
+
+// realAtomicWrite is the production writer: atomicfile runs the full
+// protocol (write temp, fsync it, rename, fsync the parent directory), and
+// Durable is false when the parent-directory barrier failed after the
+// rename.
+func realAtomicWrite(path string, data []byte) (durable bool, err error) {
+	res, err := atomicfile.WriteFile(context.Background(), path, data,
 		atomicfile.WithMode(0o644), atomicfile.WithMkdirMode(0o755))
-	return err
+	return res.Durable, err
 }
 
 // Manifest returns a copy of the current manifest (Tool values are
@@ -236,27 +291,34 @@ func (s *store) readStateLocked() State {
 	return st
 }
 
-// MutateState applies fn to the machine state and persists it. State
-// write failures are logged, not fatal — state is reconstructible.
-func (s *store) MutateState(fn func(*State)) {
+// MutateState applies fn to the machine state and persists it durably.
+// The state file is the engine's record of what is installed, and an
+// install's commit point: it gates pruning superseded versions, so a
+// write that failed — or landed without reaching stable storage — is an
+// ERROR the caller must fail on, not a warning. Failing here leaves the
+// previous state file intact (atomicfile publishes by rename).
+func (s *store) MutateState(fn func(*State)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.readStateLocked()
 	fn(&st)
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
-		s.log.Error("toolbelt: marshal state", "error", err)
-		return
+		return fmt.Errorf("marshal state: %w", err)
 	}
-	if _, err := atomicfile.WriteFile(context.Background(), s.statePath, append(data, '\n'),
-		atomicfile.WithMode(0o644), atomicfile.WithMkdirMode(0o755)); err != nil {
-		s.log.Error("toolbelt: write state", "error", err)
+	durable, err := atomicWrite(s.statePath, append(data, '\n'))
+	if err != nil {
+		return fmt.Errorf("write %s: %w", s.statePath, err)
 	}
+	if !durable {
+		return fmt.Errorf("write %s: %w", s.statePath, errNotDurable)
+	}
+	return nil
 }
 
 // setToolStatus records a status update for one tool.
-func (s *store) setToolStatus(name string, fn func(*ToolStatus)) {
-	s.MutateState(func(st *State) {
+func (s *store) setToolStatus(name string, fn func(*ToolStatus)) error {
+	return s.MutateState(func(st *State) {
 		cur := st.Tools[name]
 		fn(&cur)
 		cur.UpdatedAt = time.Now().UTC()
@@ -265,8 +327,8 @@ func (s *store) setToolStatus(name string, fn func(*ToolStatus)) {
 }
 
 // dropToolStatus removes a tool's machine state entirely (uninstall).
-func (s *store) dropToolStatus(name string) {
-	s.MutateState(func(st *State) {
+func (s *store) dropToolStatus(name string) error {
+	return s.MutateState(func(st *State) {
 		delete(st.Tools, name)
 	})
 }

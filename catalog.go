@@ -29,7 +29,12 @@ type CatalogEntry struct {
 	Probe     string   `json:"probe,omitempty"`     // manual-source entries
 	Aliases   []string `json:"aliases,omitempty"`
 	Requires  []string `json:"requires,omitempty"`
-	Featured  bool     `json:"featured,omitempty"`
+	// VersionArgs declares the tool's version-reporting shape, e.g.
+	// ["--version"] or ["version"]. Hydrated onto manifest entries, it
+	// upgrades the install probe from "the binary runs" to "the binary
+	// reports the recorded version" (see Tool.VersionArgs).
+	VersionArgs []string `json:"version_args,omitempty"`
+	Featured    bool     `json:"featured,omitempty"`
 	// Lsp marks language-server entries; drives the consumers'
 	// no-LSP-enabled warning and UI badges.
 	Lsp bool `json:"lsp,omitempty"`
