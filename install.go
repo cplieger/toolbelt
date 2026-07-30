@@ -309,7 +309,7 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]stri
 		if err != nil {
 			return nil, fmt.Errorf("declared file %s missing after extract: %w", src, err)
 		}
-		if _, err := safeJoin(versDir, mustRel(versDir, resolved)); err != nil {
+		if !insideStrictly(versDir, resolved) {
 			return nil, fmt.Errorf("declared file %s escapes the install dir via symlink", src)
 		}
 		if err := os.Chmod(resolved, 0o755); err != nil {

@@ -89,10 +89,20 @@ func TestSyncTree_OrdersBarriers(t *testing.T) {
 	}
 
 	var order []string
-	swapBarriers(t,
-		func(p string) error { order = append(order, "file:"+mustRel(root, p)); return nil },
-		func(p string) error { order = append(order, "dir:"+mustRel(root, p)); return nil },
-		nil)
+	// record labels a barrier call by the walked path's position under
+	// root, so the assertions below read as the tree rather than as temp
+	// directory names.
+	record := func(kind string) func(string) error {
+		return func(p string) error {
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return err
+			}
+			order = append(order, kind+":"+rel)
+			return nil
+		}
+	}
+	swapBarriers(t, record("file"), record("dir"), nil)
 	if err := syncTree(root); err != nil {
 		t.Fatalf("syncTree: %v", err)
 	}
