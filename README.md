@@ -161,6 +161,7 @@ Every response above — and every response the router itself generates for a pa
 | `Seed` | manifest written when none exists (fresh volume); nil seeds empty |
 | `System` | image-baked binaries reported read-only in `Inventory` |
 | `KeepVersions` | how many superseded versions to retain under `opt/<name>/` for rollback (0 = the default 1; negative = keep none) |
+| `VerifyRootIntegrity` | opt-in prerequisite check (off by default): refuses `New` when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `python/`, `python/bin` exists and is a symlink, is not a directory, is group- or other-writable, cannot be inspected, or resolves outside the tool tree. A path that does not exist yet is skipped. Report only — nothing is chmodded, created or repaired; the failure is `ErrRootIntegrity` (`errors.Is`) as a `*RootIntegrityError` naming every offending path (`errors.As`) |
 | `OnJobChanged` / `OnJobOutput` | job lifecycle + coalesced output callbacks (must not block); nil is silent |
 | `Logger` | `slog` logger; nil uses the default |
 

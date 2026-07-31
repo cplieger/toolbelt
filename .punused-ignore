@@ -18,20 +18,20 @@
 # finding below is dead code hiding behind a published name.
 #
 # Engine lifecycle, the four calls a consumer app makes to own a tools engine.
-# New is the only constructor (toolbelt.go:192): vibekit
-# internal/composition/composition.go:477, web-terminal-kiro main.go:1056.
-# Close is the shutdown half (toolbelt.go:231): vibekit composition.go:288
+# New is the only constructor (toolbelt.go:227): vibekit
+# internal/composition/composition.go:477, web-terminal-kiro main.go:1144.
+# Close is the shutdown half (toolbelt.go:277): vibekit composition.go:288
 # (`a.tools.Close()`, field typed *toolbelt.Engine at composition.go:45),
-# web-terminal-kiro main.go:1007. Wait blocks on a job id (engine.go:158):
+# web-terminal-kiro main.go:1007. Wait blocks on a job id (engine.go:165):
 # web-terminal-kiro main.go:1131 inside awaitBootConvergence, launched at
-# main.go:1108. Reconcile enqueues the convergence job (engine.go:583):
+# main.go:1108. Reconcile enqueues the convergence job (engine.go:590):
 # vibekit composition.go:505, web-terminal-kiro main.go:1089.
 function New
 method (*Engine).Close
 method (*Engine).Wait
 method (*Engine).Reconcile
 #
-# EnsureInstalled (engine.go:609) is the synchronous "a product action needs
+# EnsureInstalled (engine.go:616) is the synchronous "a product action needs
 # this binary now" path. vibekit assigns it as a method VALUE rather than
 # calling it -- `forgesPkg.EnsureTool = toolsEngine.EnsureInstalled`,
 # internal/composition/composition.go:156 -- so even an in-module reference
@@ -39,9 +39,9 @@ method (*Engine).Reconcile
 # through that function field (internal/forges/install.go).
 method (*Engine).EnsureInstalled
 #
-# DefaultSeed (toolbelt.go:249) is the shared starter manifest every consumer
+# DefaultSeed (toolbelt.go:295) is the shared starter manifest every consumer
 # passes as Config.Seed: vibekit composition.go:483, web-terminal-kiro
-# main.go:1061. Deleting it would leave both apps with no manifest seed and
+# main.go:1149. Deleting it would leave both apps with no manifest seed and
 # duplicate the language-server starter set into each of them.
 function DefaultSeed
 #
@@ -85,16 +85,42 @@ function Handler
 method (*multiFlag).String
 method (*multiFlag).Set
 #
-# errors.Is contract: (*DependentsError).Is (engine.go:43) is the method
+# errors.Is contract: (*DependentsError).Is (engine.go:50) is the method
 # `errors.Is` looks for through its `interface{ Is(error) bool }` type
 # assertion, which is a runtime dispatch gopls cannot resolve to a reference.
 # It is what makes `errors.Is(err, ErrHasDependents)` match the *DependentsError
-# returned by engine.go:360 and engine.go:545, and it is documented as the
+# returned by engine.go:367 and engine.go:552, and it is documented as the
 # published comparison contract at engine.go:13. Test-covered at
 # engine_test.go:255, engine_test.go:945 and reconcile_test.go:112, so deleting
 # it fails the suite rather than silently, but it is still not dead: it is the
 # only reason the sentinel comparison this package documents works at all.
 method (*DependentsError).Is
+#
+# errors.Is contract, second instance: (*RootIntegrityError).Is
+# (rootintegrity.go) is the same finding class as (*DependentsError).Is above —
+# the method `errors.Is` reaches through its `interface{ Is(error) bool }`
+# assertion, a runtime dispatch gopls cannot resolve to a reference. It is what
+# makes `errors.Is(err, ErrRootIntegrity)` match the *RootIntegrityError that
+# New returns when the opt-in Config.VerifyRootIntegrity check refuses a managed
+# root, and that comparison IS the consumer contract: the two apps answer an
+# unfit root differently (fatal vs warn-and-run-tool-less), so each needs the
+# CLASS before it reads the per-path findings with errors.As.
+# The adoptions land SEPARATELY: as of this entry neither consumer sets the
+# field, so the call sites the check will gate are their existing New literals —
+# vibekit internal/composition/composition.go:477 and web-terminal-kiro
+# main.go:1144. Test-covered in rootintegrity_test.go, so deleting it fails the
+# suite rather than silently, but it is not dead: it is the only reason the
+# sentinel comparison this package documents works at all.
+method (*RootIntegrityError).Is
+#
+# The change that added the above introduced four other exported symbols with no
+# entry here, deliberately: ErrRootIntegrity, RootIntegrityError,
+# RootIntegrityFinding and Config.VerifyRootIntegrity. Measured against the
+# pinned punused v0.5.0, none is reported — it surfaces functions, methods and
+# constants, and each of these is either a var, type or struct field it does not
+# report at all, or carries an in-module production reference. An ignore entry
+# that matches nothing is a stale-entry warning, so pre-emptively silencing them
+# would trade a real adjudication for noise.
 #
 # NOT adjudicated here: probe.go's `(*cappedBuffer).Write`, an io.Writer assigned
 # to exec.Cmd's Stdout/Stderr. That file is untracked as of this commit, so an
