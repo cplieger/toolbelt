@@ -122,8 +122,14 @@ method (*RootIntegrityError).Is
 # that matches nothing is a stale-entry warning, so pre-emptively silencing them
 # would trade a real adjudication for noise.
 #
-# NOT adjudicated here: probe.go's `(*cappedBuffer).Write`, an io.Writer assigned
-# to exec.Cmd's Stdout/Stderr. That file is untracked as of this commit, so an
-# entry for it would claim an adjudication about code the repo does not contain.
-# Add one when probe.go lands -- same finding and same reason as
-# docker-rsync-scheduler's entry for its own cappedBuffer.
+# probe.go's `(*cappedBuffer).Write`: the same finding class as
+# docker-rsync-scheduler's entry for its own cappedBuffer, and the same reason.
+# cappedBuffer collects at most probeOutputCap bytes so an unbounded talker
+# cannot grow the heap; runProbe assigns it to BOTH exec.Cmd.Stdout and .Stderr
+# (probe.go:227-228), so those two lines do not compile without Write, and at
+# runtime it is the only path by which a probed binary's output reaches the
+# String() calls that build every return value (probe.go:231, 235, 237).
+# punused resolves explicit call sites only, which is why the sibling String()
+# -- called directly -- is not flagged and this one, reached through the
+# io.Writer interface, is. Upstream: bep/punused#3.
+method (*cappedBuffer).Write
