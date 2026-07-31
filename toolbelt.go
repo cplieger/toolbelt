@@ -113,6 +113,33 @@ type Config struct {
 	// means DefaultKeepVersions; a negative value keeps none, pruning
 	// every superseded tree as soon as the new one is committed.
 	KeepVersions int
+	// VerifyRootIntegrity makes New REFUSE to construct an Engine over
+	// managed roots it cannot safely execute from. Off by default (the
+	// zero value is the pre-check behavior, byte for byte).
+	//
+	// Turn it on when the tool tree lives on an operator-controlled
+	// persistent volume and the process runs privileged: the install
+	// probe executes what it finds in <ToolsDir>/bin, and that dir goes
+	// first on PATH for package-manager runs, so a managed root that is
+	// a symlink elsewhere or that a non-owner can write is a
+	// code-execution surface.
+	//
+	// Checked, in order: ConfigDir, ToolsDir, and <ToolsDir>/{bin, opt,
+	// npm, npm/bin, python, python/bin}. A path that does not exist yet
+	// is skipped (a fresh volume has almost none of them). A path that
+	// exists must be a real directory — never a symlink — that no group
+	// or other principal can write, and (ConfigDir excepted, it is
+	// legitimately elsewhere) that still resolves inside the tool tree.
+	// An unreadable path fails closed.
+	//
+	// The check REPORTS ONLY: it never chmods, creates, repairs or
+	// deletes anything, because tightening an operator's volume from
+	// inside a library is not the library's call. Repair belongs to the
+	// consumer's entrypoint. A failure returns ErrRootIntegrity
+	// (errors.Is) as a *RootIntegrityError carrying every offending path
+	// and reason (errors.As), logged at Error before New returns, so a
+	// consumer can choose between fatal and degraded-but-running.
+	VerifyRootIntegrity bool
 }
 
 // Engine is the tools subsystem: the single owner of the manifest and
@@ -189,6 +216,14 @@ func newEngineClient() *http.Client {
 // New constructs and starts an Engine: initializes the manifest files
 // (seeding when absent; a manifest of any other schema version is an
 // error) and launches the job worker.
+//
+// With Config.VerifyRootIntegrity set, the managed roots are inspected
+// FIRST — before any file is written, any directory created, or the job
+// worker started — and an unfit root refuses construction with
+// ErrRootIntegrity. New is the seam on purpose: Inventory and
+// EnsureInstalled probe (and therefore execute) synchronously, so gating
+// only the reconcile queue would leave those paths open, while no Engine
+// at all closes every one of them.
 func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
@@ -196,6 +231,17 @@ func New(cfg *Config) (*Engine, error) {
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
+	}
+	// Before newStore: st.initFiles() writes tools.json and CREATES
+	// ConfigDir, so a check placed after it would be judging a directory
+	// this library just made. Before the MkdirAll of bin/ further down,
+	// which follows a symlink at every component. And before
+	// newJobQueue, whose worker goroutine an error returned afterwards
+	// would leak (the caller gets a nil Engine and can never Close it).
+	if cfg.VerifyRootIntegrity {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+			return nil, fmt.Errorf("toolbelt: %w", err)
+		}
 	}
 	st := newStore(cfg.ConfigDir, cfg.Seed, log)
 	if err := st.initFiles(); err != nil {

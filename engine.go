@@ -11,7 +11,8 @@ import (
 )
 
 // Sentinel errors. Compare with errors.Is; *DependentsError additionally
-// carries the dependent names (errors.As).
+// carries the dependent names and *RootIntegrityError the offending roots
+// (errors.As).
 var (
 	// ErrNotFound marks an operation on a tool the manifest doesn't have.
 	ErrNotFound = errors.New("tool not found")
@@ -27,6 +28,12 @@ var (
 	// cap. Without it a Wait on an evicted id would poll to ctx
 	// deadline.
 	ErrUnknownJob = errors.New("unknown job")
+	// ErrRootIntegrity marks a New refused by the opt-in root-integrity
+	// check (Config.VerifyRootIntegrity): a managed root is a symlink,
+	// is not a directory, is group- or other-writable, cannot be
+	// inspected, or resolves outside the tool tree. *RootIntegrityError
+	// names each one.
+	ErrRootIntegrity = errors.New("managed root failed the integrity check")
 )
 
 // DependentsError is the ErrHasDependents shape that names the enabled
