@@ -18,3 +18,5 @@ require (
 	github.com/cplieger/scheduler/v3 v3.0.0
 	go.yaml.in/yaml/v3 v3.0.5
 )
+
+require github.com/cplieger/keyenc v1.0.0

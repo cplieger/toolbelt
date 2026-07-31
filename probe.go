@@ -9,9 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cplieger/keyenc"
 )
 
 // probeTimeout bounds one probe execution: generous enough for a
@@ -269,6 +272,16 @@ func derivedProbeName(name string, t *Tool) string {
 // probeFingerprint identifies what is about to be probed, so a cached
 // verdict is only reused for the exact same binary, recorded version and
 // probe shape.
+//
+// The components are assembled with keyenc rather than concatenated, because
+// two of them can contain a separator and they are not separated by anything
+// that cannot: the resolved path is a filesystem path and the wanted version
+// is a manifest string, so a path containing the separator shifts the split
+// and one tool's fingerprint can be made to match another shape's. The arg
+// list nests by composition for the same reason a space-joined list is not
+// enough on its own: joining ["--version"] and ["--", "version"] to one string
+// loses the element boundary, so two different probe invocations would share a
+// verdict.
 func probeFingerprint(target, want string, args []string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
@@ -278,8 +291,13 @@ func probeFingerprint(target, want string, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s|%d|%d|%s|%s",
-		resolved, fi.Size(), fi.ModTime().UnixNano(), want, strings.Join(args, " ")), nil
+	return keyenc.Join(
+		resolved,
+		strconv.FormatInt(fi.Size(), 10),
+		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
+		want,
+		keyenc.Join(args...),
+	), nil
 }
 
 // versionAnswered reports whether a probe's output claims the recorded
