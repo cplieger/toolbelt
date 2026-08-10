@@ -3,7 +3,7 @@ module github.com/cplieger/toolbelt/v2
 go 1.26.5
 
 require (
-	github.com/cplieger/atomicfile/v2 v2.7.0
+	github.com/cplieger/atomicfile/v2 v2.8.0
 	github.com/cplieger/httpx/v4 v4.3.0
 	github.com/cplieger/pathinside v1.0.0
 	github.com/cplieger/ssrf/v3 v3.0.0
