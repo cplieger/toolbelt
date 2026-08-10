@@ -37,7 +37,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -234,10 +233,11 @@ func New(cfg *Config) (*Engine, error) {
 	}
 	// Before newStore: st.initFiles() writes tools.json and CREATES
 	// ConfigDir, so a check placed after it would be judging a directory
-	// this library just made. Before the MkdirAll of bin/ further down,
-	// which follows a symlink at every component. And before
-	// newJobQueue, whose worker goroutine an error returned afterwards
-	// would leak (the caller gets a nil Engine and can never Close it).
+	// this library just made. Before the bin/ creation further down, which
+	// resolves every ancestor component by name (only the leaf mkdir refuses
+	// a symlink). And before newJobQueue, whose worker goroutine an error
+	// returned afterwards would leak (the caller gets a nil Engine and can
+	// never Close it).
 	if cfg.VerifyRootIntegrity {
 		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
 			return nil, fmt.Errorf("toolbelt: %w", err)
@@ -263,7 +263,13 @@ func New(cfg *Config) (*Engine, error) {
 	e.initCatalog(cfg)
 	e.queue = newJobQueue(cfg.OnJobChanged, cfg.OnJobOutput, log, e.executeJob)
 	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, log: log, output: func(string) {}}
-	if err := os.MkdirAll(filepath.Join(cfg.ToolsDir, "bin"), 0o755); err != nil {
+	// ensureManagedDir, not MkdirAll: this is where bin/ is normally BORN,
+	// so it is the only place the mode the filesystem stored for it can
+	// still be certified. linkBin re-establishes the same directory later
+	// and enforces there too, but by then this call has already created it,
+	// so leaving this one unverified would make that enforcement dead code
+	// in every flow that goes through New.
+	if err := ensureManagedDir(filepath.Join(cfg.ToolsDir, "bin")); err != nil {
 		return nil, err
 	}
 	e.startCatalogSchedule()

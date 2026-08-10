@@ -1,9 +1,11 @@
 package toolbelt
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -276,4 +278,173 @@ func FuzzSafeJoin(f *testing.F) {
 			t.Fatalf("safeJoin(base, %q) = %q is not cleaned", rel, got)
 		}
 	})
+}
+
+// TestExtractArtifact_RawEnforcesTheStoredExecutableMode pins that the mode of
+// a plain-binary artifact is what the filesystem STORED, not what the extract
+// asked for. os.Rename carries the artifact's own mode onto the installed
+// name, so a group-writable download stays group-writable unless something
+// brings it back — and a 0775 binary that the very next step publishes as
+// bin/<name> on PATH is writable by every member of its group.
+//
+// The drift is REAL rather than mocked: the artifact is genuinely 0o777 on disk
+// and the rename genuinely preserves it, which the witness below asserts before
+// the assertion that matters. If a filesystem ever clamped either, the test
+// would pass without exercising enforcement at all, so it fails as INVALID
+// instead.
+func TestExtractArtifact_RawEnforcesTheStoredExecutableMode(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	srcDir := filepath.Join(base, "dl")
+	destDir := filepath.Join(base, "dest")
+	for _, d := range []string{srcDir, destDir} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Witness: the wide mode is really stored, and really survives a rename
+	// into destDir. Both are preconditions for enforcement being what fixes it.
+	probe := filepath.Join(srcDir, "probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(probe, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	probeOut := filepath.Join(destDir, "probe")
+	if err := os.Rename(probe, probeOut); err != nil {
+		t.Fatal(err)
+	}
+	wfi, err := os.Lstat(probeOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wfi.Mode().Perm() != 0o777 {
+		t.Fatalf("INVALID: a 0777 artifact renamed into place stored %v; this filesystem "+
+			"leaves nothing for mode enforcement to correct, so the test below is vacuous",
+			wfi.Mode().Perm())
+	}
+	if err := os.Remove(probeOut); err != nil {
+		t.Fatal(err)
+	}
+
+	artifact := filepath.Join(srcDir, "rg-download")
+	if err := os.WriteFile(artifact, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(artifact, 0o777); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := extractArtifact(t.Context(), artifact, formatRaw, destDir, "rg"); err != nil {
+		t.Fatalf("extractArtifact: %v", err)
+	}
+	fi, err := os.Lstat(filepath.Join(destDir, "rg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != binExecMode {
+		t.Fatalf("installed binary mode = %v, want %v: the stored mode was not enforced, "+
+			"leaving a group-writable executable bound for PATH", got, binExecMode)
+	}
+}
+
+// TestLinkDeclaredFiles_EnforcesTheStoredExecutableMode pins the same property
+// on the publish path, where the target's mode comes from the ARCHIVE: tar and
+// unzip restore a member's recorded mode, so an archive can hand toolbelt a
+// group-writable file and the old pathname chmod would have reported success
+// whatever the filesystem did with its request. The bin/<name> symlink that
+// follows puts the result on PATH, which is what makes 0775 rather than 0755 a
+// security outcome and not a cosmetic one.
+//
+// The wider starting mode is REAL — set on disk before the call, asserted by
+// the witness — so enforcement is what brings it back.
+func TestLinkDeclaredFiles_EnforcesTheStoredExecutableMode(t *testing.T) {
+	t.Parallel()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := &installer{toolsDir: dir, output: func(string) {}}
+	versDir := filepath.Join(in.optDir(), "rg", "14.1.1")
+	if err := os.MkdirAll(filepath.Join(versDir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	declared := filepath.Join(versDir, "bin", "rg")
+	if err := os.WriteFile(declared, []byte("#!/bin/sh\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A group-writable executable, the shape an archive member can carry.
+	if err := os.Chmod(declared, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	wfi, err := os.Lstat(declared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wfi.Mode().Perm() != 0o775 {
+		t.Fatalf("INVALID: declared file stored %v for a 0775 request; the drift this test "+
+			"exists to correct is not present on this filesystem", wfi.Mode().Perm())
+	}
+
+	bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}})
+	if err != nil {
+		t.Fatalf("linkDeclaredFiles: %v", err)
+	}
+	if len(bins) != 1 || bins[0] != "rg" {
+		t.Fatalf("linked bins = %v, want [rg]", bins)
+	}
+	fi, err := os.Lstat(declared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != binExecMode {
+		t.Fatalf("declared file mode = %v, want %v: a group-writable binary was published "+
+			"to the PATH dir", got, binExecMode)
+	}
+	if _, err := os.Lstat(filepath.Join(in.binDir(), "rg")); err != nil {
+		t.Fatalf("bin/rg was not published: %v", err)
+	}
+}
+
+// TestEnforceExecutable_RefusesASymlinkInsteadOfChmodingItsTarget pins the half
+// of the change the mode assertions cannot see. os.Chmod resolves the pathname,
+// so a symlink left where an installed binary should be made the old code chmod
+// whatever it pointed at — 0o755 on somebody else's file, applied by the
+// installer. The handle is opened O_NOFOLLOW, so the kernel refuses the name
+// outright and the victim keeps its mode.
+//
+// In the two production callers the target was just created or just resolved, so
+// the refusal is a guard against a swap racing those steps rather than a shape
+// either call path can reach on its own; the helper is where it is testable.
+func TestEnforceExecutable_RefusesASymlinkInsteadOfChmodingItsTarget(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	victim := filepath.Join(dir, "victim")
+	if err := os.WriteFile(victim, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(victim, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "rg")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Fatal(err)
+	}
+
+	err := enforceExecutable(link)
+	if err == nil {
+		t.Fatal("a symlink at the binary name was accepted; want the kernel refusal")
+	}
+	if !errors.Is(err, syscall.ELOOP) {
+		t.Errorf("error = %v, want ELOOP from O_NOFOLLOW", err)
+	}
+	fi, ferr := os.Lstat(victim)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	if got := fi.Mode().Perm(); got != 0o600 {
+		t.Errorf("victim mode = %v, want 0600 untouched: the enforcement followed the symlink", got)
+	}
 }

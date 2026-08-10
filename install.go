@@ -70,6 +70,116 @@ func (in *installer) optDir() string    { return filepath.Join(in.toolsDir, "opt
 func (in *installer) npmDir() string    { return filepath.Join(in.toolsDir, "npm") }
 func (in *installer) pythonDir() string { return filepath.Join(in.toolsDir, "python") }
 
+// managedDirMode is the mode every directory the engine creates for
+// itself is pinned to: traversable by anyone who can reach the tools
+// tree, writable only by the uid the engine runs as.
+const managedDirMode os.FileMode = 0o755
+
+// ensureManagedDir creates dir and, when THIS call created it, PROVES the
+// filesystem stored managedDirMode rather than assuming it did.
+//
+// The MkdirAll this replaces asked and never looked. A mode argument is a
+// REQUEST, not a result: mkdir(2) takes it through the umask, and a
+// filesystem carrying an inheritable group-write ACE overrides the
+// outcome regardless of what was asked — measured on a ZFS nfs4acl
+// dataset, a 0o700 mkdir comes back 0770. A setgid parent reaches the
+// same place by a different route, since Linux propagates S_ISGID to a
+// new subdirectory, so "the stored mode differs from the requested one"
+// needs no exotic filesystem at all.
+//
+// For this package the widened outcome is specific and bad, and bin/ is
+// the case that sets the bar. It is the SINGLE directory the engine puts
+// on PATH (pmEnv), its entries are symlinks into opt/, npm/bin/ and
+// python/bin/, and the probe EXECUTES what resolves through them
+// (probeTool -> runProbe -> exec.CommandContext). A 0775 bin/ is write
+// access to that namespace: any member of the directory's group can add
+// an entry, or unlink one and re-create it pointing somewhere else, and
+// in a consumer like web-terminal-kiro the process that later resolves
+// PATH runs as root. enforceExecutable already pins the mode of the
+// binary a link points AT, which is worth nothing if the link itself can
+// be repointed at a file that was never inspected — the directory mode is
+// the same class of finding as the file mode, not a tidiness question.
+// verifyRootIntegrity refuses to start on exactly this shape
+// (perm&0o022 on a managed root); this is that rule applied at the moment
+// of creation, while the directory is still this library's own and not yet
+// a fact about the operator's volume.
+//
+// It fails the install rather than warning. The error travels the ordinary
+// install path (linkBin -> linkDeclaredFiles/linkPMBins -> installAqua ->
+// executeJob), so the job reports failure and the tool is not published —
+// which is strictly weaker than the precedent already in this package,
+// where the same mode predicate refuses Engine construction outright. A
+// warn-only posture would turn an integrity boundary into a log line and
+// still publish the PATH entry; and because the check only fires where the
+// filesystem actively refused to store a mode on a directory this call
+// just made, it cannot brick an install on any filesystem that honours
+// mode requests.
+//
+// Only a directory THIS call created is certified, which is why the leaf
+// mkdir is separated from the ancestors: os.MkdirAll cannot report which
+// levels it made (it stats the path, FOLLOWS a symlink, finds a directory
+// and returns nil), and the created/pre-existing distinction is what keeps
+// the chmod honest — atomicfile.EnsurePrivateDir turns on the same
+// distinction for the same reason. A directory we just made is one no
+// other writer has ever held a name to, so repairing it cannot be
+// tightening, or WIDENING, somebody else's. A pre-existing one belongs to
+// whoever made it: chmod'ing an operator's deliberately-0700 bin/ up to
+// 0755 would be this library undoing their hardening, and refusing it
+// outright would fail installs that work today. That case is
+// verifyRootIntegrity's, deliberately and opt-in (see its REPORT-ONLY
+// contract), and the residual gap is stated rather than papered over — a
+// directory widened by an earlier run's creation is reported there, not
+// repaired here.
+//
+// The one behavior change to know about: a level created under a setgid
+// parent loses the inherited S_ISGID, because the enforcing chmod sets
+// exactly managedDirMode. That is intended. Group-inheritance on a
+// directory the engine publishes PATH entries from is the shared-write
+// shape verifyRootIntegrity refuses, and these are directories the engine
+// made, not the operator's.
+func ensureManagedDir(dir string) error {
+	if err := os.MkdirAll(filepath.Dir(dir), managedDirMode); err != nil {
+		return err
+	}
+	if mkErr := os.Mkdir(dir, managedDirMode); mkErr != nil {
+		if !errors.Is(mkErr, os.ErrExist) {
+			return mkErr
+		}
+		// Somebody else's directory: a previous run's, or the operator's.
+		// Reproduce os.MkdirAll's own acceptance test so that a name
+		// occupied by a regular file still fails here, exactly as it did
+		// before, instead of being read as "already established".
+		fi, statErr := os.Stat(dir)
+		if statErr != nil {
+			return statErr
+		}
+		if !fi.IsDir() {
+			return fmt.Errorf("%s exists and is not a directory", dir)
+		}
+		return nil
+	}
+	return enforceDirMode(dir, managedDirMode)
+}
+
+// ensureManagedDirs establishes several levels, OUTERMOST FIRST, so each
+// one gets its own verdict.
+//
+// The loop is the caller's job and not ensureManagedDir's because only the
+// caller knows where the engine's ownership starts: ToolsDir is the
+// operator's directory and stays MkdirAll'd without a mode verdict, while
+// every level beneath it — opt/, opt/<tool>/, npm/, npm/bin/ — is one the
+// engine created and must certify. atomicfile.EnsurePrivateDir draws the
+// line in the same place and for the same reason ("one level,
+// deliberately").
+func ensureManagedDirs(dirs ...string) error {
+	for _, dir := range dirs {
+		if err := ensureManagedDir(dir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (in *installer) logf(format string, args ...any) {
 	in.output(fmt.Sprintf(format, args...))
 }
@@ -238,7 +348,11 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(staging, 0o755); err != nil {
+	// opt/ and opt/<tool>/ are levels the engine owns as much as the
+	// staging dir itself, and the mode certified here is the mode the
+	// PUBLISHED version tree ends up with: the publish below is a rename
+	// of this same inode, which carries its mode across unchanged.
+	if err := ensureManagedDirs(in.optDir(), filepath.Join(in.optDir(), name), staging); err != nil {
 		return "", err
 	}
 	binName := name
@@ -312,7 +426,25 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]stri
 		if !insideStrictly(versDir, resolved) {
 			return nil, fmt.Errorf("declared file %s escapes the install dir via symlink", src)
 		}
-		if err := os.Chmod(resolved, 0o755); err != nil {
+		// enforceExecutable acts on a DESCRIPTOR, which NARROWS the
+		// check-then-act above without closing it. The containment
+		// verdict is still a statement about a NAME: it was proven of
+		// the path EvalSymlinks resolved, and the open re-resolves that
+		// same path. O_NOFOLLOW removes the worst arm — a symlink
+		// swapped in at the final component is refused by the kernel
+		// rather than followed into a chmod of somebody else's file —
+		// and the fchmod+fstat pair rides one descriptor, so the mode
+		// that gets certified is the mode of the inode that got
+		// chmod'ed. What remains: O_NOFOLLOW binds only the LAST
+		// component, so an ancestor swapped for a symlink still
+		// redirects the open; a regular file substituted at the name
+		// passes it; and no inode identity is carried from the
+		// containment check to the open. Closing it needs
+		// openat(2)-relative traversal from a retained handle on
+		// versDir (os.Root) for the resolution as well as the mode, at
+		// which point linkBin below — which still publishes by pathname
+		// — becomes the remaining window.
+		if err := enforceExecutable(resolved); err != nil {
 			return nil, err
 		}
 		if err := in.linkBin(f.Name, resolved); err != nil {
@@ -541,7 +673,7 @@ func retained(keep int) int {
 // A failed barrier restores the previous link: the install is failing, and
 // the tool that was on PATH before must stay the one on PATH.
 func (in *installer) linkBin(name, target string) error {
-	if err := os.MkdirAll(in.binDir(), 0o755); err != nil {
+	if err := ensureManagedDir(in.binDir()); err != nil {
 		return err
 	}
 	link := filepath.Join(in.binDir(), name)
@@ -669,7 +801,7 @@ func (in *installer) binDiff(dir string, fn func() error) ([]string, error) {
 // installNpm installs one npm package globally under the engine's npm
 // prefix and symlinks its new bins into the bin dir.
 func (in *installer) installNpm(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := os.MkdirAll(filepath.Join(in.npmDir(), "bin"), 0o755); err != nil {
+	if err := ensureManagedDirs(in.npmDir(), filepath.Join(in.npmDir(), "bin")); err != nil {
 		return nil, err
 	}
 	pmBin := filepath.Join(in.npmDir(), "bin")
@@ -691,7 +823,7 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 // without the prefix's site-packages, so every entry point dies with
 // ModuleNotFoundError.
 func (in *installer) installPip(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := os.MkdirAll(filepath.Join(in.pythonDir(), "bin"), 0o755); err != nil {
+	if err := ensureManagedDirs(in.pythonDir(), filepath.Join(in.pythonDir(), "bin")); err != nil {
 		return nil, err
 	}
 	pmBin := filepath.Join(in.pythonDir(), "bin")
@@ -777,7 +909,7 @@ func (in *installer) installManual(ctx context.Context, name string, t *Tool) ([
 		return nil, fmt.Errorf("manual tool %s has no install command", name)
 	}
 	optDir := filepath.Join(in.optDir(), name)
-	if err := os.MkdirAll(optDir, 0o755); err != nil {
+	if err := ensureManagedDirs(in.optDir(), optDir); err != nil {
 		return nil, err
 	}
 	added, err := in.binDiff(in.binDir(), func() error {
