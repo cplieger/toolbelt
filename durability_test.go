@@ -1,7 +1,6 @@
 package toolbelt
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -195,7 +194,7 @@ func installVersion(t *testing.T, e *Engine, ver string) *Job {
 		t.Fatal(err)
 	}
 	if _, exists := m.Tools["tool"]; !exists {
-		job, aerr := e.Add(context.Background(), &AddRequest{Name: "tool", Version: ver})
+		job, aerr := e.Add(t.Context(), &AddRequest{Name: "tool", Version: ver})
 		if aerr != nil {
 			t.Fatal(aerr)
 		}

@@ -65,7 +65,7 @@ func newTestEngineClient(t *testing.T, cat *Catalog, client *http.Client, seed *
 // waitJob polls until the job reaches a terminal state.
 func waitJob(t *testing.T, e *Engine, id string) *Job {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	v, err := e.queue.Wait(ctx, id)
 	if err != nil {
@@ -87,7 +87,7 @@ func binStub(name string) string {
 // addManual creates and installs a trivial manual tool.
 func addManual(t *testing.T, e *Engine, name string, requires []string) {
 	t.Helper()
-	job, err := e.Add(context.Background(), &AddRequest{
+	job, err := e.Add(t.Context(), &AddRequest{
 		Name: name, Source: SourceManual, Version: "1", Requires: requires,
 		Install: binStub(name),
 	})
@@ -210,7 +210,7 @@ func TestAdd_ManualInstallRuns(t *testing.T) {
 
 func TestAdd_ManualProbeMissingFails(t *testing.T) {
 	e := newTestEngine(t, nil)
-	job, err := e.Add(context.Background(), &AddRequest{
+	job, err := e.Add(t.Context(), &AddRequest{
 		Name:    "ghost",
 		Source:  SourceManual,
 		Version: "1.0.0",
@@ -239,7 +239,7 @@ func TestAdd_Validation(t *testing.T) {
 		{Name: "unknown-tool-with-no-source-or-catalog", Version: "1"},
 	}
 	for i, req := range cases {
-		if _, err := e.Add(context.Background(), &req); err == nil {
+		if _, err := e.Add(t.Context(), &req); err == nil {
 			t.Errorf("case %d: want error, got nil", i)
 		}
 	}
@@ -251,17 +251,17 @@ func TestAdd_DuplicateRejected(t *testing.T) {
 		Name: "dup", Source: SourceManual, Version: "1",
 		Install: binStub("dup"),
 	}
-	if _, err := e.Add(context.Background(), &req); err != nil {
+	if _, err := e.Add(t.Context(), &req); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Add(context.Background(), &req); err == nil {
+	if _, err := e.Add(t.Context(), &req); err == nil {
 		t.Fatal("duplicate add should fail")
 	}
 }
 
 func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 	e := newTestEngine(t, nil)
-	job, err := e.Add(context.Background(), &AddRequest{
+	job, err := e.Add(t.Context(), &AddRequest{
 		Name: "t", Source: SourceManual, Version: "1.0.0",
 		Install: binStub("t"), Probe: "t",
 	})
@@ -345,7 +345,7 @@ func TestInstallOrder_BackendDepFromCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.Manifest()
-	ordered, err := e.installOrder(context.Background(), m, []string{"pyright"})
+	ordered, err := e.installOrder(t.Context(), m, []string{"pyright"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestInstallOrder_CycleDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.Manifest()
-	if _, err := e.installOrder(context.Background(), m, []string{"a"}); err == nil {
+	if _, err := e.installOrder(t.Context(), m, []string{"a"}); err == nil {
 		t.Fatal("want cycle error")
 	}
 }
@@ -442,7 +442,7 @@ func TestInstallAqua_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	job, err := e.Add(context.Background(), &AddRequest{Name: "mytool", Version: "v1.2.0"})
+	job, err := e.Add(t.Context(), &AddRequest{Name: "mytool", Version: "v1.2.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestInstallAqua_ChecksumMismatch(t *testing.T) {
 		"tool": {Name: "tool", Source: "aqua:o/tool", Aqua: aq},
 	}}
 	e := newTestEngine(t, cat)
-	job, err := e.Add(context.Background(), &AddRequest{Name: "tool", Version: "v1.0.0"})
+	job, err := e.Add(t.Context(), &AddRequest{Name: "tool", Version: "v1.0.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -513,7 +513,7 @@ func TestInstallAqua_ChecksumMismatch(t *testing.T) {
 func TestJobs_CancelQueued(t *testing.T) {
 	e := newTestEngine(t, nil)
 	// Occupy the worker with a slow manual install.
-	slow, err := e.Add(context.Background(), &AddRequest{
+	slow, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
 		Install: `sleep 5 && ` + binStub("slow"),
 	})
@@ -546,7 +546,7 @@ func TestJobs_CancelQueued(t *testing.T) {
 // path and the queued path from the same engine.
 func busyQueue(t *testing.T, e *Engine) (running, queued *Job) {
 	t.Helper()
-	running, err := e.Add(context.Background(), &AddRequest{
+	running, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
 		Install: `sleep 3 && ` + binStub("slow"),
 	})
@@ -826,7 +826,7 @@ func TestChecksumConfigured_FailsClosed(t *testing.T) {
 func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 	e := newTestEngine(t, nil)
 	// Occupy the worker, then fill the queue to its cap.
-	slow, err := e.Add(context.Background(), &AddRequest{
+	slow, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
 		Install: `sleep 3 && ` + binStub("slow"),
 	})
@@ -850,7 +850,7 @@ func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 			t.Fatal(err) // filling to cap must succeed
 		}
 	}
-	if _, err := e.Add(context.Background(), &AddRequest{
+	if _, err := e.Add(t.Context(), &AddRequest{
 		Name: "phantom", Source: SourceManual, Version: "1", Install: "true",
 	}); err == nil {
 		t.Fatal("expected queue-full error")
@@ -867,7 +867,7 @@ func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 func TestUninstall_UsesRemovedDefinitions(t *testing.T) {
 	e := newTestEngine(t, nil)
 	marker := filepath.Join(e.toolsDir, "uninstall-ran")
-	job, err := e.Add(context.Background(), &AddRequest{
+	job, err := e.Add(t.Context(), &AddRequest{
 		Name: "m", Source: SourceManual, Version: "1",
 		Install:   binStub("m"),
 		Uninstall: fmt.Sprintf(`touch %q`, marker),
@@ -961,7 +961,7 @@ func TestInstallAqua_SymlinkEscapeRejected(t *testing.T) {
 		"tool": {Name: "tool", Source: "aqua:o/tool", Aqua: aq},
 	}}
 	e := newTestEngine(t, cat)
-	job, err := e.Add(context.Background(), &AddRequest{Name: "tool", Version: "v1.0.0"})
+	job, err := e.Add(t.Context(), &AddRequest{Name: "tool", Version: "v1.0.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1059,7 @@ func TestPatch_ForceDisableCascades(t *testing.T) {
 
 func TestWait_UnknownJobErrors(t *testing.T) {
 	e := newTestEngine(t, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if _, err := e.Wait(ctx, "tj-nope"); !errors.Is(err, ErrUnknownJob) {
 		t.Fatalf("Wait on unknown id = %v, want ErrUnknownJob", err)
@@ -1111,7 +1111,7 @@ func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
 	collect := func(s string) { lines = append(lines, s) }
 
 	t.Run("unresolvable candidate skipped", func(t *testing.T) {
-		did, err := e.updateOne(context.Background(), m, "tool", false, collect)
+		did, err := e.updateOne(t.Context(), m, "tool", false, collect)
 		if err != nil || did {
 			t.Fatalf("updateOne = %v %v, want skip without error", did, err)
 		}
@@ -1124,7 +1124,7 @@ func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
 		}
 	})
 	t.Run("resolvable candidate still bumps", func(t *testing.T) {
-		did, err := e.updateOne(context.Background(), m, "tool2", false, collect)
+		did, err := e.updateOne(t.Context(), m, "tool2", false, collect)
 		if err != nil || !did {
 			t.Fatalf("updateOne = %v %v, want bump", did, err)
 		}
@@ -1282,7 +1282,7 @@ func TestInstallAqua_ChecksumOutcomes(t *testing.T) {
 			}})
 			logs := captureLogs(e)
 
-			job, err := e.Add(context.Background(), &AddRequest{Name: "tool", Version: "v1.0.0"})
+			job, err := e.Add(t.Context(), &AddRequest{Name: "tool", Version: "v1.0.0"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1351,7 +1351,7 @@ func TestVerifyArtifact_DeclaredWithoutSourceRefuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := in.verifyArtifact(context.Background(), "tool", "v1", artifact, tc.spec)
+			got, err := in.verifyArtifact(t.Context(), "tool", "v1", artifact, tc.spec)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("verifyArtifact = %q, %v; want error containing %q", got, err, tc.wantErr)

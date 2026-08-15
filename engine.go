@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os/exec"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -75,7 +74,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	for n := range m.Tools {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	for _, n := range names {
 		t := m.Tools[n]
 		s := st.Tools[n]
@@ -483,7 +482,7 @@ func enabledDependents(m *Manifest, name string) []string {
 			out = append(out, other)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -529,7 +528,7 @@ func (e *Engine) Remove(name string, force bool) (*Job, []string, error) {
 	for n := range removed {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	jv, err := e.queue.EnqueueRemoval(names, removed)
 	if err != nil {
 		e.rollbackRemoval(removed)
@@ -1023,7 +1022,7 @@ func (e *Engine) runUpdate(ctx context.Context, names []string, output func(stri
 		for n := range m.Tools {
 			targets = append(targets, n)
 		}
-		sort.Strings(targets)
+		slices.Sort(targets)
 	}
 	explicit := len(names) > 0
 	var bumped []string
@@ -1152,9 +1151,9 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 			orphans = append(orphans, n)
 		}
 	}
-	sort.Strings(missing)
-	sort.Strings(extras)
-	sort.Strings(orphans)
+	slices.Sort(missing)
+	slices.Sort(extras)
+	slices.Sort(orphans)
 	return missing, extras, orphans
 }
 

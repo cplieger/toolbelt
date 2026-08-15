@@ -1,7 +1,6 @@
 package toolbelt
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -54,7 +53,7 @@ func TestLatestGitHubTag_PaginatesAndVersionCompares(t *testing.T) {
 		VersionSource: "github_tag",
 		VersionFilter: `Version startsWith "go" and not (Version contains "rc" or Version contains "beta")`,
 	}
-	got, err := v.latestGitHubTag(context.Background(), "golang", "go", aq)
+	got, err := v.latestGitHubTag(t.Context(), "golang", "go", aq)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +88,7 @@ func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
 	defer srv.Close()
 	v := newVersionResolver(&http.Client{Transport: rewriteHost{target: srv.URL}})
 	aq := &AquaPackage{VersionFilter: `Version startsWith "go"`}
-	if _, err := v.latestGitHubTag(context.Background(), "o", "r", aq); err == nil {
+	if _, err := v.latestGitHubTag(t.Context(), "o", "r", aq); err == nil {
 		t.Fatal("want error when nothing matches")
 	}
 }
@@ -161,7 +160,7 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 	}))
 	defer srv.Close()
 	v := newVersionResolver(&http.Client{Transport: rewriteHost{target: srv.URL}})
-	got, err := v.Latest(context.Background(), "npm:typescript-language-server", nil)
+	got, err := v.Latest(t.Context(), "npm:typescript-language-server", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

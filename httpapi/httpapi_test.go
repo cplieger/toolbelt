@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -47,7 +46,7 @@ func call(t *testing.T, srv *httptest.Server, method, path, body string, out any
 	} else {
 		rdr = strings.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), method, srv.URL+path, rdr)
+	req, err := http.NewRequestWithContext(t.Context(), method, srv.URL+path, rdr)
 	if err != nil {
 		t.Fatal(err)
 	}
