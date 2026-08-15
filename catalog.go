@@ -1,13 +1,13 @@
 package toolbelt
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -158,11 +158,9 @@ func (c *Catalog) Search(query string) []CatalogEntry {
 		}
 		hits = append(hits, scored{e, score})
 	}
-	sort.Slice(hits, func(i, j int) bool {
-		if hits[i].score != hits[j].score {
-			return hits[i].score > hits[j].score
-		}
-		return hits[i].e.Name < hits[j].e.Name
+	slices.SortStableFunc(hits, func(a, b scored) int {
+		// score descending, then name ascending.
+		return cmp.Or(cmp.Compare(b.score, a.score), cmp.Compare(a.e.Name, b.e.Name))
 	})
 	lim := min(len(hits), searchLimit)
 	out := make([]CatalogEntry, 0, lim)
@@ -207,7 +205,7 @@ func (c *Catalog) Featured() []CatalogEntry {
 			out = append(out, c.Entries[k])
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b CatalogEntry) int { return cmp.Compare(a.Name, b.Name) })
 	if len(out) > searchLimit {
 		out = out[:searchLimit]
 	}

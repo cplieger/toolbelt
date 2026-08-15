@@ -370,7 +370,7 @@ func TestInstallOrder_DisabledDependencyRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.Manifest()
-	_, err = e.installOrder(context.Background(), m, []string{"dep"})
+	_, err = e.installOrder(t.Context(), m, []string{"dep"})
 	if err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("installOrder through disabled dep = %v, want refusal", err)
 	}
@@ -492,7 +492,7 @@ func TestEnsureInstalled_EnablesDisabledTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	if err := e.EnsureInstalled(ctx, "gh"); err != nil {
 		t.Fatalf("EnsureInstalled disabled template: %v", err)
