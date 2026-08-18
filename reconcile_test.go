@@ -47,7 +47,7 @@ func TestDisable_UninstallsAndKeepsTemplate(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
 		t.Fatal("binary survived disable")
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	tl, ok := m.Tools["tool"]
 	if !ok || !tl.Disabled {
 		t.Fatalf("template lost or not disabled: %+v", m.Tools)
@@ -138,7 +138,7 @@ func TestRemove_DisabledDependentDoesNotBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jv, deps, err := e.Remove("base", false)
+	jv, deps, err := e.Remove("base")
 	if err != nil {
 		t.Fatalf("remove with only a disabled dependent = %v (deps %v)", err, deps)
 	}
@@ -160,9 +160,9 @@ func TestReconcile_ConvergesBothWays(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil || jv == nil {
-		t.Fatalf("reconcile: job=%v err=%v", jv, err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
 		t.Fatalf("reconcile job = %+v tail=%v", final, final.OutputTail)
@@ -177,9 +177,18 @@ func TestReconcile_ConvergesBothWays(t *testing.T) {
 
 func TestReconcile_EmptyManifestNoJob(t *testing.T) {
 	e := newTestEngine(t, nil)
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil || jv != nil {
-		t.Fatalf("empty reconcile: job=%v err=%v", jv, err)
+	// The C15 no-job answer: enqueued false, a nil job and a NIL error,
+	// so a caller cannot mistake a fresh volume for a failure — nor reach
+	// the job without reading the flag that says there isn't one.
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Errorf("empty reconcile err = %v, want nil", err)
+	}
+	if enqueued {
+		t.Errorf("empty reconcile enqueued = true, want false")
+	}
+	if jv != nil {
+		t.Errorf("empty reconcile job = %+v, want nil", jv)
 	}
 }
 
@@ -189,9 +198,9 @@ func TestReconcile_ConvergedIsOffline(t *testing.T) {
 	e := newTestEngineClient(t, nil, offlineClient(), nil)
 	addManual(t, e, "tool", nil) // manual installs touch no network
 
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil || jv == nil {
-		t.Fatalf("reconcile: job=%v err=%v", jv, err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	final := waitJob(t, e, jv.ID)
 	if final.State != JobDone {
@@ -205,9 +214,9 @@ func TestReconcile_ConvergedIsOffline(t *testing.T) {
 func TestReconcileFull_EnqueuesUpdatePass(t *testing.T) {
 	e := newTestEngine(t, nil)
 	addManual(t, e, "tool", nil)
-	jv, err := e.Reconcile(ReconcileFull)
-	if err != nil || jv == nil {
-		t.Fatal(err)
+	jv, enqueued, err := e.Reconcile(ReconcileFull)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile full: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	waitJob(t, e, jv.ID)
 	// The follow-up update job ran too (manual tools skip updates, so
@@ -238,14 +247,14 @@ func TestHydration_SparseEntryFromCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil {
-		t.Fatal(err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
 		t.Fatalf("reconcile = %+v tail=%v", final, final.OutputTail)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	tl := m.Tools["x"]
 	if tl.Source != SourceManual || tl.Version != "1.0.0" {
 		t.Fatalf("hydration did not persist catalog fields: %+v", tl)
@@ -277,14 +286,14 @@ func TestHydration_LegacyBinaryDoesNotWedge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil {
-		t.Fatal(err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
 		t.Fatalf("reconcile = %+v", final)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if m.Tools["legacy"].Source == "" {
 		t.Fatal("legacy entry left source-less (the wedge)")
 	}
@@ -314,9 +323,9 @@ func TestHydration_UnknownNameFailsNamed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil {
-		t.Fatal(err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	final := waitJob(t, e, jv.ID)
 	if final.State != JobFailed || !strings.Contains(final.Error, "not in the catalog") {
@@ -338,14 +347,14 @@ func TestHydration_DisabledStaysOffline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil {
-		t.Fatal(err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
 		t.Fatalf("reconcile with disabled sparse entry = %+v", final)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	tl := m.Tools["tmpl"]
 	if tl.Source != "npm:tmpl" {
 		t.Fatalf("static hydration missing: %+v", tl)
@@ -369,7 +378,7 @@ func TestInstallOrder_DisabledDependencyEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	plan, err := e.installOrder(t.Context(), m, []string{"dep"})
 	if err != nil {
 		t.Fatalf("installOrder through disabled dep = %v, want the dep enabled", err)
@@ -383,7 +392,7 @@ func TestInstallOrder_DisabledDependencyEnabled(t *testing.T) {
 	// The enable is PERSISTED, not merely applied to the plan's copy: a
 	// dependency the plan installs while the manifest still calls it
 	// disabled would be uninstalled again by the next reconcile.
-	m2, _ := e.store.Manifest()
+	m2, _ := e.store.LoadManifest()
 	if m2.Tools["base"].Disabled {
 		t.Fatal("base still disabled in the manifest after the plan enabled it")
 	}
@@ -403,7 +412,7 @@ func TestInstallOrder_DisabledRootIsNotEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	plan, err := e.installOrder(t.Context(), m, []string{"base"})
 	if err != nil {
 		t.Fatal(err)
@@ -411,7 +420,7 @@ func TestInstallOrder_DisabledRootIsNotEnabled(t *testing.T) {
 	if len(plan.enabled) != 0 {
 		t.Fatalf("enabled = %v, want none for a directly named tool", plan.enabled)
 	}
-	m2, _ := e.store.Manifest()
+	m2, _ := e.store.LoadManifest()
 	if !m2.Tools["base"].Disabled {
 		t.Fatal("a directly named disabled tool was enabled by the plan")
 	}
@@ -447,7 +456,7 @@ func TestManifest_CommentRoundTrip(t *testing.T) {
 	if _, ok := doc["_comment"]; !ok {
 		t.Fatalf("_comment dropped on rewrite: %s", raw)
 	}
-	m, _ := st.Manifest()
+	m, _ := st.LoadManifest()
 	if len(m.Comment) != 2 || !m.Tools["gopls"].Disabled {
 		t.Fatalf("roundtrip = %+v", m)
 	}
@@ -460,7 +469,7 @@ func TestSeed_InitFiles(t *testing.T) {
 		if err := st.initFiles(); err != nil {
 			t.Fatal(err)
 		}
-		m, err := st.Manifest()
+		m, err := st.LoadManifest()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -505,7 +514,7 @@ func TestSeed_InitFiles(t *testing.T) {
 		if err := st.initFiles(); err != nil {
 			t.Fatal(err)
 		}
-		m, _ := st.Manifest()
+		m, _ := st.LoadManifest()
 		if len(m.Tools) != 0 {
 			t.Fatalf("nil seed produced tools: %+v", m.Tools)
 		}
@@ -538,7 +547,7 @@ func TestEnsureInstalled_EnablesDisabledTemplate(t *testing.T) {
 	if err := e.EnsureInstalled(ctx, "gh"); err != nil {
 		t.Fatalf("EnsureInstalled disabled template: %v", err)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if m.Tools["gh"].Disabled {
 		t.Fatal("template still disabled after EnsureInstalled")
 	}
@@ -683,9 +692,9 @@ func TestReconcile_SweepsOrphanedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jv, err := e.Reconcile(ReconcileMissing)
-	if err != nil || jv == nil {
-		t.Fatalf("reconcile: %v %v", jv, err)
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
 		t.Fatalf("reconcile job = %+v tail=%v", final, final.OutputTail)

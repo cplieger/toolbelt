@@ -189,7 +189,7 @@ func aquaVersionServer(t *testing.T) *AquaPackage {
 // installVersion drives one install of tool at ver through the engine.
 func installVersion(t *testing.T, e *Engine, ver string) *Job {
 	t.Helper()
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -62,7 +62,7 @@ var backendDeps = map[string]string{
 // Inventory assembles the full read-side snapshot: every manifest entry
 // joined with install state, the system group, and the active job.
 func (e *Engine) Inventory() (*Inventory, error) {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func (e *Engine) systemTools() []SystemTool {
 // entries already in the manifest.
 func (e *Engine) Search(query string) []CatalogEntry {
 	hits := e.cat().Search(query)
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		e.log.Warn("toolbelt: search: manifest unreadable, results unfiltered", "error", err)
 		return hits
@@ -321,7 +321,7 @@ type PatchRequest struct {
 	Uninstall   *string   `json:"uninstall,omitempty"`
 	// Force permits disabling a tool that enabled entries require,
 	// cascading the disable to those dependents (one level, mirroring
-	// Remove's force cascade).
+	// RemoveWithDependents).
 	Force bool `json:"force,omitempty"`
 }
 
@@ -355,7 +355,7 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
 // refusal (or, with Force, the one-level disable cascade mirroring
-// Remove's force) plus the field overlay. Records what changed in out.
+// RemoveWithDependents) plus the field overlay. Records what changed in out.
 func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome) error {
 	t, ok := m.Tools[name]
 	if !ok {
@@ -371,8 +371,8 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	*out = applyPatch(&t, req)
 	m.Tools[name] = t
 	// A forced disable cascades to the enabled dependents (one level,
-	// mirroring Remove's force): a dependent left enabled would declare
-	// intent against a disabled prerequisite.
+	// mirroring RemoveWithDependents): a dependent left enabled would
+	// declare intent against a disabled prerequisite.
 	if out.disabledChanged && out.nowDisabled && req.Force {
 		for _, d := range deps {
 			dt := m.Tools[d]
@@ -516,7 +516,7 @@ func dependsOn(t *Tool, other, name string) bool {
 // install-missing). Installing a disabled template is refused with
 // ErrDisabled: install is policy-neutral, enabling rides Patch.
 func (e *Engine) Install(name string) (*Job, error) {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return nil, err
 	}
@@ -536,16 +536,43 @@ func (e *Engine) Update(names ...string) (*Job, error) {
 	return e.queue.Enqueue(JobKindUpdate, names)
 }
 
-// Remove uninstalls a tool and deletes its template. Without force, a
-// tool that enabled entries require is refused and the dependents are
-// returned. The removed manifest entries travel on the uninstall job so
-// source-specific cleanup (npm/pip uninstalls, manual uninstall
-// commands) still knows the sources after the manifest rows are gone.
-func (e *Engine) Remove(name string, force bool) (*Job, []string, error) {
+// Remove uninstalls a tool and deletes its template. A tool that enabled
+// entries require is REFUSED with *DependentsError, and the dependents
+// are returned so a caller can name them; RemoveWithDependents is the
+// cascading sibling that removes them too. The removed manifest entries
+// travel on the uninstall job so source-specific cleanup (npm/pip
+// uninstalls, manual uninstall commands) still knows the sources after
+// the manifest rows are gone.
+//
+// Two methods rather than one force flag, on the os.Remove /
+// os.RemoveAll precedent: at a call site `Remove(name, true)` said
+// nothing about what the second argument widened, and the wider
+// operation deletes OTHER tools the caller never named.
+func (e *Engine) Remove(name string) (*Job, []string, error) {
+	return e.remove(name, false)
+}
+
+// RemoveWithDependents uninstalls a tool together with every enabled
+// entry that requires it, deleting all their templates. It is the
+// cascading form of Remove: where Remove refuses a tool with dependents,
+// this removes them, so the returned job carries every removed name and
+// the dependents slice reports which ones rode along.
+//
+// Prefer Remove unless the caller has established that removing the
+// dependents is intended — the UI's cascade confirmation, an operator's
+// explicit force. Nothing here re-checks that intent.
+func (e *Engine) RemoveWithDependents(name string) (*Job, []string, error) {
+	return e.remove(name, true)
+}
+
+// remove is the shared body. cascade is the one behavioural difference
+// between the two exported methods, and it is unexported precisely so no
+// caller has to read a bare boolean at a call site.
+func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	var dependents []string
 	removed := map[string]Tool{}
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return removeFromManifest(m, name, force, &dependents, removed)
+		return removeFromManifest(m, name, cascade, &dependents, removed)
 	})
 	if err != nil {
 		return nil, dependents, err
@@ -563,22 +590,22 @@ func (e *Engine) Remove(name string, force bool) (*Job, []string, error) {
 	return jv, dependents, nil
 }
 
-// removeFromManifest deletes name (and, with force, its enabled
+// removeFromManifest deletes name (and, with cascade, its enabled
 // dependents) from m, recording the removed entries. It refuses with
-// *DependentsError when enabled entries require name and force is
+// *DependentsError when enabled entries require name and cascade is
 // false.
-func removeFromManifest(m *Manifest, name string, force bool, dependents *[]string, removed map[string]Tool) error {
+func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
 	}
 	*dependents = enabledDependents(m, name)
-	if len(*dependents) > 0 && !force {
+	if len(*dependents) > 0 && !cascade {
 		return &DependentsError{Dependents: *dependents}
 	}
 	removed[name] = t
 	delete(m.Tools, name)
-	if force {
+	if cascade {
 		for _, d := range *dependents {
 			removed[d] = m.Tools[d]
 			delete(m.Tools, d)
@@ -608,28 +635,40 @@ func (e *Engine) rollbackRemoval(removed map[string]Tool) {
 // entries, uninstall the engine-owned footprint of disabled ones and
 // of orphaned state rows (a manifest row deleted without its uninstall
 // job completing). ReconcileFull additionally enqueues an update pass
-// over unpinned entries. Returns (nil, nil) when the manifest is empty
-// and no state row exists (nothing to converge). The returned job is
-// the reconcile job; Wait on it to gate consumer readiness (session
-// creation, UI states).
-func (e *Engine) Reconcile(mode ReconcileMode) (*Job, error) {
-	m, err := e.store.Manifest()
+// over unpinned entries.
+//
+// enqueued reports whether there was anything to converge. It is false —
+// with a nil job and a nil error — when the manifest is empty and no
+// state row exists, which is a normal answer on a fresh volume and not a
+// failure. The job is nil in exactly that case, so a caller that wants to
+// gate readiness must branch on enqueued before touching it:
+//
+//	jv, enqueued, err := e.Reconcile(toolbelt.ReconcileFull)
+//	if err != nil { ... }
+//	if enqueued { e.Wait(ctx, jv.ID) }   // gate on convergence
+//
+// The found-style triple is deliberate (go-rulebook C15): absence is a
+// normal answer, so it does not travel as an error, but a caller cannot
+// reach the job without receiving the flag that says whether there is
+// one.
+func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err error) {
+	m, err := e.store.LoadManifest()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if len(m.Tools) == 0 && len(e.store.State().Tools) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
-	jv, err := e.queue.Enqueue(JobKindReconcile, nil)
+	jv, err = e.queue.Enqueue(JobKindReconcile, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if mode == ReconcileFull {
 		if _, uerr := e.queue.Enqueue(JobKindUpdate, nil); uerr != nil {
 			e.log.Warn("toolbelt: reconcile update pass not enqueued", "error", uerr)
 		}
 	}
-	return jv, nil
+	return jv, true, nil
 }
 
 // EnsureInstalled synchronously guarantees a tool: present in the
@@ -639,7 +678,7 @@ func (e *Engine) Reconcile(mode ReconcileMode) (*Job, error) {
 // node); unlike Install it DOES enable a disabled template, because the
 // user explicitly invoked the feature that needs the tool.
 func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -758,7 +797,7 @@ func (e *Engine) hydrateStatic() error {
 // every tool the job will touch as installing rather than discovering
 // dependency rows one at a time, each looking idle.
 func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output func(string)) error {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -1022,7 +1061,7 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 // which is a no-op rather than a failure, so a reconcile pass carrying
 // one does not fail the whole job.
 func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output func(string)) (*Tool, error) {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return nil, err
 	}
@@ -1164,7 +1203,7 @@ func (e *Engine) runUninstall(ctx context.Context, j *job) error {
 // engine state has nothing owned to remove — unmanaged same-name files
 // are deliberately left alone.
 func (e *Engine) runDisable(ctx context.Context, names []string, output func(string)) error {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -1197,7 +1236,7 @@ func (e *Engine) runDisable(ctx context.Context, names []string, output func(str
 // runUpdate refreshes latest-version data and reinstalls outdated,
 // unpinned, enabled tools (or the explicit names).
 func (e *Engine) runUpdate(ctx context.Context, j *job, output func(string)) error {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
 	}
@@ -1287,7 +1326,7 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 // uninstalled (freeing names), then missing enabled entries install.
 // Zero network when converged.
 func (e *Engine) runReconcile(ctx context.Context, j *job, output func(string)) error {
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
 	}

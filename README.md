@@ -1,6 +1,6 @@
 # toolbelt
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/toolbelt/v2.svg)](https://pkg.go.dev/github.com/cplieger/toolbelt/v2)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/toolbelt/v3.svg)](https://pkg.go.dev/github.com/cplieger/toolbelt/v3)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/toolbelt)](https://github.com/cplieger/toolbelt/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/coverage.json)](https://github.com/cplieger/toolbelt/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/mutation.json)](https://github.com/cplieger/toolbelt/issues?q=label%3Agremlins-tracker)
@@ -37,7 +37,7 @@ Each row also reports its `dependents`: the enabled entries that require it, thr
 
 ## Install
 
-`go get github.com/cplieger/toolbelt/v2@latest`
+`go get github.com/cplieger/toolbelt/v3@latest`
 
 ## Usage
 
@@ -59,7 +59,8 @@ if err != nil {
 defer engine.Close()
 
 // Boot: converge disk to intent, then gate whatever needs tools on the job.
-if job, _ := engine.Reconcile(toolbelt.ReconcileMissing); job != nil {
+// enqueued is false on a fresh volume — nothing to converge, and no job.
+if job, enqueued, _ := engine.Reconcile(toolbelt.ReconcileMissing); enqueued {
     _, _ = engine.Wait(ctx, job.ID)
 }
 
@@ -91,18 +92,18 @@ Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`
 
 The catalog is data on its own cadence. With `Config.Refresh` set, the engine fetches the published catalog on the configured interval and on demand via `RefreshCatalog` or the httpapi route. There is deliberately no fetch at construction: call `RefreshCatalog` once your boot work is enqueued. Each fetch is verified (a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify`), re-overlaid with any `Config.CatalogOverlays` display patches, persisted raw under `ConfigDir` (`tool-catalog.cached.json`; at the next boot the newer of cache and baked wins), and swapped in atomically. The last good catalog stands on any failure: a bad fetch degrades to yesterday's knowledge, never to a broken engine. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
 
-Consumer defaults ship with the library. `DefaultCatalogURL` is the published catalog's latest-download URL. `ParseCatalogRefresh(raw, envName)` turns a refresh env value into the `Interval` under the canonical policy: default 24h, clamped to 1h–30d, and `off`/`disabled`/`0` disables the schedule while keeping on-demand refresh available. `ParseRequireList(raw)` parses a one-name-per-line requirements list (`#` comments and blank lines ignored) for `Require`.
+Consumer defaults ship with the library. `DefaultCatalogURL` is the published catalog's latest-download URL. `ParseCatalogRefresh(RefreshEnv(raw), RefreshEnvName(name))` turns a refresh env value into the `Interval` under the canonical policy: default 24h, clamped to 1h–30d, and `off`/`disabled`/`0` disables the schedule while keeping on-demand refresh available. The two arguments carry distinct types because a transposed pair used to parse the variable's NAME as a duration and fall back silently. `ParseRequireList(raw)` parses a one-name-per-line requirements list (`#` comments and blank lines ignored) for `Require`.
 
 ### The catalog compiler
 
 `cmd/toolcatalog` compiles the catalog and verifies it against a required tool set. The compiler versions with the engine in one module, so a catalog is always compiled under the schema and verification semantics of the engine release that consumes it. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it on every registry bump and publishes the artifact consumers fetch; images run `verify` against their own required list at build. Importing the library never pulls the compiler's TOML/YAML registry parsers into your build or binary (Go's module graph pruning); they cost consumers a few `go.sum` metadata lines only:
 
 ```sh
-go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
+go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
     -mise mise-checkout/registry -aqua aqua-registry-checkout/pkgs \
     -overlay overlays.json -refs mise=<ref>,aqua=<ref> -out tool-catalog.json
 
-go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
+go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
     verify -catalog tool-catalog.json -require required-tools.txt
 ```
 
@@ -119,8 +120,8 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 - `Patch(name, PatchRequest) (*Job, error)`: merge fields. `Disabled` is the enable/disable toggle (false→true uninstalls and keeps the template, true→false installs), a version change enqueues a reinstall, and `Force` permits disabling a tool enabled entries require.
 - `Install(name) (*Job, error)`: retry an existing, enabled entry. Refuses templates with `ErrDisabled` (install is policy-neutral).
 - `Update(names ...string) (*Job, error)`: refresh unpinned entries (or the named set).
-- `Remove(name string, force bool) (*Job, []string, error)`: uninstall + delete the entry; refuses with the dependents named unless forced (force cascades).
-- `Reconcile(mode) (*Job, error)`: converge disk to intent. `ReconcileMissing` installs missing enabled entries and uninstalls disabled-but-owned ones (zero network when converged); `ReconcileFull` also enqueues an update pass. Returns `(nil, nil)` on an empty manifest.
+- `Remove(name) (*Job, []string, error)`: uninstall + delete the entry. A tool enabled entries require is refused, with the dependents returned. `RemoveWithDependents(name)` is the cascading sibling that removes them too (`os.Remove`/`os.RemoveAll` shape, so a call site says which it means).
+- `Reconcile(mode) (*Job, bool, error)`: converge disk to intent. `ReconcileMissing` installs missing enabled entries and uninstalls disabled-but-owned ones (zero network when converged); `ReconcileFull` also enqueues an update pass. The bool is `enqueued`: false with a nil job and a nil error when there is nothing to converge (an empty manifest and no state row), so the no-job case cannot be read as a failure or dereferenced by accident.
 - `Wait(ctx, jobID) (*Job, error)`: block until a job settles (boot gates, synchronous flows).
 - `EnsureInstalled(ctx, name) error`: synchronous "a product action needs this binary now" path (creates from the catalog, enables a disabled template, installs, waits).
 - `Jobs() (active *Job, recent []*Job)` / `CancelJob(id) bool`: queue introspection and cancellation.
@@ -141,7 +142,7 @@ go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@latest \
 | `PATCH {prefix}/{name}` | `Patch` | the toggle verb; 409 `has_dependents` + names |
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on templates |
 | `POST {prefix}/update` | `Update` | optional `{"names": [...]}` body |
-| `DELETE {prefix}/{name}?force=1` | `Remove` | 202 `{job, dependents}`; 409 without force |
+| `DELETE {prefix}/{name}?force=1` | `Remove` / `RemoveWithDependents` | 202 `{job, dependents}`; 409 without `force` |
 | `GET {prefix}/jobs` | `Jobs` | active job carries the output tail; a cancelled job carries `cancel_cause` |
 | `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | the job reports `cancel_cause: caller` |
 | `GET {prefix}/catalog` | `CatalogInfo` | provenance + freshness of the live catalog |
@@ -151,7 +152,7 @@ Every response above — and every response the router itself generates for a pa
 
 ### toolcatalog (catalog compiler command)
 
-`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>`; exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Versioned with the module (`go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@vX.Y.Z`); the historical `cmd/toolcatalog/vX.Y.Z` lane tags (≤ v2.2.0) remain resolvable for old builds.
+`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>`; exits non-zero when a required name doesn't resolve to usable linux amd64+arm64 install knowledge. Versioned with the module (`go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@vX.Y.Z`); the historical `cmd/toolcatalog/vX.Y.Z` lane tags (≤ v2.2.0) remain resolvable for old builds.
 
 ## Configuration reference
 

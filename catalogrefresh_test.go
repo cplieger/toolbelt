@@ -365,7 +365,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 
 		final := refreshAndWait(t, e)
 		if final.State != JobDone {
-			t.Fatalf("job = %s (%s)", final.State, final.Error)
+			t.Errorf("job = %s (%s)", final.State, final.Error)
 		}
 		if _, ok := e.cat().Lookup("new-marker"); !ok {
 			t.Error("catalog not swapped")
@@ -391,7 +391,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		e, _ := setup(t, srv.URL, nil)
 		final := refreshAndWait(t, e)
 		if final.State != JobFailed {
-			t.Fatalf("job = %s, want failed", final.State)
+			t.Errorf("job = %s, want failed", final.State)
 		}
 		if _, ok := e.cat().Lookup("old-marker"); !ok {
 			t.Error("current catalog lost on failed refresh")
@@ -408,7 +408,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		srv := serve(t, catalogJSON(t, small))
 		e, _ := setup(t, srv.URL, nil)
 		if final := refreshAndWait(t, e); final.State != JobFailed {
-			t.Fatalf("job = %s, want failed", final.State)
+			t.Errorf("job = %s, want failed", final.State)
 		}
 		if _, ok := e.cat().Lookup("old-marker"); !ok {
 			t.Error("current catalog lost")
@@ -419,7 +419,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		srv := serve(t, catalogJSON(t, bigCatalog("new-marker", "gen-new")))
 		e, _ := setup(t, srv.URL, []string{"old-marker"}) // fetched catalog lacks it
 		if final := refreshAndWait(t, e); final.State != JobFailed {
-			t.Fatalf("job = %s, want failed", final.State)
+			t.Errorf("job = %s, want failed", final.State)
 		}
 		if info := e.CatalogInfo(); info.Source != CatalogSourceBaked {
 			t.Errorf("source = %s, want baked (no swap)", info.Source)
@@ -430,7 +430,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		srv := serve(t, bytes.Repeat([]byte("x"), maxCatalogBytes+1))
 		e, _ := setup(t, srv.URL, nil)
 		if final := refreshAndWait(t, e); final.State != JobFailed {
-			t.Fatalf("job = %s, want failed", final.State)
+			t.Errorf("job = %s, want failed", final.State)
 		}
 	})
 
@@ -447,7 +447,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		}
 		final := refreshAndWait(t, e)
 		if final.State != JobDone {
-			t.Fatalf("job = %s (%s)", final.State, final.Error)
+			t.Errorf("job = %s (%s)", final.State, final.Error)
 		}
 		if _, ok := e.cat().Lookup("new-marker"); ok {
 			t.Error("swap happened despite identical cache content")
@@ -465,7 +465,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		srv := serve(t, catalogJSON(t, clone))
 		e, _ := setup(t, srv.URL, nil)
 		if final := refreshAndWait(t, e); final.State != JobDone {
-			t.Fatalf("job = %s (%s)", final.State, final.Error)
+			t.Errorf("job = %s (%s)", final.State, final.Error)
 		}
 		if _, ok := e.cat().Lookup("would-be-new"); !ok {
 			t.Error("stamp-equal but content-different catalog was not swapped")
@@ -484,7 +484,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 			t.Fatal(err)
 		}
 		if final := refreshAndWait(t, e); final.State != JobDone {
-			t.Fatalf("job = %s (%s)", final.State, final.Error)
+			t.Errorf("job = %s (%s)", final.State, final.Error)
 		}
 		cached, err := os.ReadFile(filepath.Join(dir, cachedCatalogName))
 		if err != nil || !bytes.Equal(cached, body) {
@@ -510,7 +510,7 @@ func TestCatalogRefreshJob(t *testing.T) {
 		// (unknown tool there), which is the degrade-and-continue path;
 		// the refresh catalog HAS the entry, so the overlay must land.
 		if final := refreshAndWait(t, e); final.State != JobDone {
-			t.Fatalf("job = %s (%s)", final.State, final.Error)
+			t.Errorf("job = %s (%s)", final.State, final.Error)
 		}
 		got, _ := e.cat().Lookup("new-marker")
 		if got.Description != "patched by overlay" {
@@ -575,7 +575,7 @@ func TestCatalogScheduleTicks(t *testing.T) {
 		Refresh: &CatalogRefresh{URL: srv.URL, Interval: 50 * time.Millisecond},
 	})
 	if !e.CatalogInfo().Scheduled {
-		t.Fatal("Scheduled not reported")
+		t.Error("Scheduled not reported")
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
@@ -585,7 +585,7 @@ func TestCatalogScheduleTicks(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if got := e.CatalogInfo().Source; got != CatalogSourceRemote {
-		t.Fatalf("scheduled refresh never landed (source=%s)", got)
+		t.Errorf("scheduled refresh never landed (source=%s)", got)
 	}
 	mu.Lock()
 	if hits == 0 {
@@ -697,24 +697,37 @@ func TestParseRequireList(t *testing.T) {
 }
 
 func TestParseCatalogRefresh(t *testing.T) {
-	cases := []struct {
-		raw  string
+	cases := map[string]struct {
+		raw  RefreshEnv
 		want time.Duration
 	}{
-		{"", DefaultCatalogRefresh},       // unset env -> canonical default
-		{"off", 0},                        // sentinel -> schedule disabled
-		{"OFF", 0},                        // sentinels are case-insensitive
-		{"disabled", 0},                   // second sentinel
-		{"0", 0},                          // zero duration -> disabled
-		{"12h", 12 * time.Hour},           // explicit cadence passes through
-		{"10m", MinCatalogRefresh},        // sub-floor typo clamps up
-		{"2400h", MaxCatalogRefresh},      // above-ceiling typo clamps down
-		{"weekly", DefaultCatalogRefresh}, // unparseable -> default, not off
-		{"-24h", DefaultCatalogRefresh},   // negative typo -> default, not off
+		"unset env falls back to the canonical default": {raw: "", want: DefaultCatalogRefresh},
+		"the off sentinel disables the schedule":        {raw: "off", want: 0},
+		"sentinels are case-insensitive":                {raw: "OFF", want: 0},
+		"disabled is the second sentinel":               {raw: "disabled", want: 0},
+		"a zero duration disables too":                  {raw: "0", want: 0},
+		"an explicit cadence passes through":            {raw: "12h", want: 12 * time.Hour},
+		"a sub-floor typo clamps up":                    {raw: "10m", want: MinCatalogRefresh},
+		"an above-ceiling typo clamps down":             {raw: "2400h", want: MaxCatalogRefresh},
+		"unparseable falls back, not off":               {raw: "weekly", want: DefaultCatalogRefresh},
+		"a negative typo falls back, not off":           {raw: "-24h", want: DefaultCatalogRefresh},
 	}
-	for _, tc := range cases {
-		if got := ParseCatalogRefresh(tc.raw, "TEST_CATALOG_REFRESH"); got != tc.want {
-			t.Errorf("ParseCatalogRefresh(%q) = %v, want %v", tc.raw, got, tc.want)
-		}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := ParseCatalogRefresh(tc.raw, "TEST_CATALOG_REFRESH"); got != tc.want {
+				t.Errorf("ParseCatalogRefresh(%q) = %v, want %v", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseCatalogRefresh_NameIsNotParsed pins the reason the two
+// arguments carry distinct types (go-rulebook C16): the variable's NAME is
+// never read as a duration. A transposed call no longer compiles, so the
+// only remaining way to state the property is that a name-shaped VALUE
+// falls back rather than being interpreted.
+func TestParseCatalogRefresh_NameIsNotParsed(t *testing.T) {
+	if got := ParseCatalogRefresh("TOOLS_CATALOG_REFRESH", "TOOLS_CATALOG_REFRESH"); got != DefaultCatalogRefresh {
+		t.Errorf("ParseCatalogRefresh(name-shaped value) = %v, want the default %v", got, DefaultCatalogRefresh)
 	}
 }

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/toolbelt/v2"
+	"github.com/cplieger/toolbelt/v3"
 )
 
 // newServer builds an engine on temp dirs and serves the projection at

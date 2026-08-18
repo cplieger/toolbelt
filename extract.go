@@ -11,8 +11,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/pathinside"
+	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/pathinside/v2"
 )
 
 // extractArtifact unpacks a downloaded artifact into destDir according
@@ -191,16 +191,19 @@ func runQuiet(ctx context.Context, name string, args ...string) error {
 	return nil
 }
 
-// insideStrictly reports whether target lies STRICTLY beneath base:
-// lexically within the tree, and not base itself.
+// insideStrictly reports whether target lies STRICTLY beneath root:
+// lexically within the tree, and not root itself.
 //
-// pathinside.Inside owns the containment half — a separator-precise
+// pathinside.Root.Contains owns the containment half — a separator-precise
 // comparison that refuses the prefix sibling (opt/rg/14.1.1-evil against
 // opt/rg/14.1.1) and answers false for a pair that cannot be compared
-// lexically at all, such as a relative target against an absolute base.
+// lexically at all, such as a relative target against an absolute root.
+// The root travels as a pathinside.Root rather than a second string, so
+// the pair cannot be supplied transposed; callers construct it once at
+// the boundary they are confining to.
 //
 // The equality half stays here, spelled out, because it is this package's
-// rule and not the predicate's: Inside admits a root as part of its own
+// rule and not the predicate's: Contains admits a root as part of its own
 // tree by contract (a scan or a watch legitimately starts at the root),
 // while both callers need a FILE. linkDeclaredFiles enforces mode 0o755
 // on the result and publishes bin/<name> as a symlink to it, so a
@@ -209,12 +212,12 @@ func runQuiet(ctx context.Context, name string, args ...string) error {
 // The judgment is LEXICAL: it says nothing about symlinks, which is why
 // linkDeclaredFiles resolves with filepath.EvalSymlinks first and tests
 // the resolved path.
-func insideStrictly(base, target string) bool {
-	return pathinside.Inside(base, target) && filepath.Clean(target) != filepath.Clean(base)
+func insideStrictly(root pathinside.Root, target string) bool {
+	return root.Contains(target) && filepath.Clean(target) != filepath.Clean(string(root))
 }
 
-// safeJoin joins base and rel, rejecting any path that escapes base
-// (absolute rel or .. traversal) and any path that resolves to base
+// safeJoin joins root and rel, rejecting any path that escapes root
+// (absolute rel or .. traversal) and any path that resolves to root
 // itself. Guards files[].src from the registry against writing outside
 // the tool's install dir.
 //
@@ -222,15 +225,15 @@ func insideStrictly(base, target string) bool {
 // containment test: filepath.Clean CLAMPS a traversal at the filesystem
 // root ("/.." cleans to "/") while filepath.Join re-attaches it to a
 // relative base, and an absolute name deserves its own message anyway.
-func safeJoin(base, rel string) (string, error) {
+func safeJoin(root pathinside.Root, rel string) (string, error) {
 	if rel == "" {
 		return "", errors.New("empty path")
 	}
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("absolute path %q not allowed", rel)
 	}
-	joined := filepath.Join(base, rel)
-	if !insideStrictly(base, joined) {
+	joined := filepath.Join(string(root), rel)
+	if !insideStrictly(root, joined) {
 		return "", fmt.Errorf("path %q escapes install dir", rel)
 	}
 	return joined, nil

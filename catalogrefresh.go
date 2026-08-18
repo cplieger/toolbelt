@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile/v2"
-	"github.com/cplieger/httpx/v4"
-	"github.com/cplieger/scheduler/v3"
+	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/scheduler/v4"
 )
 
 // CatalogRefresh configures the runtime catalog refresh: the engine
@@ -61,16 +61,35 @@ const (
 	MaxCatalogRefresh     = 30 * 24 * time.Hour
 )
 
+// RefreshEnv is the RAW VALUE a consumer read from its catalog-refresh
+// env variable — "24h", "off", or "" when the variable is unset.
+//
+// It is a distinct type from [RefreshEnvName] because ParseCatalogRefresh
+// takes both and the two used to be adjacent strings: transposed, the
+// variable's NAME was parsed as a duration, failed, and silently fell
+// back to DefaultCatalogRefresh while the warning named the value. A swap
+// is now a compile error (go-rulebook C16).
+type RefreshEnv string
+
+// RefreshEnvName is the NAME of that env variable ("TOOLS_CATALOG_REFRESH").
+// It is carried for one reason only: so a fallback or clamp warning can
+// tell the operator which variable to fix.
+type RefreshEnvName string
+
 // ParseCatalogRefresh interprets a consumer's refresh env value into
 // the CatalogRefresh.Interval duration under the canonical policy:
 // empty or unparseable falls back to DefaultCatalogRefresh, positive
 // durations clamp to [MinCatalogRefresh, MaxCatalogRefresh], and
 // "off"/"disabled"/"0" return zero (schedule disabled; on-demand
-// refresh stays available). name is the env variable named in
-// fallback and clamp warnings.
-func ParseCatalogRefresh(raw, name string) time.Duration {
-	sched := scheduler.ParseInterval(raw, DefaultCatalogRefresh,
-		scheduler.WithName(name),
+// refresh stays available).
+//
+// Call it with both arguments converted at the call site, which is what
+// makes the direction readable:
+//
+//	toolbelt.ParseCatalogRefresh(toolbelt.RefreshEnv(os.Getenv(name)), toolbelt.RefreshEnvName(name))
+func ParseCatalogRefresh(raw RefreshEnv, name RefreshEnvName) time.Duration {
+	sched := scheduler.ParseInterval(string(raw), DefaultCatalogRefresh,
+		scheduler.WithName(string(name)),
 		scheduler.WithBounds(MinCatalogRefresh, MaxCatalogRefresh))
 	if sched.Mode != scheduler.ModeBuiltin {
 		return 0

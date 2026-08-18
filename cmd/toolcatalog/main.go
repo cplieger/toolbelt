@@ -15,7 +15,7 @@
 // Runs at image build time (the Dockerfile downloads both registry
 // tarballs at Renovate-pinned refs):
 //
-//	go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@<tag> \
+//	go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@<tag> \
 //	    -mise <mise-repo>/registry \
 //	    -aqua <aqua-registry-repo>/pkgs \
 //	    -overlay overlays.json [-overlay app-overlays.json] \
@@ -29,7 +29,7 @@
 // an install command). A gap exits non-zero so the image build fails
 // instead of a boot job:
 //
-//	go run github.com/cplieger/toolbelt/v2/cmd/toolcatalog@<tag> \
+//	go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@<tag> \
 //	    verify -catalog tool-catalog.json -require required-tools.txt
 //
 // An ordinary command in the root module: it shares the engine's
@@ -53,7 +53,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/cplieger/toolbelt/v2"
+	"github.com/cplieger/toolbelt/v3"
 	"go.yaml.in/yaml/v3"
 )
 

@@ -47,19 +47,30 @@ func setgidParent(t *testing.T) string {
 	return parent
 }
 
-// wantDirMode fails unless dir is a directory whose stored mode is exactly
-// managedDirMode — no inherited setgid, no group write. Lstat, so a symlink
-// substituted for the directory cannot answer for it.
-func wantDirMode(t *testing.T, dir, what string) {
+// managedDirStoredMode is the exact mode every directory the engine creates
+// must be found carrying: a directory, 0o755, no inherited setgid, no group
+// write. The comparisons against it below are written out at each site rather
+// than performed inside a shared assertion helper, so a failure names the
+// directory that broke and the sibling directories in the same test are still
+// checked (go-rulebook C18).
+const managedDirStoredMode = os.ModeDir | managedDirMode
+
+// storedDirMode returns dir's stored mode for comparison at the call site.
+// Lstat, so a symlink substituted for the directory cannot answer for it.
+//
+// It REPORTS a stat failure rather than aborting — the C18 carve-out this
+// helper is: aborting on a value mismatch cost every sibling directory in the
+// same test its own run. The zero mode it returns on failure cannot equal
+// managedDirStoredMode, so the caller's own comparison fails too and the test
+// still ends red.
+func storedDirMode(t *testing.T, dir string) os.FileMode {
 	t.Helper()
 	fi, err := os.Lstat(dir)
 	if err != nil {
-		t.Fatal(err)
+		t.Errorf("stat %s: %v", dir, err)
+		return 0
 	}
-	if got, want := fi.Mode(), os.ModeDir|managedDirMode; got != want {
-		t.Fatalf("%s mode = %v, want %v: the mode this directory was created with "+
-			"was never verified, so the filesystem's widening stood", what, got, want)
-	}
+	return fi.Mode()
 }
 
 // TestEnsureManagedDir_verifiesTheModeItCreated pins the bug the MkdirAll
@@ -77,7 +88,11 @@ func TestEnsureManagedDir_verifiesTheModeItCreated(t *testing.T) {
 	if err := ensureManagedDir(dir); err != nil {
 		t.Fatalf("ensureManagedDir: %v", err)
 	}
-	wantDirMode(t, dir, "created dir")
+	// The widening is real, so this can only hold if ensureManagedDir
+	// chmod'ed the handle and re-read it.
+	if got := storedDirMode(t, dir); got != managedDirStoredMode {
+		t.Errorf("mode of the dir ensureManagedDir created = %v, want %v", got, managedDirStoredMode)
+	}
 }
 
 // TestNew_verifiesTheStoredModeOfTheBinDir pins the property on the PATH
@@ -101,7 +116,10 @@ func TestNew_verifiesTheStoredModeOfTheBinDir(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	defer e.Close()
-	wantDirMode(t, filepath.Join(toolsDir, "bin"), "the PATH dir New created")
+	binDir := filepath.Join(toolsDir, "bin")
+	if got := storedDirMode(t, binDir); got != managedDirStoredMode {
+		t.Errorf("mode of the PATH dir New created = %v, want %v", got, managedDirStoredMode)
+	}
 }
 
 // TestLinkBin_verifiesTheStoredModeOfThePathDir covers the same directory at
@@ -124,9 +142,11 @@ func TestLinkBin_verifiesTheStoredModeOfThePathDir(t *testing.T) {
 	if err := in.linkBin("rg", target); err != nil {
 		t.Fatalf("linkBin: %v", err)
 	}
-	wantDirMode(t, in.binDir(), "the PATH dir linkBin created")
+	if got := storedDirMode(t, in.binDir()); got != managedDirStoredMode {
+		t.Errorf("mode of the PATH dir linkBin created = %v, want %v", got, managedDirStoredMode)
+	}
 	if _, err := os.Lstat(filepath.Join(in.binDir(), "rg")); err != nil {
-		t.Fatalf("bin/rg was not published: %v", err)
+		t.Errorf("bin/rg was not published: %v", err)
 	}
 }
 
@@ -156,9 +176,17 @@ func TestExtractAndSwap_verifiesTheStoredModeOfThePublishedVersionTree(t *testin
 	if err != nil {
 		t.Fatalf("extractAndSwap: %v", err)
 	}
-	wantDirMode(t, versDir, "the published version tree")
-	wantDirMode(t, filepath.Join(in.optDir(), "rg"), "the tool's opt dir")
-	wantDirMode(t, in.optDir(), "opt")
+	// Every level the publish created, each asserted at its own line so one
+	// widened directory does not hide the other two.
+	if got := storedDirMode(t, versDir); got != managedDirStoredMode {
+		t.Errorf("mode of the published version tree = %v, want %v", got, managedDirStoredMode)
+	}
+	if got := storedDirMode(t, filepath.Join(in.optDir(), "rg")); got != managedDirStoredMode {
+		t.Errorf("mode of the tool's opt dir = %v, want %v", got, managedDirStoredMode)
+	}
+	if got := storedDirMode(t, in.optDir()); got != managedDirStoredMode {
+		t.Errorf("mode of opt = %v, want %v", got, managedDirStoredMode)
+	}
 }
 
 // TestEnsureManagedDir_leavesAPreExistingDirectoryAlone pins the deliberate

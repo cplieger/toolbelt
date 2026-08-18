@@ -7,6 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/cplieger/pathinside/v2"
 )
 
 // installBase stands in for the version directory the containment rule
@@ -86,7 +88,7 @@ func TestSafeJoin_Containment(t *testing.T) {
 }
 
 // TestSafeJoin_RefusesTheBaseItself pins the half of the rule the
-// containment predicate deliberately does NOT carry: pathinside.Inside
+// containment predicate deliberately does NOT carry: Root.Contains
 // admits a root as part of its own tree, so insideStrictly tests equality
 // separately and safeJoin refuses a name that resolves to the version
 // directory rather than to something inside it. Every input here is
@@ -115,37 +117,42 @@ func TestSafeJoin_RefusesTheBaseItself(t *testing.T) {
 // caller's to shape.
 //
 // Two properties beyond plain containment are asserted here. An
-// UNCOMPARABLE pair — a relative target against an absolute base — must
-// not read as containment; pathinside.Inside answers false for it, which
+// UNCOMPARABLE pair — a relative target against an absolute root — must
+// not read as containment; Root.Contains answers false for it, which
 // is the refusal the gate previously bought by feeding a ".." sentinel
-// through safeJoin. And a target whose name merely starts with the base's
+// through safeJoin. And a target whose name merely starts with the root's
 // name is outside: /config/homework is not inside /config/home, the
 // separator-precision bug class the predicate exists for.
 func TestInsideStrictly(t *testing.T) {
 	cases := map[string]struct {
-		base, target string
-		want         bool
+		root   pathinside.Root
+		target string
+		want   bool
 	}{
-		"child":                    {base: installBase, target: installBase + "/rg", want: true},
-		"grandchild":               {base: installBase, target: installBase + "/bin/rg", want: true},
-		"uncleaned child":          {base: installBase, target: installBase + "/./bin/../bin/rg", want: true},
-		"base with trailing sep":   {base: installBase + "/", target: installBase + "/rg", want: true},
-		"the base itself":          {base: installBase, target: installBase},
-		"base written unclean":     {base: installBase, target: installBase + "/bin/.."},
-		"parent":                   {base: installBase, target: filepath.Dir(installBase)},
-		"unrelated":                {base: installBase, target: "/etc/passwd"},
-		"prefix sibling":           {base: installBase, target: installBase + "-evil/rg"},
-		"relative against absolut": {base: installBase, target: "rg"},
-		"absolute against relativ": {base: "opt/rg/14.1.1", target: installBase + "/rg"},
+		"child":                    {root: installBase, target: installBase + "/rg", want: true},
+		"grandchild":               {root: installBase, target: installBase + "/bin/rg", want: true},
+		"uncleaned child":          {root: installBase, target: installBase + "/./bin/../bin/rg", want: true},
+		"base with trailing sep":   {root: installBase + "/", target: installBase + "/rg", want: true},
+		"the base itself":          {root: installBase, target: installBase},
+		"base written unclean":     {root: installBase, target: installBase + "/bin/.."},
+		"parent":                   {root: installBase, target: filepath.Dir(installBase)},
+		"unrelated":                {root: installBase, target: "/etc/passwd"},
+		"prefix sibling":           {root: installBase, target: installBase + "-evil/rg"},
+		"relative against absolut": {root: installBase, target: "rg"},
+		"absolute against relativ": {root: "opt/rg/14.1.1", target: installBase + "/rg"},
+
+		// The zero Root contains nothing, which is what makes an unset
+		// boundary fail closed rather than confine to the cwd.
+		"the zero root": {root: "", target: installBase + "/rg"},
 
 		// The canonical lookalike pair the library exists for.
-		"homework is not home":     {base: "/config/home", target: "/config/homework/rg"},
-		"home's own child is home": {base: "/config/home", target: "/config/home/rg", want: true},
+		"homework is not home":     {root: "/config/home", target: "/config/homework/rg"},
+		"home's own child is home": {root: "/config/home", target: "/config/home/rg", want: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got := insideStrictly(tc.base, tc.target); got != tc.want {
-				t.Errorf("insideStrictly(%q, %q) = %v, want %v", tc.base, tc.target, got, tc.want)
+			if got := insideStrictly(tc.root, tc.target); got != tc.want {
+				t.Errorf("insideStrictly(%q, %q) = %v, want %v", tc.root, tc.target, got, tc.want)
 			}
 		})
 	}

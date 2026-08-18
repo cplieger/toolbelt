@@ -2,7 +2,7 @@
 # line, matched against punused's output line; full-line `#` comments carry the
 # reason. Invalid-by-construction classes: `.kiro/steering/tools.md`.
 #
-# toolbelt is a LIBRARY (`github.com/cplieger/toolbelt/v2`) that also ships a
+# toolbelt is a LIBRARY (`github.com/cplieger/toolbelt/v3`) that also ships a
 # `main` package under cmd/toolcatalog, so the CI gate's app-mode detection
 # ("a main package exists") gates it on punused even though its exported
 # surface is a PUBLISHED API. punused resolves references through gopls

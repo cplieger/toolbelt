@@ -430,7 +430,18 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 		q.onOutput(j.id, lines)
 	}
 	done := make(chan struct{})
+	// flushed closes after the ticker goroutine's FINAL flush() returns,
+	// and runOne waits on it before publishing the terminal state below.
+	// Without that wait, close(done) only SIGNALS the goroutine: its last
+	// flush() could still be inside q.onOutput while the finalize block
+	// and the worker's notifyLocked already reported the job finished, so
+	// a consumer (vibekit's tools panel) could receive tool_job_output
+	// lines AFTER the tool_job_changed that said the job was done
+	// (go-rulebook C20). flush() takes only outMu, never q.mu, so waiting
+	// here — outside the lock — cannot deadlock against the finalize.
+	flushed := make(chan struct{})
 	go func() {
+		defer close(flushed)
 		t := time.NewTicker(outputFlushEvery)
 		defer t.Stop()
 		for {
@@ -455,6 +466,7 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 
 	err := q.run(ctx, j, output)
 	close(done)
+	<-flushed
 
 	// Finalize under the queue lock: Snapshot/Active read the active
 	// job's fields (via view) under q.mu, so unlocked writes here race
