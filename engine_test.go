@@ -1876,3 +1876,32 @@ func TestPruneOldVersions_Retention(t *testing.T) {
 		})
 	}
 }
+
+// TestMergeCatalogDefaults_ClonesSliceFields pins the one place catalog data
+// crosses into mutable state. The catalog lives in an atomic.Pointer and is
+// swapped whole on refresh, so every reader shares one copy; a manifest row is
+// mutated by Add, Patch and remove. Sharing a backing array between the two
+// means a row that ever grows or sorts its Requires rewrites what every other
+// reader of the live catalog sees.
+func TestMergeCatalogDefaults_ClonesSliceFields(t *testing.T) {
+	cat := CatalogEntry{
+		Name:        "widget",
+		Source:      SourceManual,
+		Requires:    []string{"node"},
+		VersionArgs: []string{"--version"},
+	}
+	tool := Tool{Source: SourceManual}
+	mergeCatalogDefaults(&tool, &cat)
+
+	// Write through the row the way a future edit would, in place rather than
+	// by replacing the slice header.
+	tool.Requires[0] = "CLOBBERED"
+	tool.VersionArgs[0] = "CLOBBERED"
+
+	if cat.Requires[0] != "node" {
+		t.Errorf("catalog Requires[0] = %q after the row was written through, want %q", cat.Requires[0], "node")
+	}
+	if cat.VersionArgs[0] != "--version" {
+		t.Errorf("catalog VersionArgs[0] = %q after the row was written through, want %q", cat.VersionArgs[0], "--version")
+	}
+}

@@ -287,11 +287,18 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 	if t.Description == "" {
 		t.Description = cat.Description
 	}
+	// Clone the two slice fields. Everything else hydrated here is a string,
+	// but these cross from the catalog — held in an atomic.Pointer and swapped
+	// whole on refresh, so every reader shares one copy — into a manifest row,
+	// which IS mutated (Add, Patch, remove). Sharing the backing array would
+	// make a future append or sort on a row rewrite what every other reader of
+	// the live catalog sees. Today's writers all REPLACE the slice rather than
+	// writing through it, so this closes the next edit rather than a live bug.
 	if t.Requires == nil {
-		t.Requires = cat.Requires
+		t.Requires = slices.Clone(cat.Requires)
 	}
 	if t.VersionArgs == nil {
-		t.VersionArgs = cat.VersionArgs
+		t.VersionArgs = slices.Clone(cat.VersionArgs)
 	}
 	if t.Install == "" {
 		t.Install = cat.Install
