@@ -558,6 +558,13 @@ func (e *Engine) Remove(name string) (*Job, []string, error) {
 // this removes them, so the returned job carries every removed name and
 // the dependents slice reports which ones rode along.
 //
+// The cascade is ONE LEVEL — the direct requirers of name, which is what
+// the returned dependents slice holds. A transitive chain is not walked:
+// with A requiring B and B requiring name, this removes name and B and
+// leaves A enabled against a dependency that is gone. Removing A too is
+// the caller's decision to make, and a caller that wants the whole chain
+// asks again for each level it uncovers.
+//
 // Prefer Remove unless the caller has established that removing the
 // dependents is intended — the UI's cascade confirmation, an operator's
 // explicit force. Nothing here re-checks that intent.
