@@ -136,6 +136,9 @@ func (e *Engine) systemTools() []SystemTool {
 
 // Search queries the catalog (empty query = featured set), hiding
 // entries already in the manifest.
+//
+// The returned entries alias the catalog: do not mutate their slice fields
+// (see [CatalogEntry]).
 func (e *Engine) Search(query string) []CatalogEntry {
 	hits := e.cat().Search(query)
 	m, err := e.store.LoadManifest()
