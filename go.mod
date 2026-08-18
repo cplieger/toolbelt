@@ -19,4 +19,4 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5
 )
 
-require github.com/cplieger/keyenc v1.0.2
+require github.com/cplieger/keyenc v1.0.3
