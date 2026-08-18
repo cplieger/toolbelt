@@ -19,7 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/httpx/v4"
+	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/pathinside/v2"
 )
 
 // installer executes install/uninstall plans for every source kind.
@@ -402,13 +403,18 @@ func restoreBackup(versDir, backup string) {
 // linkDeclaredFiles resolves and symlinks each declared binary from the
 // install dir into the bin dir, returning the linked bin names.
 func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]string, error) {
+	// The install dir IS the confinement boundary for every declared
+	// file, so the Root is constructed once here rather than at each
+	// check: pathinside/v2 buys its misuse-resistance at the
+	// construction site.
+	installRoot := pathinside.Root(versDir)
 	var bins []string
 	for _, f := range files {
 		src := f.Src
 		if src == "" {
 			src = f.Name
 		}
-		target, err := safeJoin(versDir, src)
+		target, err := safeJoin(installRoot, src)
 		if err != nil {
 			return nil, err
 		}
@@ -423,7 +429,7 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]stri
 		if err != nil {
 			return nil, fmt.Errorf("declared file %s missing after extract: %w", src, err)
 		}
-		if !insideStrictly(versDir, resolved) {
+		if !insideStrictly(installRoot, resolved) {
 			return nil, fmt.Errorf("declared file %s escapes the install dir via symlink", src)
 		}
 		// enforceExecutable acts on a DESCRIPTOR, which NARROWS the

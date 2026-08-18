@@ -42,7 +42,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/ssrf/v3"
+	"github.com/cplieger/ssrf/v4"
 )
 
 // Source prefixes for Tool.Source. A source is "<kind>:<ref>" except

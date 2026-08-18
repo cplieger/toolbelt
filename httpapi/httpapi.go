@@ -37,8 +37,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cplieger/toolbelt/v2"
-	"github.com/cplieger/webhttp"
+	"github.com/cplieger/toolbelt/v3"
+	"github.com/cplieger/webhttp/v2"
 )
 
 // maxBodyBytes caps request bodies: tool definitions are small.
@@ -278,8 +278,14 @@ func postInstall(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 }
 
 func deleteTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+	// The route's ?force=1 is the caller's cascade intent; the two engine
+	// methods are what that intent selects.
 	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
-	job, dependents, err := e.Remove(r.PathValue("name"), force)
+	remove := e.Remove
+	if force {
+		remove = e.RemoveWithDependents
+	}
+	job, dependents, err := remove(r.PathValue("name"))
 	if err != nil {
 		writeEngineError(w, r, err)
 		return

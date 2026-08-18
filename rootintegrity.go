@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/cplieger/pathinside"
+	"github.com/cplieger/pathinside/v2"
 )
 
 // Root integrity: an opt-in prerequisite check on the directories the
@@ -119,13 +119,16 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 	// resolved children against the unresolved root would report every
 	// one of them as escaping. ToolsDir itself has already been refused
 	// if IT is the symlink, so this resolves the ancestors only.
-	base, contained := "", false
+	//
+	// This is the boundary the containment leg confines to, so it is
+	// where the pathinside.Root is constructed.
+	toolsRoot, contained := pathinside.Root(""), false
 	if toolsIsDir {
 		resolved, err := filepath.EvalSymlinks(toolsDir)
 		if err != nil {
 			out = append(out, RootIntegrityFinding{Path: toolsDir, Reason: "cannot be resolved: " + err.Error()})
 		} else {
-			base, contained = resolved, true
+			toolsRoot, contained = pathinside.Root(resolved), true
 		}
 	}
 
@@ -140,7 +143,7 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 		findings, isDir := inspectRootDir(path)
 		out = append(out, findings...)
 		if isDir && contained {
-			out = append(out, inspectContainment(base, path)...)
+			out = append(out, inspectContainment(toolsRoot, path)...)
 		}
 	}
 
@@ -186,12 +189,15 @@ func inspectRootDir(path string) ([]RootIntegrityFinding, bool) {
 // inside the tool tree. The mode legs are name-level; this is the leg
 // that catches a redirect through an intermediate symlink, which is how
 // a launcher directory ends up somewhere the operator never granted.
-func inspectContainment(base, path string) []RootIntegrityFinding {
+//
+// The tree travels as a pathinside.Root constructed once by inspectRoots,
+// so the containment pair cannot be supplied transposed.
+func inspectContainment(toolsRoot pathinside.Root, path string) []RootIntegrityFinding {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return []RootIntegrityFinding{{Path: path, Reason: "cannot be resolved: " + err.Error()}}
 	}
-	if !pathinside.Inside(base, resolved) {
+	if !toolsRoot.Contains(resolved) {
 		return []RootIntegrityFinding{{
 			Path:   path,
 			Reason: "resolves to " + resolved + ", outside the tool tree",

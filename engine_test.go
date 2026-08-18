@@ -108,7 +108,7 @@ func TestNew_RefusesRetiredManifest(t *testing.T) {
 	}
 	_, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools")})
 	if err == nil || !strings.Contains(err.Error(), "manifest version") {
-		t.Fatalf("New accepted a retired-format manifest: %v", err)
+		t.Errorf("New accepted a retired-format manifest: %v", err)
 	}
 }
 
@@ -130,9 +130,9 @@ func TestStore_RefusesTraversingManifestKey(t *testing.T) {
 				t.Fatal(err)
 			}
 			st := newStore(dir, nil, slog.Default())
-			m, err := st.Manifest()
+			m, err := st.LoadManifest()
 			if err == nil {
-				t.Fatalf("Manifest() accepted tool name %q: %+v", name, m)
+				t.Errorf("LoadManifest() accepted tool name %q: %+v", name, m)
 			}
 			if !strings.Contains(err.Error(), "invalid tool name") {
 				t.Errorf("error %q does not name the invalid key", err)
@@ -153,9 +153,9 @@ func TestStore_AcceptsDottedManifestKey(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "tools.json"), []byte(doc), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := newStore(dir, nil, slog.Default()).Manifest()
+	m, err := newStore(dir, nil, slog.Default()).LoadManifest()
 	if err != nil {
-		t.Fatalf("Manifest() refused a legitimate dotted name: %v", err)
+		t.Fatalf("LoadManifest() refused a legitimate dotted name: %v", err)
 	}
 	for _, name := range []string{"tool.v2", "..extras"} {
 		if _, ok := m.Tools[name]; !ok {
@@ -176,23 +176,23 @@ func TestStore_MutateRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := st.Manifest()
+	m, err := st.LoadManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if m.Tools["jq"].Version != "1.8.1" {
-		t.Fatalf("roundtrip lost data: %+v", m.Tools)
+		t.Errorf("roundtrip lost data: %+v", m.Tools)
 	}
 	st.setToolStatus("jq", func(s *ToolStatus) {
 		s.InstalledVersion = "1.8.1"
 		s.Bins = []string{"jq"}
 	})
 	if got := st.State().Tools["jq"].InstalledVersion; got != "1.8.1" {
-		t.Fatalf("state roundtrip = %q", got)
+		t.Errorf("state roundtrip = %q", got)
 	}
 	st.dropToolStatus("jq")
 	if _, ok := st.State().Tools["jq"]; ok {
-		t.Fatal("dropToolStatus left entry")
+		t.Error("dropToolStatus left entry")
 	}
 }
 
@@ -204,7 +204,7 @@ func TestAdd_ManualInstallRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(inv.Tools) != 1 || !inv.Tools[0].Installed || inv.Tools[0].InstalledVersion != "1" {
-		t.Fatalf("inventory = %+v", inv.Tools)
+		t.Errorf("inventory = %+v", inv.Tools)
 	}
 }
 
@@ -221,11 +221,11 @@ func TestAdd_ManualProbeMissingFails(t *testing.T) {
 	}
 	final := waitJob(t, e, job.ID)
 	if final.State != JobFailed {
-		t.Fatalf("job state = %s, want failed", final.State)
+		t.Errorf("job state = %s, want failed", final.State)
 	}
 	inv, _ := e.Inventory()
 	if inv.Tools[0].LastError == "" {
-		t.Fatal("expected last_error recorded")
+		t.Error("expected last_error recorded")
 	}
 }
 
@@ -249,7 +249,7 @@ func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	}
 	final := waitJob(t, e, job.ID)
 	if final.State != JobFailed {
-		t.Fatalf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
+		t.Errorf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
 	}
 	if !strings.Contains(final.Error, "cannot run") {
 		t.Errorf("job error = %q, want it to say the tool cannot run", final.Error)
@@ -293,7 +293,7 @@ func TestInstall_EnablesAnObligatoryDependency(t *testing.T) {
 	}
 	final := waitJob(t, e, job.ID)
 	if final.State != JobDone {
-		t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+		t.Errorf("job = %+v tail=%v", final, final.OutputTail)
 	}
 	inv, _ := e.Inventory()
 	byName := map[string]ToolInfo{}
@@ -373,7 +373,7 @@ func TestInstallingFlag_CoversDependencies(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	if final := waitJob(t, e, job.ID); final.State != JobDone {
-		t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+		t.Errorf("job = %+v tail=%v", final, final.OutputTail)
 	}
 }
 
@@ -418,7 +418,7 @@ func TestInstallPlan_PublishesWhileTheJobRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	if final := waitJob(t, e, job.ID); final.State != JobDone {
-		t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+		t.Errorf("job = %+v tail=%v", final, final.OutputTail)
 	}
 	mu.Lock()
 	got := running
@@ -464,7 +464,7 @@ func TestInstall_DoomedDependentIsBlockedNotBlamed(t *testing.T) {
 	}
 	final := waitJob(t, e, job.ID)
 	if final.State != JobFailed {
-		t.Fatalf("job state = %s, want failed", final.State)
+		t.Errorf("job state = %s, want failed", final.State)
 	}
 	// The job's own error names the tool that broke, not its victims.
 	if !strings.Contains(final.Error, "runtime") {
@@ -512,7 +512,7 @@ func TestInstall_UnrelatedToolsStillInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if final := waitJob(t, e, job.ID); final.State != JobFailed {
-		t.Fatalf("job state = %s, want failed", final.State)
+		t.Errorf("job state = %s, want failed", final.State)
 	}
 	inv, _ := e.Inventory()
 	for _, row := range inv.Tools {
@@ -563,7 +563,7 @@ func TestInventory_ReportsDependents(t *testing.T) {
 	}
 	// The refusal and the advisory field must name the same set, or a
 	// consumer's pre-check disagrees with the answer it gets.
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if want := enabledDependents(m, "node"); !slices.Equal(got["node"], want) {
 		t.Errorf("inventory dependents %v disagree with the refusal's %v", got["node"], want)
 	}
@@ -571,17 +571,19 @@ func TestInventory_ReportsDependents(t *testing.T) {
 
 func TestAdd_Validation(t *testing.T) {
 	e := newTestEngine(t, nil)
-	cases := []AddRequest{
-		{Name: "bad name!", Source: SourceManual, Version: "1", Install: "true"},
-		{Name: "x", Source: "weird:ref", Version: "1"},
-		{Name: "x", Source: SourceManual, Version: "1"},        // no install cmd
-		{Name: "x", Source: "npm:pkg", Version: "1; rm -rf /"}, // bad version
-		{Name: "unknown-tool-with-no-source-or-catalog", Version: "1"},
+	cases := map[string]AddRequest{
+		"a name that is not a tool name":                {Name: "bad name!", Source: SourceManual, Version: "1", Install: "true"},
+		"an unrecognised source scheme":                 {Name: "x", Source: "weird:ref", Version: "1"},
+		"a manual source with no install command":       {Name: "x", Source: SourceManual, Version: "1"},
+		"a version carrying a shell command":            {Name: "x", Source: "npm:pkg", Version: "1; rm -rf /"},
+		"a name in neither the request nor the catalog": {Name: "unknown-tool-with-no-source-or-catalog", Version: "1"},
 	}
-	for i, req := range cases {
-		if _, err := e.Add(t.Context(), &req); err == nil {
-			t.Errorf("case %d: want error, got nil", i)
-		}
+	for name, req := range cases {
+		t.Run(name, func(t *testing.T) {
+			if job, err := e.Add(t.Context(), &req); err == nil {
+				t.Errorf("Add(%+v) = job %v, want a validation error", req, job)
+			}
+		})
 	}
 }
 
@@ -613,11 +615,11 @@ func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 	pin := true
 	jv, err := e.Patch("t", PatchRequest{Pin: &pin})
 	if err != nil || jv != nil {
-		t.Fatalf("pin patch: job=%v err=%v", jv, err)
+		t.Errorf("pin patch: job=%v err=%v", jv, err)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if !m.Tools["t"].Pin {
-		t.Fatal("pin not persisted")
+		t.Error("pin not persisted")
 	}
 
 	v2 := "2.0.0"
@@ -627,14 +629,14 @@ func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 	}
 	final := waitJob(t, e, jv.ID)
 	if final.State != JobDone {
-		t.Fatalf("reinstall job = %+v", final)
+		t.Errorf("reinstall job = %+v", final)
 	}
 	if got := e.store.State().Tools["t"].InstalledVersion; got != "2.0.0" {
-		t.Fatalf("installed_version = %q, want 2.0.0", got)
+		t.Errorf("installed_version = %q, want 2.0.0", got)
 	}
 
 	if _, err := e.Patch("missing", PatchRequest{Pin: &pin}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("patch missing = %v, want ErrNotFound", err)
+		t.Errorf("patch missing = %v, want ErrNotFound", err)
 	}
 }
 
@@ -643,28 +645,28 @@ func TestRemove_DependentsConflict(t *testing.T) {
 	addManual(t, e, "base", nil)
 	addManual(t, e, "dep", []string{"base"})
 
-	_, deps, err := e.Remove("base", false)
+	_, deps, err := e.Remove("base")
 	if !errors.Is(err, ErrHasDependents) {
-		t.Fatalf("err = %v, want ErrHasDependents", err)
+		t.Errorf("err = %v, want ErrHasDependents", err)
 	}
 	if len(deps) != 1 || deps[0] != "dep" {
-		t.Fatalf("dependents = %v", deps)
+		t.Errorf("dependents = %v", deps)
 	}
 
-	jv, _, err := e.Remove("base", true)
+	jv, _, err := e.RemoveWithDependents("base")
 	if err != nil {
 		t.Fatal(err)
 	}
 	final := waitJob(t, e, jv.ID)
 	if final.State != JobDone {
-		t.Fatalf("uninstall job = %+v", final)
+		t.Errorf("uninstall job = %+v", final)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if len(m.Tools) != 0 {
-		t.Fatalf("cascade left tools: %+v", m.Tools)
+		t.Errorf("cascade left tools: %+v", m.Tools)
 	}
 	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "base")); !os.IsNotExist(err) {
-		t.Fatal("base bin not removed")
+		t.Error("base bin not removed")
 	}
 }
 
@@ -684,19 +686,19 @@ func TestInstallOrder_BackendDepFromCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	plan, err := e.installOrder(t.Context(), m, []string{"pyright"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	ordered := plan.ordered
 	if len(ordered) != 2 || ordered[0] != "node" || ordered[1] != "pyright" {
-		t.Fatalf("ordered = %v, want [node pyright]", ordered)
+		t.Errorf("ordered = %v, want [node pyright]", ordered)
 	}
 	// The dep was adopted into the manifest.
-	m2, _ := e.store.Manifest()
+	m2, _ := e.store.LoadManifest()
 	if _, ok := m2.Tools["node"]; !ok {
-		t.Fatal("node not adopted into manifest")
+		t.Error("node not adopted into manifest")
 	}
 }
 
@@ -710,9 +712,9 @@ func TestInstallOrder_CycleDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if _, err := e.installOrder(t.Context(), m, []string{"a"}); err == nil {
-		t.Fatal("want cycle error")
+		t.Error("want cycle error")
 	}
 }
 
@@ -844,10 +846,10 @@ func TestInstallAqua_ChecksumMismatch(t *testing.T) {
 	}
 	final := waitJob(t, e, job.ID)
 	if final.State != JobFailed || !strings.Contains(final.Error, "checksum mismatch") {
-		t.Fatalf("job = %+v", final)
+		t.Errorf("job = %+v, want a checksum-mismatch failure", final)
 	}
 	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
-		t.Fatal("bin linked despite checksum failure")
+		t.Error("bin linked despite checksum failure")
 	}
 }
 
@@ -869,16 +871,16 @@ func TestJobs_CancelQueued(t *testing.T) {
 		t.Fatal("cancel queued failed")
 	}
 	if v := waitJob(t, e, queued.ID); v.State != JobCancelled {
-		t.Fatalf("queued job state = %s", v.State)
+		t.Errorf("queued job state = %s", v.State)
 	}
 	if !e.CancelJob(slow.ID) {
 		t.Fatal("cancel running failed")
 	}
 	if v := waitJob(t, e, slow.ID); v.State != JobCancelled && v.State != JobFailed {
-		t.Fatalf("running job state = %s", v.State)
+		t.Errorf("running job state = %s", v.State)
 	}
 	if e.CancelJob("tj-nope") {
-		t.Fatal("cancel unknown succeeded")
+		t.Error("cancel unknown succeeded")
 	}
 }
 
@@ -930,6 +932,68 @@ func cancelActiveContext(t *testing.T, e *Engine, _, _ *Job) {
 		t.Fatal("no active job context to cancel")
 	}
 	cancel()
+}
+
+// TestRunOne_FlushesOutputBeforeTheTerminalState pins the ordering rule a
+// consumer's UI depends on: a job's LAST output batch reaches OnJobOutput
+// BEFORE the OnJobChanged transition that says the job finished
+// (go-rulebook C20).
+//
+// The window it closes is narrow and real. Output is coalesced by a ticker
+// goroutine, and the line emitted in the job's final moments has no tick
+// left to carry it — only that goroutine's closing flush. Signalling the
+// goroutine and finalizing without waiting for it left the flush racing the
+// terminal notification, so vibekit's tools panel could render a finished
+// job and then receive more of its output. The queue is driven directly
+// here because the ordering is the queue's, not the engine's.
+func TestRunOne_FlushesOutputBeforeTheTerminalState(t *testing.T) {
+	var mu sync.Mutex
+	var seq []string
+	record := func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		seq = append(seq, s)
+	}
+	q := newJobQueue(
+		func(j *Job) { record("state:" + j.State) },
+		func(_ string, lines []string) { record("output:" + strings.Join(lines, ",")) },
+		slog.Default(),
+		func(_ context.Context, _ *job, output func(string)) error {
+			// Emitted as the job returns, so no flush tick can carry it.
+			output("the last line")
+			return nil
+		},
+	)
+	defer q.Close()
+
+	jv, err := q.Enqueue(JobKindInstall, []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wait observes the terminal view under the same lock hold that
+	// publishes the terminal transition, so the sequence is complete here.
+	if _, err := q.Wait(t.Context(), jv.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	got := slices.Clone(seq)
+	mu.Unlock()
+	terminal := "state:" + JobDone
+	if len(got) == 0 || got[len(got)-1] != terminal {
+		t.Errorf("event sequence = %v, want it to END with %q", got, terminal)
+	}
+	if !slices.Contains(got, "output:the last line") {
+		t.Errorf("the job's last output batch never arrived: %v", got)
+	}
+	if i := slices.Index(got, terminal); i >= 0 {
+		for _, e := range got[i+1:] {
+			if strings.HasPrefix(e, "output:") {
+				t.Errorf("output arrived after the finished transition: %v", got)
+				break
+			}
+		}
+	}
 }
 
 // TestJobCancelCause pins WHO each cancellation path reports. A consumer
@@ -1037,10 +1101,10 @@ func TestJobCancelAttribution(t *testing.T) {
 func TestCancelCause_ValuesAndJSON(t *testing.T) {
 	var zero CancelCause
 	if zero != CancelUnknown {
-		t.Fatalf("zero value = %q, want CancelUnknown", zero)
+		t.Errorf("zero value = %q, want CancelUnknown", zero)
 	}
 	if zero == CancelShutdown || zero == CancelCaller {
-		t.Fatal("the zero value must not equal a real cause")
+		t.Error("the zero value must not equal a real cause")
 	}
 	cases := map[string]struct {
 		cause CancelCause
@@ -1096,14 +1160,14 @@ func TestSearch_HidesManifestEntries(t *testing.T) {
 	feat := e.Search("")
 	for _, h := range feat {
 		if h.Name == "jq" {
-			t.Fatal("featured list should hide installed jq")
+			t.Error("featured list should hide installed jq")
 		}
 	}
 	if hits := e.Search("json"); len(hits) == 0 {
-		t.Fatal("description search found nothing")
+		t.Error("description search found nothing")
 	}
 	if hits := e.Search("rg"); len(hits) == 0 || hits[0].Name != "ripgrep" {
-		t.Fatalf("alias search = %+v", hits)
+		t.Errorf("alias search = %+v", hits)
 	}
 }
 
@@ -1122,10 +1186,10 @@ func TestInventory_LatestFromCacheAndSystem(t *testing.T) {
 		t.Fatal(err)
 	}
 	if inv.Tools[0].Latest != "" {
-		t.Fatalf("manual tool has latest = %q", inv.Tools[0].Latest)
+		t.Errorf("manual tool has latest = %q", inv.Tools[0].Latest)
 	}
 	if len(inv.System) != 1 || !inv.System[0].Installed {
-		t.Fatalf("system tools = %+v", inv.System)
+		t.Errorf("system tools = %+v", inv.System)
 	}
 }
 
@@ -1138,27 +1202,35 @@ func (w *nopWriteCloser) Write(p []byte) (int, error) { return w.b.Write(p) }
 // can't resolve must fail spec resolution, never silently downgrade to
 // an unverified install.
 func TestChecksumConfigured_FailsClosed(t *testing.T) {
-	aq := &AquaPackage{
-		Type: "http", RepoOwner: "o", RepoName: "t",
-		URL: "https://example.com/t.raw", Format: "raw",
-		Checksum: &AquaChecksum{Type: "weird_type", Algorithm: "sha256"},
-	}
-	if _, err := aq.ResolveSpec("v1.0.0"); err == nil {
-		t.Fatal("unsupported checksum type must fail resolution")
-	}
-	aq.Checksum = &AquaChecksum{Type: "github_release", Asset: "{{.Broken", Algorithm: "sha256"}
-	if _, err := aq.ResolveSpec("v1.0.0"); err == nil {
-		t.Fatal("checksum template error must fail resolution")
-	}
-	aq.Checksum = &AquaChecksum{Type: "github_release", Asset: "sums.txt"}
-	if _, err := aq.ResolveSpec("v1.0.0"); err == nil {
-		t.Fatal("checksum without algorithm must fail resolution")
-	}
-	// enabled:false is an explicit opt-out and must still resolve.
 	off := false
-	aq.Checksum = &AquaChecksum{Type: "github_release", Asset: "sums.txt", Enabled: &off}
-	if _, err := aq.ResolveSpec("v1.0.0"); err != nil {
-		t.Fatalf("disabled checksum should resolve: %v", err)
+	cases := map[string]struct {
+		checksum    *AquaChecksum
+		wantResolve bool
+	}{
+		"an unsupported checksum type":  {checksum: &AquaChecksum{Type: "weird_type", Algorithm: "sha256"}},
+		"an unparseable asset template": {checksum: &AquaChecksum{Type: "github_release", Asset: "{{.Broken", Algorithm: "sha256"}},
+		"an asset with no algorithm":    {checksum: &AquaChecksum{Type: "github_release", Asset: "sums.txt"}},
+		// enabled:false is an explicit opt-out and must still resolve.
+		"an explicitly disabled checksum": {
+			checksum:    &AquaChecksum{Type: "github_release", Asset: "sums.txt", Enabled: &off},
+			wantResolve: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			aq := &AquaPackage{
+				Type: "http", RepoOwner: "o", RepoName: "t",
+				URL: "https://example.com/t.raw", Format: "raw",
+				Checksum: tc.checksum,
+			}
+			spec, err := aq.ResolveSpec("v1.0.0")
+			if tc.wantResolve && err != nil {
+				t.Errorf("ResolveSpec = %v, want it to resolve", err)
+			}
+			if !tc.wantResolve && err == nil {
+				t.Errorf("ResolveSpec = %+v, want it to fail closed", spec)
+			}
+		})
 	}
 }
 
@@ -1194,11 +1266,11 @@ func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 	if _, err := e.Add(t.Context(), &AddRequest{
 		Name: "phantom", Source: SourceManual, Version: "1", Install: "true",
 	}); err == nil {
-		t.Fatal("expected queue-full error")
+		t.Error("expected queue-full error")
 	}
-	m, _ := e.store.Manifest()
+	m, _ := e.store.LoadManifest()
 	if _, exists := m.Tools["phantom"]; exists {
-		t.Fatal("rejected add left a manifest row")
+		t.Error("rejected add left a manifest row")
 	}
 }
 
@@ -1218,16 +1290,16 @@ func TestUninstall_UsesRemovedDefinitions(t *testing.T) {
 	}
 	waitJob(t, e, job.ID)
 
-	jv, _, err := e.Remove("m", false)
+	jv, _, err := e.Remove("m")
 	if err != nil {
 		t.Fatal(err)
 	}
 	final := waitJob(t, e, jv.ID)
 	if final.State != JobDone {
-		t.Fatalf("uninstall job = %+v", final)
+		t.Errorf("uninstall job = %+v", final)
 	}
 	if _, err := os.Stat(marker); err != nil {
-		t.Fatal("manual uninstall command did not run")
+		t.Error("manual uninstall command did not run")
 	}
 }
 
@@ -1255,7 +1327,7 @@ func TestLinkPMBins_PreservesOwnershipAcrossUpdates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(owned) != 2 {
-		t.Fatalf("owned = %v, want both prior bins", owned)
+		t.Errorf("owned = %v, want both prior bins", owned)
 	}
 	for _, b := range owned {
 		if _, err := os.Lstat(filepath.Join(in.binDir(), b)); err != nil {
@@ -1308,13 +1380,13 @@ func TestInstallAqua_SymlinkEscapeRejected(t *testing.T) {
 	}
 	final := waitJob(t, e, job.ID)
 	if final.State != JobFailed || !strings.Contains(final.Error, "escapes") {
-		t.Fatalf("job = %+v, want symlink-escape failure", final)
+		t.Errorf("job = %+v, want symlink-escape failure", final)
 	}
 	if _, err := os.Lstat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
-		t.Fatal("escaping symlink was published to bin/")
+		t.Error("escaping symlink was published to bin/")
 	}
 	if fi, _ := os.Stat(victim); fi.Mode().Perm() != 0o600 {
-		t.Fatal("victim file permissions were changed")
+		t.Error("victim file permissions were changed")
 	}
 }
 
@@ -1375,21 +1447,21 @@ func TestPatch_ForceDisableCascades(t *testing.T) {
 	addManual(t, e, "dep", []string{"base"})
 	on := true
 	if _, err := e.Patch("base", PatchRequest{Disabled: &on}); !errors.Is(err, ErrHasDependents) {
-		t.Fatalf("unforced disable with dependents: err = %v, want ErrHasDependents", err)
+		t.Errorf("unforced disable with dependents: err = %v, want ErrHasDependents", err)
 	}
 	jv, err := e.Patch("base", PatchRequest{Disabled: &on, Force: true})
 	if err != nil || jv == nil {
 		t.Fatalf("forced disable: %v %v", jv, err)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
-		t.Fatalf("disable job = %+v tail=%v", final, final.OutputTail)
+		t.Errorf("disable job = %+v tail=%v", final, final.OutputTail)
 	}
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !m.Tools["base"].Disabled || !m.Tools["dep"].Disabled {
-		t.Fatalf("force disable did not cascade: base=%+v dep=%+v", m.Tools["base"], m.Tools["dep"])
+		t.Errorf("force disable did not cascade: base=%+v dep=%+v", m.Tools["base"], m.Tools["dep"])
 	}
 	for _, bin := range []string{"base", "dep"} {
 		if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", bin)); !os.IsNotExist(err) {
@@ -1403,10 +1475,10 @@ func TestWait_UnknownJobErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 	defer cancel()
 	if _, err := e.Wait(ctx, "tj-nope"); !errors.Is(err, ErrUnknownJob) {
-		t.Fatalf("Wait on unknown id = %v, want ErrUnknownJob", err)
+		t.Errorf("Wait on unknown id = %v, want ErrUnknownJob", err)
 	}
 	if ctx.Err() != nil {
-		t.Fatal("Wait polled to deadline instead of returning immediately")
+		t.Error("Wait polled to deadline instead of returning immediately")
 	}
 }
 
@@ -1443,7 +1515,7 @@ func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := e.store.Manifest()
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1454,24 +1526,24 @@ func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
 	t.Run("unresolvable candidate skipped", func(t *testing.T) {
 		did, err := e.updateOne(t.Context(), m, "tool", false, collect)
 		if err != nil || did {
-			t.Fatalf("updateOne = %v %v, want skip without error", did, err)
+			t.Errorf("updateOne = %v %v, want skip without error", did, err)
 		}
-		cur, _ := e.store.Manifest()
+		cur, _ := e.store.LoadManifest()
 		if got := cur.Tools["tool"].Version; got != "1.0.0" {
-			t.Fatalf("manifest bumped to unresolvable version %q", got)
+			t.Errorf("manifest bumped to unresolvable version %q", got)
 		}
 		if !strings.Contains(strings.Join(lines, "\n"), "not resolvable") {
-			t.Fatalf("skip not reported: %v", lines)
+			t.Errorf("skip not reported: %v", lines)
 		}
 	})
 	t.Run("resolvable candidate still bumps", func(t *testing.T) {
 		did, err := e.updateOne(t.Context(), m, "tool2", false, collect)
 		if err != nil || !did {
-			t.Fatalf("updateOne = %v %v, want bump", did, err)
+			t.Errorf("updateOne = %v %v, want bump", did, err)
 		}
-		cur, _ := e.store.Manifest()
+		cur, _ := e.store.LoadManifest()
 		if got := cur.Tools["tool2"].Version; got != "v9.9.9" {
-			t.Fatalf("resolvable bump not persisted: %q", got)
+			t.Errorf("resolvable bump not persisted: %q", got)
 		}
 	})
 }
@@ -1632,7 +1704,7 @@ func TestInstallAqua_ChecksumOutcomes(t *testing.T) {
 
 			if tc.wantErr != "" {
 				if final.State != JobFailed || !strings.Contains(final.Error, tc.wantErr) {
-					t.Fatalf("job = %+v, want failure containing %q", final, tc.wantErr)
+					t.Errorf("job = %+v, want failure containing %q", final, tc.wantErr)
 				}
 				if _, err := os.Lstat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
 					t.Error("bin linked despite a failed checksum")
@@ -1646,7 +1718,7 @@ func TestInstallAqua_ChecksumOutcomes(t *testing.T) {
 				return
 			}
 			if final.State != JobDone {
-				t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+				t.Errorf("job = %+v tail=%v", final, final.OutputTail)
 			}
 			if st.Checksum != tc.wantState {
 				t.Errorf("state checksum = %q, want %q", st.Checksum, tc.wantState)
@@ -1695,12 +1767,12 @@ func TestVerifyArtifact_DeclaredWithoutSourceRefuses(t *testing.T) {
 			got, err := in.verifyArtifact(t.Context(), "tool", "v1", artifact, tc.spec)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("verifyArtifact = %q, %v; want error containing %q", got, err, tc.wantErr)
+					t.Errorf("verifyArtifact = %q, %v; want error containing %q", got, err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil || got != tc.wantMark {
-				t.Fatalf("verifyArtifact = %q, %v; want %q, nil", got, err, tc.wantMark)
+				t.Errorf("verifyArtifact = %q, %v; want %q, nil", got, err, tc.wantMark)
 			}
 		})
 	}
@@ -1757,7 +1829,7 @@ func TestPruneOldVersions_Retention(t *testing.T) {
 			want := append([]string{}, tc.want...)
 			slices.Sort(want)
 			if !slices.Equal(left, want) {
-				t.Fatalf("surviving versions = %v, want %v", left, want)
+				t.Errorf("surviving versions = %v, want %v", left, want)
 			}
 		})
 	}

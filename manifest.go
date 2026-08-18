@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile/v2"
+	"github.com/cplieger/atomicfile/v3"
 )
 
 // Tool is one manifest entry: the user's intent for a single tool.
@@ -234,9 +234,13 @@ func realAtomicWrite(path string, data []byte) (durable bool, err error) {
 	return res.Durable, err
 }
 
-// Manifest returns a copy of the current manifest (Tool values are
-// copied by value; callers must not mutate maps/slices inside them).
-func (s *store) Manifest() (*Manifest, error) {
+// LoadManifest reads the manifest file under the store lock and returns a
+// copy of the parsed result (Tool values are copied by value; callers must
+// not mutate maps/slices inside them). It is a verb because it costs real
+// work per call — the lock, a file read and a JSON decode — and a caller
+// that treated it as a field access would pay for all three in a loop
+// (go-rulebook C21). Named for the file it loads, beside MutateManifest.
+func (s *store) LoadManifest() (*Manifest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, err := s.readManifestLocked()
