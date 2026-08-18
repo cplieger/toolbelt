@@ -670,6 +670,48 @@ func TestRemove_DependentsConflict(t *testing.T) {
 	}
 }
 
+func TestRemoveWithDependents_CascadesOneLevelOnly(t *testing.T) {
+	// base <- mid <- top. RemoveWithDependents("base") is documented to
+	// cascade ONE level, so it takes mid and leaves top standing. The
+	// two-node case in TestRemove_DependentsConflict cannot tell a
+	// one-level cascade from a transitive one; this can.
+	e := newTestEngine(t, nil)
+	addManual(t, e, "base", nil)
+	addManual(t, e, "mid", []string{"base"})
+	addManual(t, e, "top", []string{"mid"})
+
+	jv, deps, err := e.RemoveWithDependents("base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(deps, []string{"mid"}) {
+		t.Errorf("dependents = %v, want [mid]: only the direct requirer rides along", deps)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("uninstall job = %+v tail=%v", final, final.OutputTail)
+	}
+
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Tools["base"]; ok {
+		t.Error("base survived its own removal")
+	}
+	if _, ok := m.Tools["mid"]; ok {
+		t.Error("mid survived: it directly requires base, so the cascade owed it")
+	}
+	top, ok := m.Tools["top"]
+	if !ok {
+		t.Fatal("top was removed: the cascade walked a transitive level it does not own")
+	}
+	// The point of stopping at one level: top is left naming a dependency
+	// that is gone, and that is the caller's next decision, not this call's.
+	if !slices.Equal(top.Requires, []string{"mid"}) {
+		t.Errorf("top.Requires = %v, want [mid] left untouched", top.Requires)
+	}
+}
+
 func TestInstallOrder_BackendDepFromCatalog(t *testing.T) {
 	// npm-sourced tool pulls node from the catalog automatically.
 	cat := &Catalog{Entries: map[string]CatalogEntry{
