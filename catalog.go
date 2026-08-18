@@ -16,6 +16,12 @@ import (
 // aqua sources, the embedded aqua package definition. Overlay entries
 // (curated) may add requires/manual install commands and the lsp
 // marker.
+// Its slice fields (Aliases, Requires, VersionArgs) and its Aqua pointer ALIAS
+// the catalog they were read from. A Catalog is swapped whole behind an
+// atomic.Pointer and never edited in place, so every reader shares one copy and
+// none of them may write to it: mutating a returned entry's slice corrupts the
+// catalog for every other caller. Copy what you intend to change — see
+// mergeCatalogDefaults, which clones before hydrating a mutable manifest row.
 type CatalogEntry struct {
 	Aqua        *AquaPackage `json:"aqua,omitempty"`
 	Name        string       `json:"name"`
@@ -116,6 +122,9 @@ func buildAliasIndex(entries map[string]CatalogEntry) map[string]string {
 }
 
 // Lookup finds a catalog entry by name or alias.
+//
+// The returned entry aliases the catalog: do not mutate its slice fields (see
+// [CatalogEntry]).
 func (c *Catalog) Lookup(name string) (CatalogEntry, bool) {
 	if e, ok := c.Entries[name]; ok {
 		return e, true
@@ -140,6 +149,9 @@ const searchLimit = 25
 // Search ranks catalog entries against a query: exact name, name
 // prefix, alias, name substring, then description substring. Empty
 // query returns the featured set.
+//
+// The returned entries alias the catalog: do not mutate their slice fields
+// (see [CatalogEntry]).
 func (c *Catalog) Search(query string) []CatalogEntry {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
@@ -198,6 +210,9 @@ func matchScore(name string, e *CatalogEntry, q string) int {
 
 // Featured returns the curated starter set (empty-state content),
 // sorted by name.
+//
+// The returned entries alias the catalog: do not mutate their slice fields
+// (see [CatalogEntry]).
 func (c *Catalog) Featured() []CatalogEntry {
 	var out []CatalogEntry
 	for k := range c.Entries {
