@@ -229,6 +229,346 @@ func TestAdd_ManualProbeMissingFails(t *testing.T) {
 	}
 }
 
+// TestInstall_UnrunnableBinaryFailsTheInstall pins the verification
+// gate. An install command can succeed and still leave a binary the OS
+// will not run — a missing shared library, a wrong-architecture image, a
+// truncated download — and recording that as installed is what turns one
+// broken runtime into a cascade of failures naming the wrong tools.
+//
+// The measured instance: a node whose libatomic.so.1 was absent was
+// recorded at its version, so every npm-sourced tool behind it reported
+// `npm failed: exit status 127` about ITSELF while node's row read clean.
+func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
+	e := newTestEngine(t, nil)
+	job, err := e.Add(t.Context(), &AddRequest{
+		Name: "broken", Source: SourceManual, Version: "1.0.0",
+		Install: `printf '#!/bin/sh\necho "broken: error while loading shared libraries: libfake.so.1" >&2\nexit 127\n' > "$BIN/broken" && chmod 755 "$BIN/broken"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if final.State != JobFailed {
+		t.Fatalf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
+	}
+	if !strings.Contains(final.Error, "cannot run") {
+		t.Errorf("job error = %q, want it to say the tool cannot run", final.Error)
+	}
+	inv, _ := e.Inventory()
+	row := inv.Tools[0]
+	if row.Installed {
+		t.Error("a binary that cannot run reads as installed")
+	}
+	// The recorded reason must name the CAUSE, not just the exit status:
+	// the loader's own message is the only thing that says which library
+	// is missing, and it only exists on the probe's stderr.
+	if !strings.Contains(row.LastError, "libfake.so.1") {
+		t.Errorf("last_error = %q, want the loader's own diagnostic", row.LastError)
+	}
+}
+
+// TestInstall_EnablesAnObligatoryDependency pins the dependency cascade:
+// asking for a tool is asking for what it cannot run without. The
+// refusal this replaced was a dead end — the dependent's install failed
+// and the user had to find and toggle a row they never asked about.
+func TestInstall_EnablesAnObligatoryDependency(t *testing.T) {
+	e := newTestEngine(t, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		base := manualEntry("base")
+		base.Disabled = true
+		m.Tools["base"] = base
+		dep := manualEntry("dep")
+		dep.Requires = []string{"base"}
+		dep.Disabled = true
+		m.Tools["dep"] = dep
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	job, err := e.Patch("dep", PatchRequest{Disabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if final.State != JobDone {
+		t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+	}
+	inv, _ := e.Inventory()
+	byName := map[string]ToolInfo{}
+	for _, row := range inv.Tools {
+		byName[row.Name] = row
+	}
+	for _, n := range []string{"base", "dep"} {
+		if byName[n].Disabled {
+			t.Errorf("%s still disabled", n)
+		}
+		if !byName[n].Installed {
+			t.Errorf("%s not installed", n)
+		}
+	}
+	// Visible, not silent: the job log says which row was switched on
+	// and what asked for it.
+	var announced bool
+	for _, line := range final.OutputTail {
+		if strings.Contains(line, "enabling base") {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Errorf("the auto-enable was not reported in the job log: %v", final.OutputTail)
+	}
+}
+
+// TestInstallingFlag_CoversDependencies pins the per-row installing flag
+// against the PLAN rather than the request. A dependency the user never
+// named is adopted or enabled by the job that needs it, so a flag derived
+// from the requested names leaves that row rendering as an idle
+// not-installed entry for the whole time its install is running — which
+// is what "go and typescript appeared, but as disabled" was.
+func TestInstallingFlag_CoversDependencies(t *testing.T) {
+	e := newTestEngine(t, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["base"] = Tool{
+			Source: SourceManual, Version: "1", Disabled: true,
+			// Slow on purpose: the fixture has to hold the dependency's
+			// install open long enough for a read to observe it.
+			Install: "sleep 2 && " + binStub("base"),
+		}
+		dep := manualEntry("dep")
+		dep.Requires = []string{"base"}
+		dep.Disabled = true
+		m.Tools["dep"] = dep
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	job, err := e.Patch("dep", PatchRequest{Disabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deadline-bounded poll: fails closed with the rows it saw, so it
+	// cannot flake into a false pass the way a bare sleep would.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		inv, ierr := e.Inventory()
+		if ierr != nil {
+			t.Fatal(ierr)
+		}
+		var base ToolInfo
+		for _, row := range inv.Tools {
+			if row.Name == "base" {
+				base = row
+			}
+		}
+		if base.Installing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("base never reported installing; rows = %+v", inv.Tools)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+	}
+}
+
+// TestInstallPlan_PublishesWhileTheJobRuns pins the publication, not just
+// the flag. A consumer refetches the inventory when a job change is
+// published, and the plan is resolved AFTER the queued -> running
+// transition, so with no publication of its own the adopted and
+// newly-enabled rows stay invisible until the job ends — for a cold
+// runtime, the whole download.
+func TestInstallPlan_PublishesWhileTheJobRuns(t *testing.T) {
+	e := newTestEngine(t, nil)
+	var mu sync.Mutex
+	var running int
+	// The callback runs under the queue lock, so it may only record.
+	// Reading the inventory from here would re-enter that lock.
+	e.queue.Close()
+	e.queue = newJobQueue(func(j *Job) {
+		if j.State != JobRunning {
+			return
+		}
+		mu.Lock()
+		running++
+		mu.Unlock()
+	}, nil, slog.Default(), e.executeJob)
+
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		base := manualEntry("base")
+		base.Disabled = true
+		m.Tools["base"] = base
+		dep := manualEntry("dep")
+		dep.Requires = []string{"base"}
+		dep.Disabled = true
+		m.Tools["dep"] = dep
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	job, err := e.Patch("dep", PatchRequest{Disabled: &enabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("job = %+v tail=%v", final, final.OutputTail)
+	}
+	mu.Lock()
+	got := running
+	mu.Unlock()
+	// One for the transition into running, one for the resolved plan.
+	if got < 2 {
+		t.Errorf("running-state publications = %d, want the transition plus the plan", got)
+	}
+}
+
+// TestInstall_DoomedDependentIsBlockedNotBlamed pins the attribution.
+// With a backend runtime that cannot run, attempting the tools behind it
+// made each one report a fault about ITSELF: the measured shipping case
+// was node unable to load libatomic.so.1 while pyright, typescript and
+// typescript-language-server each said `npm failed: exit status 127`.
+func TestInstall_DoomedDependentIsBlockedNotBlamed(t *testing.T) {
+	// A "runtime" that installs successfully and then cannot run, and
+	// two tools that declare it as a requirement.
+	e := newTestEngine(t, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["runtime"] = Tool{
+			Source: SourceManual, Version: "1",
+			Install: `printf '#!/bin/sh\nexit 127\n' > "$BIN/runtime" && chmod 755 "$BIN/runtime"`,
+		}
+		for _, n := range []string{"leaf", "middle"} {
+			t := manualEntry(n)
+			t.Requires = []string{"runtime"}
+			m.Tools[n] = t
+		}
+		// A tool behind the blocked one: the failure must propagate, and
+		// the reason must name the ROOT rather than the middle link.
+		tail := manualEntry("tail")
+		tail.Requires = []string{"middle"}
+		m.Tools["tail"] = tail
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := e.Install("tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if final.State != JobFailed {
+		t.Fatalf("job state = %s, want failed", final.State)
+	}
+	// The job's own error names the tool that broke, not its victims.
+	if !strings.Contains(final.Error, "runtime") {
+		t.Errorf("job error = %q, want it to name runtime", final.Error)
+	}
+	inv, _ := e.Inventory()
+	byName := map[string]ToolInfo{}
+	for _, row := range inv.Tools {
+		byName[row.Name] = row
+	}
+	// Both victims name the root cause and neither claims a fault of its
+	// own. "tail" is two edges away, so this also pins the propagation.
+	for _, n := range []string{"middle", "tail"} {
+		if got := byName[n].LastError; !strings.Contains(got, "runtime") {
+			t.Errorf("%s last_error = %q, want it to name runtime", n, got)
+		}
+	}
+	// An unrelated name in the same plan is not collateral damage.
+	if byName["leaf"].Name != "" && byName["leaf"].Installed {
+		t.Error("leaf was installed despite sharing the broken runtime")
+	}
+}
+
+// TestInstall_UnrelatedToolsStillInstall keeps the block narrow: only the
+// chain behind the failure is skipped, never a sibling that shares the
+// job but not the dependency.
+func TestInstall_UnrelatedToolsStillInstall(t *testing.T) {
+	e := newTestEngine(t, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["runtime"] = Tool{
+			Source: SourceManual, Version: "1",
+			Install: `printf '#!/bin/sh\nexit 127\n' > "$BIN/runtime" && chmod 755 "$BIN/runtime"`,
+		}
+		doomed := manualEntry("doomed")
+		doomed.Requires = []string{"runtime"}
+		m.Tools["doomed"] = doomed
+		m.Tools["fine"] = manualEntry("fine")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := e.queue.Enqueue(JobKindInstall, []string{"doomed", "fine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobFailed {
+		t.Fatalf("job state = %s, want failed", final.State)
+	}
+	inv, _ := e.Inventory()
+	for _, row := range inv.Tools {
+		if row.Name == "fine" && !row.Installed {
+			t.Errorf("fine was not installed: %q", row.LastError)
+		}
+	}
+}
+
+// TestInventory_ReportsDependents pins the advisory field a consumer
+// needs to ask the disable question BEFORE sending a request the engine
+// refuses. Both edge kinds count: a declared Requires and the backend a
+// source kind implies.
+func TestInventory_ReportsDependents(t *testing.T) {
+	e := newTestEngine(t, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["node"] = manualEntry("node")
+		m.Tools["typescript"] = Tool{Source: "npm:typescript", Version: "1"}
+		m.Tools["tsls"] = Tool{Source: "npm:tsls", Version: "1", Requires: []string{"typescript"}}
+		off := manualEntry("off")
+		off.Disabled = true
+		off.Requires = []string{"typescript"}
+		m.Tools["off"] = off
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := e.Inventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, row := range inv.Tools {
+		got[row.Name] = row.Dependents
+	}
+	// node is the implied backend of both npm entries; typescript is a
+	// declared requirement of tsls. The DISABLED entry contributes
+	// nothing, because it cannot be what is holding the tool.
+	if want := []string{"tsls", "typescript"}; !slices.Equal(got["node"], want) {
+		t.Errorf("node dependents = %v, want %v", got["node"], want)
+	}
+	if want := []string{"tsls"}; !slices.Equal(got["typescript"], want) {
+		t.Errorf("typescript dependents = %v, want %v", got["typescript"], want)
+	}
+	if len(got["tsls"]) != 0 {
+		t.Errorf("tsls dependents = %v, want none", got["tsls"])
+	}
+	// The refusal and the advisory field must name the same set, or a
+	// consumer's pre-check disagrees with the answer it gets.
+	m, _ := e.store.Manifest()
+	if want := enabledDependents(m, "node"); !slices.Equal(got["node"], want) {
+		t.Errorf("inventory dependents %v disagree with the refusal's %v", got["node"], want)
+	}
+}
+
 func TestAdd_Validation(t *testing.T) {
 	e := newTestEngine(t, nil)
 	cases := []AddRequest{
@@ -345,10 +685,11 @@ func TestInstallOrder_BackendDepFromCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.Manifest()
-	ordered, err := e.installOrder(t.Context(), m, []string{"pyright"})
+	plan, err := e.installOrder(t.Context(), m, []string{"pyright"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	ordered := plan.ordered
 	if len(ordered) != 2 || ordered[0] != "node" || ordered[1] != "pyright" {
 		t.Fatalf("ordered = %v, want [node pyright]", ordered)
 	}

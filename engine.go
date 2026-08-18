@@ -70,6 +70,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	installing := e.queue.InstallingSet()
 
 	res := &Inventory{Tools: []ToolInfo{}, System: e.systemTools(), Job: e.queue.Active()}
+	dependents := dependentsIndex(m)
 	names := make([]string, 0, len(m.Tools))
 	for n := range m.Tools {
 		names = append(names, n)
@@ -78,13 +79,13 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	for _, n := range names {
 		t := m.Tools[n]
 		s := st.Tools[n]
-		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n]))
+		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], dependents[n]))
 	}
 	return res, nil
 }
 
 // toolInfo builds one inventory row.
-func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool) ToolInfo {
+func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, dependents []string) ToolInfo {
 	v := ToolInfo{
 		Name:             name,
 		Source:           t.Source,
@@ -92,6 +93,7 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool) 
 		Pin:              t.Pin,
 		Disabled:         t.Disabled,
 		Requires:         t.Requires,
+		Dependents:       dependents,
 		Description:      t.Description,
 		Origin:           t.Origin,
 		Installed:        e.installedFor(name, t, s),
@@ -473,17 +475,41 @@ func enabledDependents(m *Manifest, name string) []string {
 		if other == name || t.Disabled {
 			continue
 		}
-		if slices.Contains(t.Requires, name) {
-			out = append(out, other)
-			continue
-		}
-		kind, _, _ := strings.Cut(t.Source, ":")
-		if backendDeps[kind] == name {
+		if dependsOn(&t, other, name) {
 			out = append(out, other)
 		}
 	}
 	slices.Sort(out)
 	return out
+}
+
+// dependentsIndex is enabledDependents for every name at once, in one
+// pass over the manifest rather than one pass per row. Inventory renders
+// every tool, so the per-name form would make the read quadratic in the
+// manifest size for an answer the same walk already produces.
+func dependentsIndex(m *Manifest) map[string][]string {
+	out := map[string][]string{}
+	for other := range m.Tools {
+		t := m.Tools[other]
+		if t.Disabled {
+			continue
+		}
+		for _, dep := range depsOf(other, &t) {
+			out[dep] = append(out[dep], other)
+		}
+	}
+	for dep := range out {
+		slices.Sort(out[dep])
+	}
+	return out
+}
+
+// dependsOn reports whether tool `other` requires `name`. It reads the
+// edge set from depsOf, the one place that decides what a dependency
+// edge is, so the refusal and the inventory's advisory answer cannot
+// disagree about one.
+func dependsOn(t *Tool, other, name string) bool {
+	return slices.Contains(depsOf(other, t), name)
 }
 
 // Install re-enqueues an install for an existing, enabled tool (retry /
@@ -682,15 +708,15 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 	}
 	switch j.kind {
 	case JobKindInstall:
-		return e.runInstall(ctx, j.names, output)
+		return e.runInstall(ctx, j, j.names, output)
 	case JobKindUninstall:
 		return e.runUninstall(ctx, j)
 	case JobKindDisable:
 		return e.runDisable(ctx, j.names, output)
 	case JobKindUpdate:
-		return e.runUpdate(ctx, j.names, output)
+		return e.runUpdate(ctx, j, output)
 	case JobKindReconcile:
-		return e.runReconcile(ctx, output)
+		return e.runReconcile(ctx, j, output)
 	case JobKindCatalogRefresh:
 		// No hydration first: the refresh REPLACES the knowledge
 		// hydration reads. Sparse entries pick up the fresh catalog on
@@ -727,30 +753,42 @@ func (e *Engine) hydrateStatic() error {
 }
 
 // runInstall installs the named tools plus any missing dependencies,
-// dependencies first.
-func (e *Engine) runInstall(ctx context.Context, names []string, output func(string)) error {
+// dependencies first. The resolved plan is published on the job before
+// the first install starts, so a consumer polling the inventory sees
+// every tool the job will touch as installing rather than discovering
+// dependency rows one at a time, each looking idle.
+func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output func(string)) error {
 	m, err := e.store.Manifest()
 	if err != nil {
 		return err
 	}
-	ordered, err := e.installOrder(ctx, m, names)
+	p, err := e.installOrder(ctx, m, names)
 	if err != nil {
 		return err
 	}
+	e.queue.setCovers(j, p.ordered)
+	for _, n := range p.enabled {
+		output(fmt.Sprintf("enabling %s (required by %s)", n, strings.Join(names, ", ")))
+	}
 	var failed []string
 	var firstErr error
-	for _, n := range ordered {
+	blockers := installBlockers{}
+	for _, n := range p.ordered {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if cause, blocked := blockers.cause(m, n); blocked {
+			e.recordBlocked(n, cause, output)
+			blockers[n] = cause
+			continue
 		}
 		if err := e.installTool(ctx, n, output); err != nil {
 			failed = append(failed, n)
 			if firstErr == nil {
 				firstErr = err
 			}
+			blockers[n] = ""
 			output(fmt.Sprintf("ERROR %s: %v", n, err))
-			// A failed dependency dooms its dependents; carry on so
-			// unrelated names in the same job still install.
 		}
 	}
 	switch len(failed) {
@@ -763,17 +801,60 @@ func (e *Engine) runInstall(ctx context.Context, names []string, output func(str
 	}
 }
 
+// installBlockers records why a job could not install a tool: the empty
+// string for one that failed on its own, or the name of the dependency
+// that stopped it.
+type installBlockers map[string]string
+
+// cause names the tool that makes installing n pointless — a dependency
+// that failed in this job, or the ROOT failure behind a dependency that
+// was itself blocked. The plan is dependency-first, so one pass
+// propagates a failure through the whole chain behind it.
+//
+// Attempting a doomed dependent is what produced the misleading report
+// this replaces: with node unable to run, `pyright` was installed anyway
+// and failed with `npm failed: exit status 127` about ITSELF, so three
+// rows accused themselves of a fault none of them had.
+func (b installBlockers) cause(m *Manifest, n string) (string, bool) {
+	t, ok := m.Tools[n]
+	if !ok {
+		return "", false
+	}
+	for _, dep := range depsOf(n, &t) {
+		root, stopped := b[dep]
+		if !stopped {
+			continue
+		}
+		if root != "" {
+			return root, true
+		}
+		return dep, true
+	}
+	return "", false
+}
+
+// recordBlocked reports a tool the job skipped and puts the reason on its
+// status row, so the row names the tool that actually broke instead of
+// keeping whatever error a previous attempt left there.
+func (e *Engine) recordBlocked(name, cause string, output func(string)) {
+	output(fmt.Sprintf("%s: skipped, %s failed", name, cause))
+	err := fmt.Errorf("not installed: %s failed in the same job", cause)
+	if serr := e.recordFailure(name, err); serr != nil {
+		e.log.Error("toolbelt: blocked reason not recorded", "tool", name, "error", serr)
+	}
+}
+
 // installOrder expands names with backend deps + Requires (creating
-// manifest entries from the catalog for missing deps) and returns them
-// dependency-first.
-func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) ([]string, error) {
+// manifest entries from the catalog for missing deps, enabling disabled
+// ones) and returns them dependency-first.
+func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) (*installPlan, error) {
 	p := &installPlan{e: e, m: m, seen: map[string]bool{}}
 	for _, n := range names {
 		if err := p.visit(ctx, n, nil); err != nil {
 			return nil, err
 		}
 	}
-	return p.ordered, nil
+	return p, nil
 }
 
 // installPlan carries the shared state of the dependency-first DFS
@@ -783,12 +864,25 @@ type installPlan struct {
 	m       *Manifest
 	seen    map[string]bool
 	ordered []string
+	// enabled records the disabled templates this plan switched on as
+	// obligatory dependencies, for the job log.
+	enabled []string
 }
 
 // visit walks a tool's dependencies depth-first, appending each to the
-// plan's order after its deps. A tool already on the stack is a cycle;
-// a disabled dependency is a refusal (the user explicitly disabled it,
-// and installing through it would silently override that policy).
+// plan's order after its deps. A tool already on the stack is a cycle.
+//
+// A DISABLED dependency is ENABLED rather than refused. Asking for a tool
+// is asking for the things it cannot run without: gopls is a Go binary
+// installed by the Go toolchain, and typescript-language-server without
+// the typescript package is a launcher with nothing to launch, so
+// "install this, but not the thing it requires" is not a state a user can
+// have meant. The refusal it replaces read as user policy being honoured
+// and landed as a dead end — the dependent's install failed with "enable
+// it first" and the user had to find and toggle a row they had not asked
+// about. The enable is recorded in the job log, so it is visible rather
+// than silent, and it is the mirror of the force-disable cascade that
+// already walks the same edge in the other direction.
 func (p *installPlan) visit(ctx context.Context, n string, stack []string) error {
 	if p.seen[n] {
 		return nil
@@ -805,10 +899,15 @@ func (p *installPlan) visit(ctx context.Context, n string, stack []string) error
 		t = adopted
 	}
 	if t.Disabled && len(stack) > 0 {
-		return fmt.Errorf("dependency %q is disabled; enable it first", n)
+		enabled, err := p.e.enableDependency(p.m, n)
+		if err != nil {
+			return err
+		}
+		t = enabled
+		p.enabled = append(p.enabled, n)
 	}
 	stack = append(stack, n)
-	for _, dep := range p.e.depsOf(n, &t) {
+	for _, dep := range depsOf(n, &t) {
 		if err := p.visit(ctx, dep, stack); err != nil {
 			return err
 		}
@@ -816,6 +915,26 @@ func (p *installPlan) visit(ctx context.Context, n string, stack []string) error
 	p.seen[n] = true
 	p.ordered = append(p.ordered, n)
 	return nil
+}
+
+// enableDependency clears the Disabled flag on a template another tool
+// requires, and returns the entry as the plan should now see it.
+func (e *Engine) enableDependency(m *Manifest, n string) (Tool, error) {
+	if err := e.store.MutateManifest(func(mm *Manifest) error {
+		t, ok := mm.Tools[n]
+		if !ok {
+			return fmt.Errorf("dependency %q: %w", n, ErrNotFound)
+		}
+		t.Disabled = false
+		mm.Tools[n] = t
+		return nil
+	}); err != nil {
+		return Tool{}, err
+	}
+	t := m.Tools[n]
+	t.Disabled = false
+	m.Tools[n] = t
+	return t, nil
 }
 
 // adoptDependency pulls a not-yet-manifested dependency into the
@@ -837,8 +956,13 @@ func (e *Engine) adoptDependency(ctx context.Context, m *Manifest, n string) (To
 	return nt, nil
 }
 
-// depsOf merges backend-implied deps with the entry's Requires.
-func (e *Engine) depsOf(name string, t *Tool) []string {
+// depsOf merges backend-implied deps with the entry's Requires. It is
+// the ONE definition of a dependency edge: the install plan walks it, the
+// remove/disable refusal derives its dependents from it, and so does the
+// inventory's advisory dependents field, so none of the three can hold a
+// different idea of what depends on what. Self-references are dropped
+// (an entry named after its own backend, e.g. the `go` entry itself).
+func depsOf(name string, t *Tool) []string {
 	var deps []string
 	kind, _, _ := strings.Cut(t.Source, ":")
 	if d, ok := backendDeps[kind]; ok && d != name {
@@ -860,60 +984,120 @@ func (e *Engine) depsOf(name string, t *Tool) []string {
 // The status write is the install's COMMIT POINT: superseded versions are
 // pruned only after the new tree and its state record are both durable,
 // so a crash (or a full disk) can never leave a pruned previous version
-// next to a state file that was never written.
+// next to a state file that was never written. verifyInstalled sits
+// between the two, so a binary that cannot run fails the install with
+// the predecessor still on disk.
 func (e *Engine) installTool(ctx context.Context, name string, output func(string)) error {
-	m, err := e.store.Manifest()
-	if err != nil {
+	t, err := e.resolveInstallTarget(ctx, name, output)
+	if err != nil || t == nil {
 		return err
 	}
-	t, ok := m.Tools[name]
-	if !ok {
-		return ErrNotFound
-	}
-	if t.Disabled {
-		output(fmt.Sprintf("%s is disabled; skipping", name))
-		return nil
-	}
-	if t.Source == "" {
-		return fmt.Errorf("no install knowledge for %q: not in the catalog and no source given", name)
-	}
-	if t.Version == "" {
-		latest, verr := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
-		if verr != nil {
-			return fmt.Errorf("resolve latest version: %w", verr)
-		}
-		if perr := e.persistVersion(name, latest); perr != nil {
-			return perr
-		}
-		t.Version = latest
-	}
 	st := e.store.State().Tools[name]
-	if st.InstalledVersion == t.Version && e.probeInstalled(name, &t, &st) {
+	if st.InstalledVersion == t.Version && e.probeInstalled(name, t, &st) {
 		output(fmt.Sprintf("%s %s already installed", name, t.Version))
 		return nil
 	}
 	output(fmt.Sprintf("installing %s %s (%s)", name, t.Version, t.Source))
-	res, err := e.inst.install(ctx, name, &t, e.aquaDef(t.Source), st.PMBins)
+	res, err := e.inst.install(ctx, name, t, e.aquaDef(t.Source), st.PMBins)
 	if err != nil {
 		if serr := e.recordFailure(name, err); serr != nil {
 			e.log.Error("toolbelt: install error not recorded", "tool", name, "error", serr)
 		}
 		return err
 	}
-	if serr := e.store.setToolStatus(name, func(s *ToolStatus) {
+	if serr := e.commitInstall(name, t, res); serr != nil {
+		return serr
+	}
+	if verr := e.verifyInstalled(name, t, output); verr != nil {
+		return verr
+	}
+	e.pruneSuperseded(name, t)
+	return nil
+}
+
+// resolveInstallTarget prepares the entry installTool is about to act on:
+// it reads the manifest row, refuses one the catalog could not hydrate,
+// and resolves (and persists) a sparse entry's version. A nil Tool with a
+// nil error means there is nothing to install — a disabled template,
+// which is a no-op rather than a failure, so a reconcile pass carrying
+// one does not fail the whole job.
+func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output func(string)) (*Tool, error) {
+	m, err := e.store.Manifest()
+	if err != nil {
+		return nil, err
+	}
+	t, ok := m.Tools[name]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if t.Disabled {
+		output(fmt.Sprintf("%s is disabled; skipping", name))
+		return nil, nil
+	}
+	if t.Source == "" {
+		return nil, fmt.Errorf("no install knowledge for %q: not in the catalog and no source given", name)
+	}
+	if t.Version != "" {
+		return &t, nil
+	}
+	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+	if err != nil {
+		return nil, fmt.Errorf("resolve latest version: %w", err)
+	}
+	if err := e.persistVersion(name, latest); err != nil {
+		return nil, err
+	}
+	t.Version = latest
+	return &t, nil
+}
+
+// commitInstall records what landed. This write is the install's COMMIT
+// POINT, so a failure here fails the job with the PREVIOUS state intact
+// and nothing pruned, and a retry converges.
+func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
+	if err := e.store.setToolStatus(name, func(s *ToolStatus) {
 		s.InstalledVersion = t.Version
 		s.Bins = res.bins
 		s.PMBins = res.pmBins
 		s.Checksum = res.checksum
 		s.LastError = ""
-	}); serr != nil {
-		// The install landed on disk but the engine cannot durably
-		// record it: fail the job with the PREVIOUS state intact and
-		// nothing pruned, so a retry converges.
-		return fmt.Errorf("record install state for %s: %w", name, serr)
+	}); err != nil {
+		return fmt.Errorf("record install state for %s: %w", name, err)
 	}
 	e.probes.forget(name)
-	e.pruneSuperseded(name, &t)
+	return nil
+}
+
+// verifyInstalled probes what the install just published and refuses to
+// let a binary the OS will not run stand as a completed install. It runs
+// AFTER the status write, so the durability protocol above is unchanged,
+// and BEFORE pruning, so a failed verification leaves the retained
+// predecessor in place — that predecessor IS the fallback, and pruning it
+// on the strength of an install that cannot run is how a working version
+// gets thrown away.
+//
+// Only a CannotExec verdict fails the install. A version-banner mismatch
+// is reported and tolerated, because an unparseable banner is a gap in
+// this engine's knowledge of the tool rather than evidence the tool is
+// broken; the existing reinstall-on-next-reconcile path still covers it.
+//
+// The probe's own cache is warmed rather than wasted: the verdict is
+// keyed by the binary's fingerprint, so the inventory read that follows
+// reuses this answer instead of spawning the subprocess again.
+func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
+	st := e.store.State().Tools[name]
+	v := e.probeTool(name, t, &st)
+	switch {
+	case v.CannotExec:
+		err := fmt.Errorf("installed %s but it cannot run: %s", t.Version, v.Reason)
+		output(fmt.Sprintf("ERROR %s: %v", name, err))
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
+		}
+		return err
+	case !v.OK:
+		output(fmt.Sprintf("%s: install not verified (%s)", name, v.Reason))
+	}
 	return nil
 }
 
@@ -1012,11 +1196,12 @@ func (e *Engine) runDisable(ctx context.Context, names []string, output func(str
 
 // runUpdate refreshes latest-version data and reinstalls outdated,
 // unpinned, enabled tools (or the explicit names).
-func (e *Engine) runUpdate(ctx context.Context, names []string, output func(string)) error {
+func (e *Engine) runUpdate(ctx context.Context, j *job, output func(string)) error {
 	m, err := e.store.Manifest()
 	if err != nil {
 		return err
 	}
+	names := j.names
 	targets := names
 	if len(targets) == 0 {
 		for n := range m.Tools {
@@ -1039,7 +1224,7 @@ func (e *Engine) runUpdate(ctx context.Context, names []string, output func(stri
 		output("everything up to date")
 		return nil
 	}
-	return e.runInstall(ctx, bumped, output)
+	return e.runInstall(ctx, j, bumped, output)
 }
 
 // updateOne checks one tool for a newer upstream version and records the
@@ -1101,7 +1286,7 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 // orphaned state rows are swept, disabled-but-owned footprints are
 // uninstalled (freeing names), then missing enabled entries install.
 // Zero network when converged.
-func (e *Engine) runReconcile(ctx context.Context, output func(string)) error {
+func (e *Engine) runReconcile(ctx context.Context, j *job, output func(string)) error {
 	m, err := e.store.Manifest()
 	if err != nil {
 		return err
@@ -1122,7 +1307,7 @@ func (e *Engine) runReconcile(ctx context.Context, output func(string)) error {
 	}
 	if len(missing) > 0 {
 		output(fmt.Sprintf("installing missing tools: %s", strings.Join(missing, ", ")))
-		if err := e.runInstall(ctx, missing, output); err != nil {
+		if err := e.runInstall(ctx, j, missing, output); err != nil {
 			return err
 		}
 	}

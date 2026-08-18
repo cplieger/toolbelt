@@ -292,12 +292,15 @@ func (e *Engine) Close() {
 // supported language servers for Go, TypeScript, and Python plus the
 // GitHub CLI, all disabled. Nothing downloads until an entry is
 // enabled; install knowledge (source, dependencies, version) hydrates
-// from the catalog at enable time. Backend runtimes (node, go) and
-// required packages (typescript) are deliberately NOT seeded: the
-// engine auto-adopts missing dependencies at install time, whereas a
-// seeded-but-disabled dependency REFUSES dependent installs
-// ("dependency X is disabled; enable it first" — a disabled entry is
-// user policy). Returns a fresh copy on every call.
+// from the catalog at enable time.
+//
+// Backend runtimes (node, go) and required packages (typescript) are
+// deliberately NOT seeded, because the engine adopts a missing
+// dependency at install time and a seeded row would only be a second
+// place for its version to drift. A seeded-but-disabled dependency is no
+// longer a trap either — the install plan ENABLES an obligatory
+// dependency rather than refusing through it — so this is a leanness
+// choice now, not a correctness one. Returns a fresh copy on every call.
 func DefaultSeed() *Manifest {
 	return &Manifest{
 		Version: ManifestVersion,

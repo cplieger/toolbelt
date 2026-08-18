@@ -26,13 +26,20 @@ func writeStub(t *testing.T, e *Engine, name, body string) string {
 // and a binary left at the wrong version all read as NOT installed
 // (routing them to a reinstall). A recorded bin that cannot be executed
 // at all falls back to presence and says so at Warn.
+//
+// It also pins the CannotExec split, which is what an install's own
+// verification acts on: the binary was never entered (ENOEXEC, or the
+// loader's exit 127) versus every other verdict, where the tool ran and
+// this engine merely could not grade the answer.
 func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 	cases := []struct {
-		name        string
-		setup       func(t *testing.T, e *Engine) (Tool, ToolStatus)
-		want        bool
-		wantMode    string
-		wantWarning string
+		name           string
+		setup          func(t *testing.T, e *Engine) (Tool, ToolStatus)
+		want           bool
+		wantMode       string
+		wantWarning    string
+		wantCannotExec bool
+		wantReason     string
 	}{
 		{
 			name: "runnable binary, no version shape declared",
@@ -87,6 +94,32 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
 			want: false, wantMode: probeModeExec, wantWarning: "probe failed",
+			wantCannotExec: true,
+		},
+		{
+			// The shape that shipped: node's own linux-x64 build links
+			// libatomic.so.1, the image did not carry it, and ld.so
+			// answered 127. Graded as an answer, that made a runtime
+			// that cannot start read as installed, and every npm tool
+			// behind it then failed naming ITSELF.
+			name: "the loader refused the binary: exit 127",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeStub(t, e, "tool",
+					`echo "tool: error while loading shared libraries: libatomic.so.1" >&2; exit 127`)
+				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
+			},
+			want: false, wantMode: probeModeExec, wantWarning: "probe failed",
+			wantCannotExec: true, wantReason: "libatomic.so.1",
+		},
+		{
+			// The tolerance the 127 rule must not swallow: a tool that
+			// does not understand --version still proved it can run.
+			name: "a non-zero exit that is not 127 is still an answer",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeStub(t, e, "tool", `echo "unknown flag: --version" >&2; exit 2`)
+				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
+			},
+			want: true, wantMode: probeModeExec,
 		},
 		{
 			name: "present but not executable falls back to presence",
@@ -132,6 +165,9 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 				writeStub(t, e, "tool", "sleep 120")
 				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
+			// NOT CannotExec: a language server that ignores --version
+			// and blocks has started, so a timeout must not fail an
+			// install the way an unrunnable binary does.
 			want: false, wantMode: probeModeExec, wantWarning: "probe failed",
 		},
 	}
@@ -150,6 +186,12 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			}
 			if tc.wantMode != "" && got.Mode != tc.wantMode {
 				t.Errorf("probe mode = %q, want %q (reason %q)", got.Mode, tc.wantMode, got.Reason)
+			}
+			if got.CannotExec != tc.wantCannotExec {
+				t.Errorf("probe CannotExec = %v, want %v (reason %q)", got.CannotExec, tc.wantCannotExec, got.Reason)
+			}
+			if tc.wantReason != "" && !strings.Contains(got.Reason, tc.wantReason) {
+				t.Errorf("probe reason = %q, want it to carry %q", got.Reason, tc.wantReason)
 			}
 			if elapsed > probeTimeout+probeWaitDelay+2*time.Second {
 				t.Errorf("probe took %s: not bounded", elapsed)
