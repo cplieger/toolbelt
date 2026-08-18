@@ -30,8 +30,17 @@ type job struct {
 	id    string
 	kind  string
 	names []string
-	state string
-	err   string
+	// covers is the FULL set of tools an install job touches: the
+	// requested names plus every dependency the plan pulled in. Set by
+	// the worker once the plan is computed, so the per-row "installing"
+	// flag reaches a dependency the user never named. Empty on jobs that
+	// resolve no plan, where names is the whole answer.
+	//
+	// It is deliberately not merged into names: names is the REQUEST, it
+	// is on the wire, and a consumer renders the job headline from it.
+	covers []string
+	state  string
+	err    string
 	// cause records WHO cancelled the job. It is written at the
 	// cancellation site BEFORE the job's context is cancelled, so the
 	// finalizer in runOne can attribute a cancellation it only observes
@@ -259,7 +268,10 @@ func (q *jobQueue) Snapshot() (active *Job, recent []*Job) {
 }
 
 // InstallingSet returns the tool names covered by the active + queued
-// jobs (drives the per-row "installing" flag).
+// jobs (drives the per-row "installing" flag). An install job reports
+// its resolved plan once the worker has one, so an adopted or
+// auto-enabled dependency shows as installing instead of sitting there
+// as an inert not-installed row while its install is in flight.
 func (q *jobQueue) InstallingSet() map[string]bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -268,7 +280,11 @@ func (q *jobQueue) InstallingSet() map[string]bool {
 		if j.kind == JobKindUninstall || j.kind == JobKindDisable {
 			return
 		}
-		for _, n := range j.names {
+		names := j.names
+		if len(j.covers) > 0 {
+			names = j.covers
+		}
+		for _, n := range names {
 			out[n] = true
 		}
 	}
@@ -279,6 +295,23 @@ func (q *jobQueue) InstallingSet() map[string]bool {
 		add(j)
 	}
 	return out
+}
+
+// setCovers records an install job's resolved plan and publishes the
+// change. Called from the worker, so it takes the queue lock for the same
+// reason the output callback does: InstallingSet reads the field
+// concurrently.
+//
+// The notification is the point, not a side effect. Resolving a plan is
+// when the manifest gains its adopted and newly-enabled rows, and it
+// happens AFTER the queued -> running transition, so without a
+// publication here a consumer holds a row set that predates the plan
+// until the job ends — which for a cold runtime is the whole download.
+func (q *jobQueue) setCovers(j *job, names []string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	j.covers = append([]string{}, names...)
+	q.notifyLocked(j)
 }
 
 // Wait blocks until the given job leaves the queue/active slot, then

@@ -31,6 +31,10 @@ Tool lifecycle is a three-state machine the reconciler enforces in both directio
 
 Sources: `aqua:owner/repo` (binary artifacts with upstream checksum verification), `npm:pkg`, `pip:pkg` (via uv), `cargo:crate`, `go:module`, and a `manual` bash escape hatch. Ecosystem backends are themselves tools: an `npm:` install pulls `node` from the catalog automatically, `go:` pulls the Go toolchain, and so on.
 
+Dependencies are obligatory, so asking for a tool is asking for what it cannot run without. Installing one adopts every dependency the catalog names, enables any that is currently a template, and installs the whole set dependency-first — the job log names each row it switched on and what asked for it. Enabling stays explicit for a tool named DIRECTLY: `Install` on a template is refused (`409 disabled`), because enabling is a policy change and only the dependency edge carries it implicitly.
+
+Each row also reports its `dependents`: the enabled entries that require it, through `requires` or as the backend their source kind implies. It is what a client needs to ask the disable question before sending a request the engine would refuse. It is advisory — the engine re-derives the set under the manifest lock, so acting on a stale inventory is still refused.
+
 ## Install
 
 `go get github.com/cplieger/toolbelt/v2@latest`
@@ -67,7 +71,7 @@ on := true
 job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &on})
 ```
 
-`DefaultSeed()` ships five disabled templates: the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, `gh`). Nothing downloads until a template is enabled; install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded: the engine auto-adopts missing dependencies at install time, while a seeded-but-disabled dependency would refuse dependent installs (a disabled entry is user policy).
+`DefaultSeed()` ships five disabled templates: the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, `gh`). Nothing downloads until a template is enabled; install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded, because the engine adopts a missing dependency at install time and a seeded row would only be a second place for its version to drift.
 
 ### The REST projection
 
@@ -171,6 +175,7 @@ Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (
 
 - Aqua-sourced artifacts verify against the checksum source their registry definition declares (upstream `checksums.txt` and equivalents). A declared checksum that cannot be fetched, parsed, or matched REFUSES the install: there is no downgrade to unverified. Only a definition that declares none (or whose upstream disabled checksums) installs unverified, and that install is warned about on the engine logger and recorded as `"checksum": "unverified"` in `tools-state.json`.
 - Installs are probed by execution, not by file presence: the recorded bins must exist and the tool must answer when run (with `version_args`, the answer must carry the recorded version). A binary that is truncated, of the wrong architecture, or at the wrong version reads as not installed and is reinstalled; a recorded bin that cannot be executed at all falls back to presence and is warned about.
+- The same probe runs as the install's own verification, and a binary the OS refuses to enter FAILS the install rather than being recorded at its version. Exit status 127 counts as such a refusal, because that is the code the dynamic loader uses for a missing shared library and the shell uses for a command it cannot find, and the loader's own diagnostic is carried into the recorded error so it names the missing library. Every other non-zero exit stays an answer: a tool that does not understand `--version` still proved it can run. Verification sits after the state record and before pruning, so a failed one leaves the retained predecessor in place.
 - Published trees are durable: every extracted file and the staging directory are flushed before the rename that publishes a version, the parent directory after it, and the state record before any superseded version is pruned. A flush failure (a full disk included) fails the install and leaves the previous version live.
 - Cancelled jobs are attributed: a `cancelled` job carries `cancel_cause` naming who stopped it — `shutdown` (`Close`, the engine going down, including the running job's cancelled context) or `caller` (`CancelJob`, which is also the `POST {prefix}/jobs/{id}/cancel` route). The field is additive and omitted when a cancellation path names no cause, so an unknown cause is never reported as shutdown. Consumer contract: a shutdown cancellation is routine and should not alert; a caller cancellation is deliberate and may.
 - Fetches ride an SSRF-guarded client (public-IP enforcement at the dial boundary, redirect policy, port allowlist) with transient-failure retry and rate-limit handling via [`cplieger/httpx`](https://github.com/cplieger/httpx).

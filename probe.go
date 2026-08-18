@@ -33,6 +33,24 @@ const (
 // not be able to grow the engine's heap.
 const probeOutputCap = 64 << 10
 
+// exitCouldNotExecute is the one exit status that is NOT an answer.
+// 127 is reserved end to end for "this program was not run": the
+// dynamic loader exits with it when a shared library is missing
+// (`error while loading shared libraries`), a shell exits with it when
+// a command or an interpreter cannot be found, and an unresolvable
+// shebang lands on it too. In every case `main` never ran, so the exit
+// status carries no claim about the tool.
+//
+// The probe grades every OTHER non-zero status as an answer on purpose
+// (a tool that does not understand --version still proved it can
+// execute), and this constant is what keeps that tolerance from
+// swallowing the opposite fact. Measured cost of the missing
+// distinction: a Node.js whose libatomic.so.1 was absent probed clean,
+// was recorded as installed, and every npm-sourced tool behind it then
+// failed with a bare `npm failed: exit status 127` naming the wrong
+// tool.
+const exitCouldNotExecute = 127
+
 // defaultVersionArgs is what the probe runs when a definition declares
 // no version-reporting shape. It is deliberately NOT an empty argument
 // list: language servers (gopls, tsserver, pyright-langserver) start a
@@ -64,6 +82,13 @@ type probeVerdict struct {
 	// OK is the install-detection answer: true = installed, false =
 	// reinstall. A failed probe is never fatal.
 	OK bool
+	// CannotExec marks the one failure an install may not record as a
+	// success: the binary is present but the OS refused to run it (a
+	// missing shared library, a wrong-architecture image, an
+	// unresolvable interpreter). Distinct from a version-banner
+	// mismatch, which an install tolerates because a banner this engine
+	// cannot parse is a knowledge gap rather than a broken tool.
+	CannotExec bool
 }
 
 // probeCache memoizes exec probes so the read path (Inventory, which a
@@ -178,10 +203,11 @@ func (e *Engine) logVerdict(name string, v probeVerdict) {
 }
 
 // runProbe executes the probe target under a hard timeout and grades the
-// answer. Exit status is deliberately not part of the grade: a tool that
-// does not support --version still proves it can execute, which is what
-// the exec-only probe claims. When the version shape is declared, the
-// output must carry the recorded version.
+// answer. Exit status is deliberately not part of the grade, with one
+// exception: a tool that does not support --version still proves it can
+// execute, which is what the exec-only probe claims, but exit 127 proves
+// the opposite (see exitCouldNotExecute). When the version shape is
+// declared, the output must carry the recorded version.
 func (e *Engine) runProbe(target string, args []string, want string, declared bool) probeVerdict {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
@@ -198,7 +224,10 @@ func (e *Engine) runProbe(target string, args []string, want string, declared bo
 	}
 	out, runErr := e.execProbe(target, args)
 	if runErr != nil {
-		return probeVerdict{OK: false, Mode: probeModeExec, Reason: runErr.Error()}
+		return probeVerdict{
+			OK: false, Mode: probeModeExec, Reason: runErr.Error(),
+			CannotExec: errors.Is(runErr, errCannotExecute),
+		}
 	}
 	if !declared || want == "" {
 		return probeVerdict{OK: true, Mode: probeModeExec}
@@ -211,6 +240,11 @@ func (e *Engine) runProbe(target string, args []string, want string, declared bo
 	}
 	return probeVerdict{OK: true, Mode: probeModeVersion}
 }
+
+// errCannotExecute marks a probe failure where the binary was never
+// entered, so a caller can tell it apart from a timeout or an
+// unparseable version banner (errors.Is).
+var errCannotExecute = errors.New("cannot execute")
 
 // execProbe runs the probe command with the engine's PATH (so a
 // launcher's `#!/usr/bin/env node` shebang resolves against the engine's
@@ -232,9 +266,24 @@ func (e *Engine) execProbe(target string, args []string) (string, error) {
 	}
 	var exit *exec.ExitError
 	if err != nil && !errors.As(err, &exit) {
-		return out.String(), fmt.Errorf("cannot execute: %w", err)
+		return out.String(), fmt.Errorf("%w: %w", errCannotExecute, err)
+	}
+	// The loader's own diagnostic is the only description of WHY the
+	// binary would not run, and it goes to stderr, so carry it: without
+	// it the verdict reads "exit status 127" and names no cause.
+	if exit != nil && exit.ExitCode() == exitCouldNotExecute {
+		return out.String(), fmt.Errorf("%w: %s", errCannotExecute, probeFailureDetail(out.String()))
 	}
 	return out.String(), nil
+}
+
+// probeFailureDetail is the reportable head of a failed probe's output,
+// falling back to the exit status when the tool said nothing at all.
+func probeFailureDetail(out string) string {
+	if line := firstLine(out); line != "" {
+		return line
+	}
+	return "exit status " + strconv.Itoa(exitCouldNotExecute) + ", no output"
 }
 
 // recordedBins is the presence set: the tool's recorded bins, or the

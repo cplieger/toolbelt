@@ -355,7 +355,7 @@ func TestHydration_DisabledStaysOffline(t *testing.T) {
 	}
 }
 
-func TestInstallOrder_DisabledDependencyRefused(t *testing.T) {
+func TestInstallOrder_DisabledDependencyEnabled(t *testing.T) {
 	e := newTestEngine(t, nil)
 	err := e.store.MutateManifest(func(m *Manifest) error {
 		base := manualEntry("base")
@@ -370,9 +370,50 @@ func TestInstallOrder_DisabledDependencyRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.Manifest()
-	_, err = e.installOrder(t.Context(), m, []string{"dep"})
-	if err == nil || !strings.Contains(err.Error(), "disabled") {
-		t.Fatalf("installOrder through disabled dep = %v, want refusal", err)
+	plan, err := e.installOrder(t.Context(), m, []string{"dep"})
+	if err != nil {
+		t.Fatalf("installOrder through disabled dep = %v, want the dep enabled", err)
+	}
+	if got := plan.ordered; len(got) != 2 || got[0] != "base" || got[1] != "dep" {
+		t.Fatalf("ordered = %v, want [base dep]", got)
+	}
+	if got := plan.enabled; len(got) != 1 || got[0] != "base" {
+		t.Fatalf("enabled = %v, want [base]", got)
+	}
+	// The enable is PERSISTED, not merely applied to the plan's copy: a
+	// dependency the plan installs while the manifest still calls it
+	// disabled would be uninstalled again by the next reconcile.
+	m2, _ := e.store.Manifest()
+	if m2.Tools["base"].Disabled {
+		t.Fatal("base still disabled in the manifest after the plan enabled it")
+	}
+}
+
+// A tool named DIRECTLY stays refused-by-omission: install is
+// policy-neutral, so enabling rides Patch. Only the dependency edge
+// carries the implicit enable.
+func TestInstallOrder_DisabledRootIsNotEnabled(t *testing.T) {
+	e := newTestEngine(t, nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		base := manualEntry("base")
+		base.Disabled = true
+		m.Tools["base"] = base
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := e.store.Manifest()
+	plan, err := e.installOrder(t.Context(), m, []string{"base"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.enabled) != 0 {
+		t.Fatalf("enabled = %v, want none for a directly named tool", plan.enabled)
+	}
+	m2, _ := e.store.Manifest()
+	if !m2.Tools["base"].Disabled {
+		t.Fatal("a directly named disabled tool was enabled by the plan")
 	}
 }
 
