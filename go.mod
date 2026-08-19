@@ -1,6 +1,6 @@
 module github.com/cplieger/toolbelt/v3
 
-go 1.26.7
+go 1.27.0
 
 require (
 	github.com/cplieger/atomicfile/v3 v3.0.0
