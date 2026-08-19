@@ -264,14 +264,14 @@ func (e *Engine) execProbe(target string, args []string) (string, error) {
 	if ctx.Err() != nil {
 		return out.String(), fmt.Errorf("probe did not answer within %s", probeTimeout)
 	}
-	var exit *exec.ExitError
-	if err != nil && !errors.As(err, &exit) {
+	exit, isExit := errors.AsType[*exec.ExitError](err)
+	if err != nil && !isExit {
 		return out.String(), fmt.Errorf("%w: %w", errCannotExecute, err)
 	}
 	// The loader's own diagnostic is the only description of WHY the
 	// binary would not run, and it goes to stderr, so carry it: without
 	// it the verdict reads "exit status 127" and names no cause.
-	if exit != nil && exit.ExitCode() == exitCouldNotExecute {
+	if isExit && exit.ExitCode() == exitCouldNotExecute {
 		return out.String(), fmt.Errorf("%w: %s", errCannotExecute, probeFailureDetail(out.String()))
 	}
 	return out.String(), nil

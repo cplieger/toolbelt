@@ -143,8 +143,7 @@ func newJobQueue(onChanged func(*Job), onOutput func(string, []string), log *slo
 		run:       run,
 		wake:      make(chan struct{}, 1),
 	}
-	q.wg.Add(1)
-	go q.worker()
+	q.wg.Go(q.worker)
 	return q
 }
 
@@ -377,7 +376,6 @@ func (q *jobQueue) Close() {
 }
 
 func (q *jobQueue) worker() {
-	defer q.wg.Done()
 	for {
 		q.mu.Lock()
 		if q.stopped {

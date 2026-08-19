@@ -1529,11 +1529,10 @@ func TestWait_UnknownJobErrors(t *testing.T) {
 // persisted into the manifest (the old version keeps working; the
 // update is skipped with a log line).
 func TestUpdateOne_SkipsUnresolvableCandidate(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"tag_name":"v9.9.9"}`)
 	}))
-	defer srv.Close()
-	client := &http.Client{Transport: rewriteHost{target: srv.URL}}
+	client := srv.Client()
 
 	constrained := &AquaPackage{
 		Type: aquaTypeGitHubRelease, RepoOwner: "o", RepoName: "r",

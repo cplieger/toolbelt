@@ -611,8 +611,8 @@ func formatExt(format string) string {
 
 // lastPathSegment returns the final /-separated segment of a URL.
 func lastPathSegment(u string) string {
-	if i := strings.LastIndex(u, "/"); i >= 0 {
-		return u[i+1:]
+	if _, seg, found := strings.CutLast(u, "/"); found {
+		return seg
 	}
 	return u
 }

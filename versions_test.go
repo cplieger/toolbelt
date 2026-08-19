@@ -34,19 +34,18 @@ func TestLatestGitHubTag_PaginatesAndVersionCompares(t *testing.T) {
 		{Name: "go1.22beta2"}, // filtered out
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		if page == 0 {
 			page = 1
 		}
 		_ = json.NewEncoder(w).Encode(pages[page])
 	}))
-	defer srv.Close()
 
+	// srv.Client() routes every request to the handler whatever absolute
+	// api.github.com URL the resolver builds, so nothing has to redirect
+	// the request.
 	v := newVersionResolver(srv.Client())
-	// Point the GitHub API base at the test server by monkeying the
-	// request URL through a RoundTripper rewrite.
-	v.client = &http.Client{Transport: rewriteHost{target: srv.URL}}
 
 	aq := &AquaPackage{
 		Type: "http", RepoOwner: "golang", RepoName: "go",
@@ -62,31 +61,11 @@ func TestLatestGitHubTag_PaginatesAndVersionCompares(t *testing.T) {
 	}
 }
 
-// rewriteHost redirects every request to the test server, preserving
-// path+query.
-type rewriteHost struct{ target string }
-
-func (rw rewriteHost) RoundTrip(req *http.Request) (*http.Response, error) {
-	nu := rw.target + req.URL.Path
-	if req.URL.RawQuery != "" {
-		nu += "?" + req.URL.RawQuery
-	}
-	clone := req.Clone(req.Context())
-	u, err := clone.URL.Parse(nu)
-	if err != nil {
-		return nil, err
-	}
-	clone.URL = u
-	clone.Host = u.Host
-	return http.DefaultTransport.RoundTrip(clone)
-}
-
 func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"name":"nope"}]`)
 	}))
-	defer srv.Close()
-	v := newVersionResolver(&http.Client{Transport: rewriteHost{target: srv.URL}})
+	v := newVersionResolver(srv.Client())
 	aq := &AquaPackage{VersionFilter: `Version startsWith "go"`}
 	if _, err := v.latestGitHubTag(t.Context(), "o", "r", aq); err == nil {
 		t.Fatal("want error when nothing matches")
@@ -154,12 +133,11 @@ func TestConstraint_AquaParity(t *testing.T) {
 // template on a live volume).
 func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		fmt.Fprint(w, `{"version":"5.3.0"}`)
 	}))
-	defer srv.Close()
-	v := newVersionResolver(&http.Client{Transport: rewriteHost{target: srv.URL}})
+	v := newVersionResolver(srv.Client())
 	got, err := v.Latest(t.Context(), "npm:typescript-language-server", nil)
 	if err != nil {
 		t.Fatal(err)

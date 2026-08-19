@@ -108,8 +108,8 @@ func TestPatch_DisableDependentsRefusedThenForced(t *testing.T) {
 
 	on := true
 	_, err := e.Patch("base", PatchRequest{Disabled: &on})
-	var depErr *DependentsError
-	if !errors.As(err, &depErr) || !errors.Is(err, ErrHasDependents) {
+	depErr, isDependents := errors.AsType[*DependentsError](err)
+	if !isDependents || !errors.Is(err, ErrHasDependents) {
 		t.Fatalf("disable with dependents = %v, want DependentsError", err)
 	}
 	if len(depErr.Dependents) != 1 || depErr.Dependents[0] != "dep" {
