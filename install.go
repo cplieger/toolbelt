@@ -881,8 +881,8 @@ func (in *installer) linkPMBins(pmBin string, added, prev []string, pkg string) 
 // pkgBinName maps a package ref to its conventional bin name
 // (@scope/name -> name).
 func pkgBinName(pkg string) string {
-	if i := strings.LastIndex(pkg, "/"); i >= 0 {
-		return pkg[i+1:]
+	if _, name, found := strings.CutLast(pkg, "/"); found {
+		return name
 	}
 	return pkg
 }

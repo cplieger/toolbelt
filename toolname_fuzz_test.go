@@ -32,6 +32,14 @@ func FuzzValidToolName(f *testing.F) {
 	f.Add("...")
 	f.Add("..extras")
 	f.Add("@a/..")
+	// Non-ASCII seeds: the allowlist is ASCII-only, so every one of these
+	// must be refused. U+FB05 is one of the three pairs whose SimpleFold
+	// changed in Unicode 17 (Go 1.27) — pinned here so the "an ASCII-only
+	// allowlist is immune to a fold-table bump" claim is executable rather
+	// than argued. The corpus otherwise carried no multi-byte input at
+	// all, which is the charset-bypass class this target names above.
+	f.Add("too\u0142")
+	f.Add("\ufb05tool")
 
 	f.Fuzz(func(t *testing.T, name string) {
 		got := validToolName(name)

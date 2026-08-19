@@ -26,9 +26,9 @@ type wantFinding struct {
 func quietLogger() *slog.Logger { return slog.New(&logCapture{}) }
 
 // assertFindings checks every expectation against err: the class
-// (errors.Is), the detail (errors.As), and that each wanted path appears
-// with the wanted reason. Reported, not fatal, so one bad fixture does
-// not hide the rest of the table.
+// (errors.Is), the detail (errors.AsType), and that each wanted path
+// appears with the wanted reason. Reported, not fatal, so one bad
+// fixture does not hide the rest of the table.
 func assertFindings(t *testing.T, err error, want []wantFinding) {
 	t.Helper()
 	if err == nil {
@@ -37,9 +37,9 @@ func assertFindings(t *testing.T, err error, want []wantFinding) {
 	if !errors.Is(err, ErrRootIntegrity) {
 		t.Errorf("errors.Is(err, ErrRootIntegrity) = false for %v", err)
 	}
-	var detail *RootIntegrityError
-	if !errors.As(err, &detail) {
-		t.Fatalf("errors.As did not recover *RootIntegrityError from %v", err)
+	detail, isDetail := errors.AsType[*RootIntegrityError](err)
+	if !isDetail {
+		t.Fatalf("errors.AsType did not recover *RootIntegrityError from %v", err)
 	}
 	if !strings.HasPrefix(err.Error(), "toolbelt: ") {
 		t.Errorf("error %q is not prefixed at the New boundary", err)
@@ -249,7 +249,7 @@ func TestNew_VerifyRootIntegrityOffAcceptsUnfitRoot(t *testing.T) {
 // TestNew_VerifyRootIntegrityErrorIsClassifiable pins the contract the
 // two consumers need to diverge on: one treats an unfit root as fatal,
 // the other warns and runs tool-less, so the class must be comparable
-// (errors.Is) and the detail recoverable (errors.As), with a message
+// (errors.Is) and the detail recoverable (errors.AsType), with a message
 // that names every offending path in a stable order.
 func TestNew_VerifyRootIntegrityErrorIsClassifiable(t *testing.T) {
 	root := t.TempDir()
@@ -275,9 +275,9 @@ func TestNew_VerifyRootIntegrityErrorIsClassifiable(t *testing.T) {
 			t.Errorf("root-integrity error also matches %v", other)
 		}
 	}
-	var detail *RootIntegrityError
-	if !errors.As(err, &detail) {
-		t.Fatalf("errors.As did not recover *RootIntegrityError from %v", err)
+	detail, isDetail := errors.AsType[*RootIntegrityError](err)
+	if !isDetail {
+		t.Fatalf("errors.AsType did not recover *RootIntegrityError from %v", err)
 	}
 	if len(detail.Findings) != 3 {
 		t.Fatalf("findings = %+v, want the three writable roots", detail.Findings)
