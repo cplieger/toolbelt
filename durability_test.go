@@ -3,7 +3,9 @@ package toolbelt
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -49,19 +51,22 @@ func TestSyncPath_FlushesFilesAndDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name    string
-		path    string
-		wantErr bool
+		name string
+		path string
+		// wantIs is the error a caller must be able to classify. nil says
+		// the barrier must report success, which is what errors.Is
+		// compares a nil target against.
+		wantIs error
 	}{
 		{name: "regular file", path: file},
 		{name: "directory", path: dir},
-		{name: "missing path", path: filepath.Join(dir, "nope"), wantErr: true},
+		{name: "missing path", path: filepath.Join(dir, "nope"), wantIs: fs.ErrNotExist},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := syncPath(tc.path)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("syncPath(%s) = %v, wantErr %v", tc.path, err, tc.wantErr)
+			if !errors.Is(err, tc.wantIs) {
+				t.Fatalf("syncPath(%s) = %v, want an error matching %v", tc.path, err, tc.wantIs)
 			}
 		})
 	}
@@ -425,6 +430,60 @@ func TestMutateState_ReportsWriteFailures(t *testing.T) {
 			}
 			if _, recorded := st.State().Tools["tool"]; recorded {
 				t.Fatal("a failed state write left a recorded row")
+			}
+		})
+	}
+}
+
+// TestMutateManifest_ReportsWriteFailures is the manifest half of the
+// rule above, and it is deliberately different: a manifest write that
+// LANDED without reaching stable storage is reported and tolerated (the
+// file is user intent, re-read per operation), while a write that did not
+// land at all must reach the caller. Swallowing that one would report a
+// tool as enabled to the operator with nothing on disk saying so.
+func TestMutateManifest_ReportsWriteFailures(t *testing.T) {
+	cases := []struct {
+		name     string
+		write    func(string, []byte) (bool, error)
+		wantErr  string
+		wantWarn bool
+	}{
+		{
+			name:    "write error",
+			write:   func(path string, _ []byte) (bool, error) { return false, enospc(path) },
+			wantErr: "no space left",
+		},
+		{
+			name:     "landed but not durable",
+			write:    func(string, []byte) (bool, error) { return false, nil },
+			wantWarn: true,
+		},
+		{
+			name:  "durable write succeeds",
+			write: realAtomicWrite,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := &logCapture{}
+			st := newStore(t.TempDir(), nil, slog.New(logs))
+			if err := st.initFiles(); err != nil {
+				t.Fatal(err)
+			}
+			swapBarriers(t, nil, nil, tc.write)
+
+			err := st.MutateManifest(func(m *Manifest) error {
+				m.Tools["tool"] = Tool{Source: SourceManual, Install: "true"}
+				return nil
+			})
+			if tc.wantErr == "" && err != nil {
+				t.Errorf("MutateManifest = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("MutateManifest = %v, want an error containing %q", err, tc.wantErr)
+			}
+			if got := logs.has("WARN", "manifest write not durable"); got != tc.wantWarn {
+				t.Errorf("durability warning logged = %v, want %v (lines %v)", got, tc.wantWarn, logs.lines)
 			}
 		})
 	}
