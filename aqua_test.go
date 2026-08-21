@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -225,16 +226,79 @@ func TestEnvSupported(t *testing.T) {
 }
 
 func TestValidVersionString(t *testing.T) {
-	good := []string{"v2.96.0", "1.1.411", "go1.23.4", "jdk-21.0.5+11", "2025-01-06"}
+	good := []string{
+		"v2.96.0", "1.1.411", "go1.23.4", "jdk-21.0.5+11", "2025-01-06",
+		// The length limit is inclusive: 100 characters is a version, and
+		// it lands in a path and an env var, so the cap is what stops an
+		// upstream tag from being anything longer.
+		strings.Repeat("a", 100),
+	}
 	for _, v := range good {
 		if !validVersionString(v) {
 			t.Errorf("validVersionString(%q) = false, want true", v)
 		}
 	}
-	bad := []string{"", "v1.0.0; rm -rf /", "a b", "$(evil)", "v1/../../etc"}
+	bad := []string{"", "v1.0.0; rm -rf /", "a b", "$(evil)", "v1/../../etc", strings.Repeat("a", 101)}
 	for _, v := range bad {
 		if validVersionString(v) {
 			t.Errorf("validVersionString(%q) = true, want false", v)
 		}
+	}
+}
+
+// TestResolveSpec_ArchOverrideBelongsToItsOwnArch pins the goos/goarch
+// override match. Applying another architecture's override downloads a
+// binary that cannot run on this machine — the failure surfaces later, as
+// an unrunnable tool, with nothing pointing back at the definition.
+func TestResolveSpec_ArchOverrideBelongsToItsOwnArch(t *testing.T) {
+	p := &AquaPackage{
+		Type:      aquaTypeHTTP,
+		RepoOwner: "vendor",
+		RepoName:  "tool",
+		URL:       "https://example.test/tool-{{.Arch}}.tar.gz",
+		Format:    "tar.gz",
+		Overrides: []AquaOverride{
+			{GOArch: "arm64", URL: "https://example.test/arm/tool-{{.Arch}}.tar.gz"},
+			{GOArch: "amd64", URL: "https://example.test/intel/tool-{{.Arch}}.tar.gz"},
+		},
+	}
+	cases := []struct {
+		arch string
+		want string
+	}{
+		{arch: "amd64", want: "https://example.test/intel/tool-amd64.tar.gz"},
+		{arch: "arm64", want: "https://example.test/arm/tool-arm64.tar.gz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.arch, func(t *testing.T) {
+			spec := resolveOrFatal(t, p, "v1.0.0", tc.arch)
+			if spec.URL != tc.want {
+				t.Errorf("resolveSpecFor(v1.0.0, %s).URL = %s, want %s", tc.arch, spec.URL, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolveSpec_Shellcheck_OverrideReplacementsMergeOntoTheBase covers
+// the merge aqua's semantics require: the v0.9.0 override declares
+// amd64->x86_64 and its linux override adds arm64->aarch64. Replacing the
+// base map instead of merging loses one architecture's asset name, and
+// dropping the override's entries loses the other.
+func TestResolveSpec_Shellcheck_OverrideReplacementsMergeOntoTheBase(t *testing.T) {
+	p := loadFixture(t, "shellcheck.json")
+	cases := []struct {
+		arch string
+		want string
+	}{
+		{arch: "arm64", want: "https://github.com/koalaman/shellcheck/releases/download/v0.9.0/shellcheck-v0.9.0.linux.aarch64.tar.xz"},
+		{arch: "amd64", want: "https://github.com/koalaman/shellcheck/releases/download/v0.9.0/shellcheck-v0.9.0.linux.x86_64.tar.xz"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.arch, func(t *testing.T) {
+			spec := resolveOrFatal(t, p, "v0.9.0", tc.arch)
+			if spec.URL != tc.want {
+				t.Errorf("resolveSpecFor(v0.9.0, %s).URL = %s, want %s", tc.arch, spec.URL, tc.want)
+			}
+		})
 	}
 }

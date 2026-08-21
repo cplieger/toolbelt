@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,6 +74,150 @@ func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
 	}
 }
 
+// TestLatestGitHubTag_WalksEveryPageOfTheCap pins the documented walk
+// depth. golang/go already needs ~6 pages before a usable tag appears, so
+// a walk that stops one page short of the cap silently reports "no tag
+// passes the version filter" for a repo whose newest tag is exactly that
+// far down.
+func TestLatestGitHubTag_WalksEveryPageOfTheCap(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page == tagPageCap {
+			fmt.Fprint(w, `[{"name":"v1.0.0"}]`)
+			return
+		}
+		// A full page of tags the prefix rejects: 100 entries is what
+		// tells the resolver another page may follow.
+		names := make([]string, 0, 100)
+		for i := range 100 {
+			names = append(names, fmt.Sprintf(`{"name":"ancient-%d"}`, i))
+		}
+		fmt.Fprint(w, "["+strings.Join(names, ",")+"]")
+	}))
+	v := newVersionResolver(srv.Client())
+
+	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "v"})
+	if err != nil {
+		t.Fatalf("latestGitHubTag with the newest tag on page %d: %v", tagPageCap, err)
+	}
+	if got != "v1.0.0" {
+		t.Errorf("latestGitHubTag = %q, want v1.0.0", got)
+	}
+}
+
+// TestLatestGitHubTag_PrefixRejectsForeignTags pins version_prefix as a
+// filter and not just a trim: a monorepo tags several components, and a
+// sibling component's higher number must not be offered as this tool's
+// latest version.
+func TestLatestGitHubTag_PrefixRejectsForeignTags(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"name":"cli/v1.2.0"},{"name":"v9.9.9"}]`)
+	}))
+	v := newVersionResolver(srv.Client())
+
+	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "cli/v"})
+	if err != nil {
+		t.Fatalf("latestGitHubTag: %v", err)
+	}
+	if got != "cli/v1.2.0" {
+		t.Errorf("latestGitHubTag with prefix cli/v = %q, want cli/v1.2.0", got)
+	}
+}
+
+// TestLatestAqua_TagVersioningNeverReadsTheReleaseEndpoint pins the
+// routing a definition asks for: version_source github_tag means the tag
+// list decides, so a repo whose releases/latest is stale or absent still
+// resolves.
+func TestLatestAqua_TagVersioningNeverReadsTheReleaseEndpoint(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/tags") {
+			fmt.Fprint(w, `[{"name":"v3.1.0"},{"name":"v3.0.0"}]`)
+			return
+		}
+		fmt.Fprint(w, `{"tag_name":"v0.0.1"}`)
+	}))
+	v := newVersionResolver(srv.Client())
+
+	got, err := v.Latest(t.Context(), "aqua:owner/repo", &AquaPackage{VersionSource: "github_tag"})
+	if err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if got != "v3.1.0" {
+		t.Errorf("Latest(aqua:owner/repo, version_source=github_tag) = %q, want v3.1.0", got)
+	}
+}
+
+// TestLatestAqua_LatestReleaseFailingTheFilterFallsBackToTags covers the
+// shape the fallback exists for: a repo carrying a permanent "latest"
+// release tag. Handing that string back as a version would install a
+// directory literally named latest and re-resolve to it forever.
+func TestLatestAqua_LatestReleaseFailingTheFilterFallsBackToTags(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/tags") {
+			fmt.Fprint(w, `[{"name":"v2.0.0"},{"name":"latest"}]`)
+			return
+		}
+		fmt.Fprint(w, `{"tag_name":"latest"}`)
+	}))
+	v := newVersionResolver(srv.Client())
+	aq := &AquaPackage{VersionFilter: `not (Version in ["latest", "stable"])`}
+
+	got, err := v.Latest(t.Context(), "aqua:owner/repo", aq)
+	if err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	if got != "v2.0.0" {
+		t.Errorf("Latest with a filtered-out release tag = %q, want v2.0.0", got)
+	}
+}
+
+// TestGitHubToken_AttachedOnlyWhenDiscoverable pins both halves of the
+// bearer-token rule. A discoverable token must reach the API call or every
+// version lookup shares the 60/hour anonymous limit; and when no token is
+// discoverable the header must be ABSENT, because an empty bearer is a
+// 401 where no header at all is a served anonymous request.
+func TestGitHubToken_AttachedOnlyWhenDiscoverable(t *testing.T) {
+	cases := []struct {
+		name   string
+		script string
+		want   string // the Authorization header the API call must carry
+	}{
+		{
+			name:   "a token the gh CLI can produce is attached",
+			script: "echo tok-abc",
+			want:   "Bearer tok-abc",
+		},
+		{
+			name:   "no token means no header at all",
+			script: "exit 1",
+			want:   "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin)
+
+			var got string
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Authorization")
+				fmt.Fprint(w, `{"tag_name":"v1.0.0"}`)
+			}))
+			v := newVersionResolver(srv.Client())
+
+			if _, err := v.Latest(t.Context(), "aqua:owner/repo", nil); err != nil {
+				t.Fatalf("Latest: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("Authorization = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMaxVersionTag(t *testing.T) {
 	cases := []struct {
 		candidates []string
@@ -83,6 +229,13 @@ func TestMaxVersionTag(t *testing.T) {
 		{[]string{"jq-1.7.1", "jq-1.8.2"}, "", "jq-1.8.2"},
 		{[]string{"2025-01-06", "2024-12-01"}, "", "2025-01-06"},
 		{[]string{"only"}, "", "only"},
+		// The undeclared prefix is skipped by scanning to the first
+		// DIGIT, and 0 and 9 are digits: a tag whose version starts at a
+		// 0 must not be read from the next digit along (0.9 is not 9),
+		// and one whose version starts at a 9 must not lose it (9.1 is
+		// not 1). Either slip inverts the comparison.
+		{[]string{"jq-0.9", "jq-1.2"}, "", "jq-1.2"},
+		{[]string{"go9.1", "go2.0"}, "", "go9.1"},
 	}
 	for _, c := range cases {
 		if got := maxVersionTag(c.candidates, c.prefix); got != c.want {

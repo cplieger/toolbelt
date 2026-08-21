@@ -68,6 +68,19 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			want: true, wantMode: probeModeVersion,
 		},
 		{
+			// A definition whose tool spells its version subcommand
+			// without dashes: the declared shape is what must be
+			// executed, or the answer that gets graded came from an
+			// invocation the definition never asked for.
+			name: "the declared version shape is the invocation",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeStub(t, e, "tool", `[ "$1" = version ] && echo 1.2.3 || echo 0.0.0`)
+				return Tool{Source: SourceManual, VersionArgs: []string{"version"}},
+					ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
+			},
+			want: true, wantMode: probeModeVersion,
+		},
+		{
 			name: "declared version shape, tool reports another version",
 			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
 				writeStub(t, e, "tool", "echo tool 9.9.9")
@@ -150,14 +163,19 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 				return Tool{Source: "npm:typescript"},
 					ToolStatus{InstalledVersion: "5.9.0", PMBins: []string{"tsc", "tsserver"}}
 			},
-			want: false,
+			// Naming the missing bin is the whole diagnostic: every
+			// RECORDED bin is checked, not just the one that gets run.
+			want: false, wantReason: "bin tsserver is missing",
 		},
 		{
 			name: "nothing installed at all",
 			setup: func(*testing.T, *Engine) (Tool, ToolStatus) {
 				return Tool{Source: SourceManual}, ToolStatus{}
 			},
-			want: false,
+			// Before the first status write there is nothing recorded, so
+			// the derived bin name is what must be looked for — a
+			// pre-seeded volume reads as installed on the strength of it.
+			want: false, wantReason: "bin tool is missing",
 		},
 		{
 			name: "a tool that never answers is bounded, not hung",

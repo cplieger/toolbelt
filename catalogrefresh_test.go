@@ -49,7 +49,12 @@ func catalogJSON(t *testing.T, c *Catalog) []byte {
 func newRefreshEngine(t *testing.T, cfg *Config) *Engine {
 	t.Helper()
 	dir := cfg.ConfigDir
-	st := newStore(dir, nil, slog.Default())
+	// Same rule as production: a nil Logger means slog.Default().
+	log := cfg.Logger
+	if log == nil {
+		log = slog.Default()
+	}
+	st := newStore(dir, nil, log)
 	if err := st.initFiles(); err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +68,13 @@ func newRefreshEngine(t *testing.T, cfg *Config) *Engine {
 		catalogOverlays: cfg.CatalogOverlays,
 		client:          http.DefaultClient,
 		versions:        newVersionResolver(http.DefaultClient),
-		log:             slog.Default(),
+		log:             log,
 		configDir:       dir,
 		toolsDir:        toolsDir,
 	}
 	e.initCatalog(cfg)
 	e.inst = &installer{toolsDir: toolsDir, client: http.DefaultClient, output: func(string) {}}
-	e.queue = newJobQueue(nil, nil, slog.Default(), e.executeJob)
+	e.queue = newJobQueue(nil, nil, log, e.executeJob)
 	e.startCatalogSchedule()
 	t.Cleanup(e.Close)
 	return e
@@ -102,13 +107,24 @@ func TestApplyOverlay(t *testing.T) {
 
 	t.Run("display patch merges onto existing entry", func(t *testing.T) {
 		c := base()
-		ov := []byte(`{"entries":{"tool-a":{"description":"new","featured":true,"lsp":true}}}`)
+		ov := []byte(`{"entries":{"tool-a":{"description":"new","featured":true,"lsp":true,` +
+			`"requires":["node"],"probe":"tool-a --version"}}}`)
 		if err := ApplyOverlay(c, ov, nil); err != nil {
 			t.Fatal(err)
 		}
 		got := c.Entries["tool-a"]
 		if got.Description != "new" || !got.Featured || !got.Lsp || got.Source != "npm:tool-a" {
 			t.Errorf("merge wrong: %+v", got)
+		}
+		// requires drives the dependency install order and probe decides
+		// what install verification executes: a patch that declares
+		// either and is silently dropped leaves the entry installing (and
+		// verifying) as if the consumer had said nothing.
+		if !slices.Equal(got.Requires, []string{"node"}) {
+			t.Errorf("Requires = %v, want [node]", got.Requires)
+		}
+		if got.Probe != "tool-a --version" {
+			t.Errorf("Probe = %q, want %q", got.Probe, "tool-a --version")
 		}
 	})
 
@@ -415,6 +431,25 @@ func TestCatalogRefreshJob(t *testing.T) {
 		}
 	})
 
+	t.Run("a catalog at exactly the entry floor is accepted", func(t *testing.T) {
+		// The floor is a gutted-artifact check, not a size requirement:
+		// refusing a catalog that sits exactly on it would reject a
+		// publisher release for having one entry too few.
+		atFloor := bigCatalog("new-marker", "gen-floor")
+		delete(atFloor.Entries, "filler-000")
+		if len(atFloor.Entries) != minCatalogEntries {
+			t.Fatalf("fixture has %d entries, want exactly the floor %d", len(atFloor.Entries), minCatalogEntries)
+		}
+		srv := serve(t, catalogJSON(t, atFloor))
+		e, _ := setup(t, srv.URL, nil)
+		if final := refreshAndWait(t, e); final.State != JobDone {
+			t.Errorf("job = %s (%s), want done", final.State, final.Error)
+		}
+		if _, ok := e.cat().Lookup("new-marker"); !ok {
+			t.Error("catalog at the floor was not swapped in")
+		}
+	})
+
 	t.Run("missing required tool rejects", func(t *testing.T) {
 		srv := serve(t, catalogJSON(t, bigCatalog("new-marker", "gen-new")))
 		e, _ := setup(t, srv.URL, []string{"old-marker"}) // fetched catalog lacks it
@@ -570,8 +605,10 @@ func TestCatalogScheduleTicks(t *testing.T) {
 
 	dir := t.TempDir()
 	baked := writeBaked(t, dir, bigCatalog("old-marker", "gen-old"))
+	logs := &logCapture{}
 	e := newRefreshEngine(t, &Config{
 		ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools"), CatalogPath: baked,
+		Logger:  slog.New(logs),
 		Refresh: &CatalogRefresh{URL: srv.URL, Interval: 50 * time.Millisecond},
 	})
 	if !e.CatalogInfo().Scheduled {
@@ -593,6 +630,29 @@ func TestCatalogScheduleTicks(t *testing.T) {
 	}
 	mu.Unlock()
 	e.Close() // must stop the loop without hanging
+	// A tick that queued its refresh must not also report that it could
+	// not queue one: this line is the operator's only signal that the
+	// background schedule has stopped working.
+	if logs.has("WARN", "refresh not enqueued") {
+		t.Errorf("a successful tick reported a failure to enqueue: %v", logs.lines)
+	}
+}
+
+// TestCatalogSchedule_ZeroIntervalIsOnDemandOnly pins what CatalogInfo
+// promises for the configuration most consumers ship: a refresh URL with
+// no interval. Reporting a schedule that is not running tells an operator
+// the catalog is being kept current when only an explicit RefreshCatalog
+// will ever move it.
+func TestCatalogSchedule_ZeroIntervalIsOnDemandOnly(t *testing.T) {
+	dir := t.TempDir()
+	baked := writeBaked(t, dir, bigCatalog("old-marker", "gen-old"))
+	e := newRefreshEngine(t, &Config{
+		ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools"), CatalogPath: baked,
+		Refresh: &CatalogRefresh{URL: "https://example.test/catalog.json"},
+	})
+	if info := e.CatalogInfo(); info.Scheduled {
+		t.Errorf("CatalogInfo().Scheduled = true for interval 0, want false (info = %+v)", info)
+	}
 }
 
 func TestCatalogSwapIsRaceSafe(t *testing.T) {
@@ -640,6 +700,12 @@ func TestCatalogSwapIsRaceSafe(t *testing.T) {
 // policy must accept the GitHub release-download hop chain.
 func TestEngineClientPolicyComposition(t *testing.T) {
 	client := newEngineClient()
+	// A per-attempt timeout of zero is no timeout at all: a stalled
+	// release download would hold the single-flight job worker (and any
+	// boot gate waiting on it) forever.
+	if client.Timeout <= 0 {
+		t.Errorf("client.Timeout = %s, want a positive per-attempt bound", client.Timeout)
+	}
 	tr, ok := client.Transport.(urlPolicyTransport)
 	if !ok {
 		t.Fatalf("transport is %T, want urlPolicyTransport", client.Transport)
