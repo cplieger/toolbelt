@@ -210,6 +210,7 @@ func TestAdd_ManualInstallRuns(t *testing.T) {
 
 func TestAdd_ManualProbeMissingFails(t *testing.T) {
 	e := newTestEngine(t, nil)
+	logs := captureLogs(e)
 	job, err := e.Add(t.Context(), &AddRequest{
 		Name:    "ghost",
 		Source:  SourceManual,
@@ -227,6 +228,12 @@ func TestAdd_ManualProbeMissingFails(t *testing.T) {
 	if inv.Tools[0].LastError == "" {
 		t.Error("expected last_error recorded")
 	}
+	// The reason WAS recorded, so the engine must not also report that it
+	// could not record it: an operator greps the logs for the failure and
+	// the two statements contradict each other.
+	if logs.has("not recorded") {
+		t.Errorf("the recorded failure was reported as unrecordable: %v", logs.lines)
+	}
 }
 
 // TestInstall_UnrunnableBinaryFailsTheInstall pins the verification
@@ -240,6 +247,7 @@ func TestAdd_ManualProbeMissingFails(t *testing.T) {
 // `npm failed: exit status 127` about ITSELF while node's row read clean.
 func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	e := newTestEngine(t, nil)
+	logs := captureLogs(e)
 	job, err := e.Add(t.Context(), &AddRequest{
 		Name: "broken", Source: SourceManual, Version: "1.0.0",
 		Install: `printf '#!/bin/sh\necho "broken: error while loading shared libraries: libfake.so.1" >&2\nexit 127\n' > "$BIN/broken" && chmod 755 "$BIN/broken"`,
@@ -264,6 +272,11 @@ func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	// is missing, and it only exists on the probe's stderr.
 	if !strings.Contains(row.LastError, "libfake.so.1") {
 		t.Errorf("last_error = %q, want the loader's own diagnostic", row.LastError)
+	}
+	// The verdict WAS recorded on the row above, so the engine must not
+	// also report that it could not record it.
+	if logs.has("not recorded") {
+		t.Errorf("the recorded verdict was reported as unrecordable: %v", logs.lines)
 	}
 }
 
@@ -438,6 +451,7 @@ func TestInstall_DoomedDependentIsBlockedNotBlamed(t *testing.T) {
 	// A "runtime" that installs successfully and then cannot run, and
 	// two tools that declare it as a requirement.
 	e := newTestEngine(t, nil)
+	logs := captureLogs(e)
 	err := e.store.MutateManifest(func(m *Manifest) error {
 		m.Tools["runtime"] = Tool{
 			Source: SourceManual, Version: "1",
@@ -485,6 +499,11 @@ func TestInstall_DoomedDependentIsBlockedNotBlamed(t *testing.T) {
 	// An unrelated name in the same plan is not collateral damage.
 	if byName["leaf"].Name != "" && byName["leaf"].Installed {
 		t.Error("leaf was installed despite sharing the broken runtime")
+	}
+	// Every blocked reason above landed on its row, so the engine must not
+	// also report that it could not record one.
+	if logs.has("not recorded") {
+		t.Errorf("a recorded blocked reason was reported as unrecordable: %v", logs.lines)
 	}
 }
 
@@ -1213,22 +1232,49 @@ func TestSearch_HidesManifestEntries(t *testing.T) {
 	}
 }
 
+// TestInventory_LatestFromCacheAndSystem pins the advisory Latest field in
+// all three of its states. It is the whole basis of a consumer's "update
+// available" badge, so it has to be set when the cache knows a newer version,
+// and stay EMPTY both when the cache knows nothing and when what it knows is
+// the version already declared — a Latest equal to Version is a badge offering
+// an upgrade to the version in use.
 func TestInventory_LatestFromCacheAndSystem(t *testing.T) {
 	e := newTestEngine(t, nil)
 	e.system = []string{"sh"}
 	addManual(t, e, "t", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["a-newer"] = Tool{Source: "npm:x", Version: "1.0.0"}
+		m.Tools["b-current"] = Tool{Source: "npm:y", Version: "9.9.9"}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	// Seed the version cache as an update job would.
 	e.versions.mu.Lock()
 	e.versions.cache[SourceManual] = "" // manual: never cached
 	e.versions.cache["npm:x"] = "9.9.9"
+	e.versions.cache["npm:y"] = "9.9.9"
 	e.versions.mu.Unlock()
 
 	inv, err := e.Inventory()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inv.Tools[0].Latest != "" {
-		t.Errorf("manual tool has latest = %q", inv.Tools[0].Latest)
+	// Inventory sorts by name, so the rows are a-newer, b-current, t.
+	if len(inv.Tools) != 3 {
+		t.Fatalf("inventory rows = %d, want 3: %+v", len(inv.Tools), inv.Tools)
+	}
+	if got := inv.Tools[0].Latest; got != "9.9.9" {
+		t.Errorf("Latest for %q (declared 1.0.0, cache 9.9.9) = %q, want %q",
+			inv.Tools[0].Name, got, "9.9.9")
+	}
+	if got := inv.Tools[1].Latest; got != "" {
+		t.Errorf("Latest for %q (declared 9.9.9, cache 9.9.9) = %q, want empty: "+
+			"the cached version IS the declared one", inv.Tools[1].Name, got)
+	}
+	if got := inv.Tools[2].Latest; got != "" {
+		t.Errorf("Latest for the manual tool %q = %q, want empty", inv.Tools[2].Name, got)
 	}
 	if len(inv.System) != 1 || !inv.System[0].Installed {
 		t.Errorf("system tools = %+v", inv.System)
@@ -1318,7 +1364,10 @@ func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 
 // TestUninstall_UsesRemovedDefinitions: manual uninstall commands must
 // actually run on remove (they ride the job's removed map — the
-// manifest row is already gone when the job executes).
+// manifest row is already gone when the job executes), and the install
+// state row goes with them. A row left behind after a successful
+// uninstall is exactly the orphan reconcile has to sweep, and until it
+// does the engine still claims an owned footprint it no longer has.
 func TestUninstall_UsesRemovedDefinitions(t *testing.T) {
 	e := newTestEngine(t, nil)
 	marker := filepath.Join(e.toolsDir, "uninstall-ran")
@@ -1331,6 +1380,9 @@ func TestUninstall_UsesRemovedDefinitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitJob(t, e, job.ID)
+	if _, ok := e.store.State().Tools["m"]; !ok {
+		t.Fatal("no install state row after the install: nothing for the uninstall to drop")
+	}
 
 	jv, _, err := e.Remove("m")
 	if err != nil {
@@ -1342,6 +1394,9 @@ func TestUninstall_UsesRemovedDefinitions(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Error("manual uninstall command did not run")
+	}
+	if st, ok := e.store.State().Tools["m"]; ok {
+		t.Errorf("install state row survived the uninstall: %+v", st)
 	}
 }
 
@@ -1432,17 +1487,38 @@ func TestInstallAqua_SymlinkEscapeRejected(t *testing.T) {
 	}
 }
 
+// TestValidToolName_ScopedEdgeCases pins the slash rule at both ends. The
+// accepted side carries the two boundaries the rejected side cannot express: a
+// single-character scope is the shortest legal `@scope/name`, and 80 characters
+// is the length limit itself, which is inclusive.
 func TestValidToolName_ScopedEdgeCases(t *testing.T) {
-	bad := []string{"@/x", "@x/", "x/y", "@a/b/c", "/x"}
-	for _, n := range bad {
+	bad := map[string]string{
+		"@/x":        "an empty scope",
+		"@x/":        "an empty name",
+		"x/y":        "an unscoped slash",
+		"@a/b/c":     "two slashes",
+		"/x":         "a leading slash",
+		longName(81): "one character past the length limit",
+	}
+	for n, why := range bad {
 		if validToolName(n) {
-			t.Errorf("validToolName(%q) = true, want false", n)
+			t.Errorf("validToolName(%q) = true, want false (%s)", n, why)
 		}
 	}
-	if !validToolName("@scope/name") {
-		t.Error("@scope/name should be valid")
+	good := map[string]string{
+		"@scope/name": "the ordinary scoped shape",
+		"@a/b":        "a single-character scope is the shortest legal scope",
+		longName(80):  "80 characters is the limit, and the limit is allowed",
+	}
+	for n, why := range good {
+		if !validToolName(n) {
+			t.Errorf("validToolName(%q) = false, want true (%s)", n, why)
+		}
 	}
 }
+
+// longName returns a name of exactly n allowed characters.
+func longName(n int) string { return strings.Repeat("a", n) }
 
 // TestValidToolName_PathComponents pins the half of the rule the charset
 // alone cannot express: the name becomes a path component under opt/, and
@@ -1902,5 +1978,306 @@ func TestMergeCatalogDefaults_ClonesSliceFields(t *testing.T) {
 	}
 	if cat.VersionArgs[0] != "--version" {
 		t.Errorf("catalog VersionArgs[0] = %q after the row was written through, want %q", cat.VersionArgs[0], "--version")
+	}
+}
+
+// TestMergeCatalogDefaults_KeepsFieldsTheRowAlreadySets pins the direction of
+// the merge: the catalog fills what a row LEFT unset and never overwrites what
+// the user wrote. Every field here is one an operator sets deliberately to
+// diverge from the packaged definition — a description for their own inventory,
+// and an uninstall or probe command for a tool the catalog describes wrongly —
+// so a merge that wrote catalog values over them would silently discard the
+// override and, for uninstall, run the wrong teardown command.
+func TestMergeCatalogDefaults_KeepsFieldsTheRowAlreadySets(t *testing.T) {
+	cat := CatalogEntry{
+		Name:        "widget",
+		Source:      SourceManual,
+		Description: "catalog description",
+		Install:     "catalog-install",
+		Uninstall:   "catalog-uninstall",
+		Probe:       "catalog-probe",
+		Version:     "9.9.9",
+	}
+	tool := Tool{
+		Source:      SourceManual,
+		Description: "mine",
+		Uninstall:   "my-uninstall",
+		Probe:       "my-probe",
+	}
+	mergeCatalogDefaults(&tool, &cat)
+
+	if tool.Description != "mine" {
+		t.Errorf("Description = %q, want %q kept", tool.Description, "mine")
+	}
+	if tool.Uninstall != "my-uninstall" {
+		t.Errorf("Uninstall = %q, want %q kept", tool.Uninstall, "my-uninstall")
+	}
+	if tool.Probe != "my-probe" {
+		t.Errorf("Probe = %q, want %q kept", tool.Probe, "my-probe")
+	}
+	// The unset fields are the other half of the same rule: without them
+	// passing, the three above could hold for a merge that does nothing.
+	if tool.Install != "catalog-install" {
+		t.Errorf("Install = %q, want the catalog value %q", tool.Install, "catalog-install")
+	}
+	if tool.Version != "9.9.9" {
+		t.Errorf("Version = %q, want the catalog value %q", tool.Version, "9.9.9")
+	}
+}
+
+// updatePayload is the runnable artifact each fixture tool ships: the probe
+// executes what it finds in bin/, so a version tree has to hold a real (if
+// trivial) program.
+func updatePayload(tool, ver string) string {
+	return "#!/bin/sh\necho " + tool + " " + ver + "\n"
+}
+
+// updateFixture serves every endpoint an aqua update walks — the release that
+// names the latest tag, each tool's artifact, and the artifact's checksum — for
+// any number of tools. The server runs on an in-memory network, so the
+// definitions' real api.github.com and github.com URLs resolve to this one
+// handler and the update path runs unmodified.
+func updateFixture(t *testing.T, latestTag string, names ...string) (*http.Client, *Catalog) {
+	t.Helper()
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		base := filepath.Base(r.URL.Path)
+		switch {
+		case base == "latest":
+			fmt.Fprintf(w, `{"tag_name":%q}`, latestTag)
+		case strings.HasSuffix(base, ".txt"):
+			tool, ver, _ := strings.Cut(strings.TrimSuffix(base, ".txt"), "_")
+			sum := sha256.Sum256([]byte(updatePayload(tool, ver)))
+			fmt.Fprintf(w, "%s  %s_%s.raw\n", hex.EncodeToString(sum[:]), tool, ver)
+		case strings.HasSuffix(base, ".raw"):
+			tool, ver, _ := strings.Cut(strings.TrimSuffix(base, ".raw"), "_")
+			_, _ = w.Write([]byte(updatePayload(tool, ver)))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	entries := map[string]CatalogEntry{}
+	for _, n := range names {
+		entries[n] = CatalogEntry{Name: n, Source: "aqua:o/" + n, Aqua: &AquaPackage{
+			Type: aquaTypeGitHubRelease, RepoOwner: "o", RepoName: n,
+			Asset:  n + "_{{trimV .Version}}.raw",
+			Format: formatRaw,
+			Files:  []AquaFile{{Name: n}},
+			Checksum: &AquaChecksum{
+				Type: aquaTypeGitHubRelease, Asset: n + "_{{trimV .Version}}.txt",
+				Algorithm: "sha256",
+			},
+		}}
+	}
+	return srv.Client(), &Catalog{Entries: entries}
+}
+
+// addFixtureTool installs one fixture tool at ver through the public Add path.
+func addFixtureTool(t *testing.T, e *Engine, name, ver string, pin bool) {
+	t.Helper()
+	job, err := e.Add(t.Context(), &AddRequest{Name: name, Version: ver, Pin: pin})
+	if err != nil {
+		t.Fatalf("Add(%s %s): %v", name, ver, err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install %s %s = %+v tail=%v", name, ver, final, final.OutputTail)
+	}
+}
+
+// TestUpdate_PinRespectsTheJobScope pins the two halves of the pin rule, which
+// between them decide whether pinning means anything: a scheduled pass over the
+// whole manifest leaves a pinned tool where it is, and naming that tool is the
+// operator's override that moves it.
+//
+// Both halves end at the STATE file, not just the manifest. An update that
+// records the new version without reinstalling leaves the old binary on PATH
+// while the inventory advertises the new one, which is the same bug from the
+// consumer's side as not updating at all.
+func TestUpdate_PinRespectsTheJobScope(t *testing.T) {
+	t.Run("scheduled_pass_bumps_the_unpinned_tool_only", func(t *testing.T) {
+		client, cat := updateFixture(t, "v2.0.0", "tool", "held")
+		e := newTestEngineClient(t, cat, client, nil)
+		addFixtureTool(t, e, "tool", "v1.0.0", false)
+		addFixtureTool(t, e, "held", "v1.0.0", true)
+
+		jv, err := e.Update()
+		if err != nil {
+			t.Fatalf("Update(): %v", err)
+		}
+		final := waitJob(t, e, jv.ID)
+		if final.State != JobDone {
+			t.Fatalf("update job = %+v tail=%v", final, final.OutputTail)
+		}
+		m, err := e.store.LoadManifest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Tools["tool"].Version; got != "v2.0.0" {
+			t.Errorf("manifest version of the unpinned tool = %q, want %q", got, "v2.0.0")
+		}
+		if got := m.Tools["held"].Version; got != "v1.0.0" {
+			t.Errorf("manifest version of the pinned tool = %q, want %q untouched", got, "v1.0.0")
+		}
+		if got := e.store.State().Tools["tool"].InstalledVersion; got != "v2.0.0" {
+			t.Errorf("installed version of the unpinned tool = %q, want %q: "+
+				"the bump was recorded but never installed", got, "v2.0.0")
+		}
+		if got := e.store.State().Tools["held"].InstalledVersion; got != "v1.0.0" {
+			t.Errorf("installed version of the pinned tool = %q, want %q untouched", got, "v1.0.0")
+		}
+	})
+	t.Run("naming_the_pinned_tool_overrides_the_pin", func(t *testing.T) {
+		client, cat := updateFixture(t, "v2.0.0", "held")
+		e := newTestEngineClient(t, cat, client, nil)
+		addFixtureTool(t, e, "held", "v1.0.0", true)
+
+		jv, err := e.Update("held")
+		if err != nil {
+			t.Fatalf("Update(held): %v", err)
+		}
+		final := waitJob(t, e, jv.ID)
+		if final.State != JobDone {
+			t.Fatalf("update job = %+v tail=%v", final, final.OutputTail)
+		}
+		m, err := e.store.LoadManifest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := m.Tools["held"].Version; got != "v2.0.0" {
+			t.Errorf("manifest version of the explicitly named pinned tool = %q, want %q", got, "v2.0.0")
+		}
+		if got := e.store.State().Tools["held"].InstalledVersion; got != "v2.0.0" {
+			t.Errorf("installed version of the explicitly named pinned tool = %q, want %q", got, "v2.0.0")
+		}
+	})
+}
+
+// TestEnsureInstalled_ReportsAFailedInstallJob pins the synchronous contract
+// the programmatic callers depend on: EnsureInstalled returns only once the
+// tool is actually there. A caller that gets nil goes on to exec the binary,
+// so swallowing a failed job turns "install gh, then use gh" into an
+// exec-not-found further away from the cause.
+func TestEnsureInstalled_ReportsAFailedInstallJob(t *testing.T) {
+	e := newTestEngine(t, nil)
+	job, err := e.Add(t.Context(), &AddRequest{
+		Name: "broken", Source: SourceManual, Version: "1", Install: "exit 1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobFailed {
+		t.Fatalf("baseline install = %+v, want a failed job to ensure against", final)
+	}
+
+	err = e.EnsureInstalled(t.Context(), "broken")
+	if err == nil {
+		t.Fatal("EnsureInstalled(broken) = nil, want an error: its install job failed")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Errorf("EnsureInstalled(broken) = %v, want the error to name the tool", err)
+	}
+}
+
+// TestReconcile_AnnouncesOnlyThePassesItRuns pins the job log against the two
+// passes it can report. The output IS the operator's account of what reconcile
+// did, so announcing an uninstall pass on a converged-but-for-installs manifest
+// (or the reverse) describes work that never happened and sends whoever reads it
+// looking for a tool that was never touched.
+func TestReconcile_AnnouncesOnlyThePassesItRuns(t *testing.T) {
+	t.Run("only_missing_installs", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		err := e.store.MutateManifest(func(m *Manifest) error {
+			m.Tools["absent"] = manualEntry("absent")
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := reconcileOutput(t, e)
+		if !strings.Contains(out, "installing missing tools: absent") {
+			t.Errorf("reconcile output = %q, want it to announce the install pass", out)
+		}
+		if strings.Contains(out, "uninstalling disabled tools") {
+			t.Errorf("reconcile output = %q, want no uninstall pass announced: nothing was disabled", out)
+		}
+	})
+	t.Run("only_disabled_uninstalls", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "extra", nil)
+		// Disable through the manifest rather than Patch, so the footprint
+		// is still there when reconcile runs — the hand-edited-manifest
+		// case reconcile exists for.
+		err := e.store.MutateManifest(func(m *Manifest) error {
+			tl := m.Tools["extra"]
+			tl.Disabled = true
+			m.Tools["extra"] = tl
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := reconcileOutput(t, e)
+		if !strings.Contains(out, "uninstalling disabled tools: extra") {
+			t.Errorf("reconcile output = %q, want it to announce the uninstall pass", out)
+		}
+		if strings.Contains(out, "installing missing tools") {
+			t.Errorf("reconcile output = %q, want no install pass announced: nothing was missing", out)
+		}
+	})
+}
+
+// reconcileOutput runs one reconcile to completion and returns its job log.
+func reconcileOutput(t *testing.T, e *Engine) string {
+	t.Helper()
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	final := waitJob(t, e, jv.ID)
+	if final.State != JobDone {
+		t.Fatalf("reconcile job = %+v tail=%v", final, final.OutputTail)
+	}
+	return strings.Join(final.OutputTail, "\n")
+}
+
+// TestReconcileFull_UpdatePassRefusedByAFullQueue pins the degraded mode of the
+// two-job reconcile. The update pass is the optional half: a queue with no room
+// for it must not fail the reconcile the caller asked for, and the drop has to
+// reach the log, because the caller is handed a reconcile job and has no other
+// way to learn the update never ran.
+func TestReconcileFull_UpdatePassRefusedByAFullQueue(t *testing.T) {
+	e := newTestEngine(t, nil)
+	logs := captureLogs(e)
+	// Occupy the worker so nothing drains while the queue is filled.
+	slow, err := e.Add(t.Context(), &AddRequest{
+		Name: "slow", Source: SourceManual, Version: "1",
+		Install: `sleep 3 && ` + binStub("slow"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if a := e.queue.Active(); a != nil && a.ID == slow.ID && a.State == JobRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow job never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Leave room for exactly the reconcile job, so its update pass is the
+	// enqueue that gets refused.
+	for range jobQueueCap - 1 {
+		if _, err := e.Update(); err != nil {
+			t.Fatalf("filling the queue to cap-1: %v", err)
+		}
+	}
+
+	jv, enqueued, err := e.Reconcile(ReconcileFull)
+	if err != nil || !enqueued || jv == nil {
+		t.Fatalf("full reconcile with a nearly full queue: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	if !logs.has("update pass not enqueued") {
+		t.Errorf("the dropped update pass was not logged: %v", logs.lines)
 	}
 }
