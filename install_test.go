@@ -1,9 +1,17 @@
 package toolbelt
 
 import (
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // setgidParent returns a temp directory with S_ISGID set, having first
@@ -232,5 +240,347 @@ func TestEnsureManagedDir_refusesAFileAtTheName(t *testing.T) {
 	}
 	if err := ensureManagedDir(dir); err == nil {
 		t.Fatal("a regular file at the directory name was accepted")
+	}
+}
+
+// collector accumulates an installer's output lines for assertions.
+type collector struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (c *collector) add(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lines = append(c.lines, s)
+}
+
+func (c *collector) joined() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.lines, "\n")
+}
+
+// TestDownloadOnce_failsOnATruncatedBody pins the two places a short read can
+// be lost. io.Copy reports it and so can Close, and a download that returns nil
+// with a partial file on disk is the worst outcome available: extraction runs
+// on it, the checksum is the only thing standing between a truncated artifact
+// and a published version tree, and a definition that declares no checksum has
+// nothing standing there at all.
+func TestDownloadOnce_failsOnATruncatedBody(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Promise more than is written, then return: the connection closes
+		// mid-body and the client's read fails.
+		w.Header().Set("Content-Length", "4096")
+		_, _ = w.Write([]byte("partial"))
+	}))
+	out := &collector{}
+	in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: out.add}
+	dest := filepath.Join(t.TempDir(), "artifact")
+
+	if err := in.downloadOnce(t.Context(), srv.URL+"/tool.raw", dest); err == nil {
+		t.Fatal("downloadOnce on a truncated body = nil, want the read failure")
+	}
+	if strings.Contains(out.joined(), "downloaded") {
+		t.Errorf("a failed download reported success: %q", out.joined())
+	}
+}
+
+// TestDownloadOnce_reportsTheSizeItWrote pins the operator-facing size line. It
+// is the only report of how big an artifact was, and the figure is in megabytes.
+func TestDownloadOnce_reportsTheSizeItWrote(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("#!/bin/sh\necho tool\n"))
+	}))
+	out := &collector{}
+	in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: out.add}
+	dest := filepath.Join(t.TempDir(), "artifact")
+
+	if err := in.downloadOnce(t.Context(), srv.URL+"/tool.raw", dest); err != nil {
+		t.Fatalf("downloadOnce: %v", err)
+	}
+	if got := out.joined(); got != "downloaded artifact (0.0 MB)" {
+		t.Errorf("download report = %q, want %q", got, "downloaded artifact (0.0 MB)")
+	}
+	body, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "#!/bin/sh\necho tool\n" {
+		t.Errorf("downloaded file = %q, want the served body", body)
+	}
+}
+
+// TestBinDiff_reportsOnlyWhatTheCallbackAdded pins the ownership boundary the
+// package-manager installs rest on. The diff is what decides which bin entries
+// the engine records as ITS OWN, and uninstall deletes exactly those: counting a
+// pre-existing entry as added makes the engine claim — and later remove — a
+// binary another tool put there.
+func TestBinDiff_reportsOnlyWhatTheCallbackAdded(t *testing.T) {
+	t.Run("a_pre_existing_entry_is_not_reported", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "old"), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		in := &installer{toolsDir: dir, output: func(string) {}}
+
+		added, err := in.binDiff(dir, func() error {
+			return os.WriteFile(filepath.Join(dir, "new"), []byte("x"), 0o600)
+		})
+		if err != nil {
+			t.Fatalf("binDiff: %v", err)
+		}
+		if !slices.Equal(added, []string{"new"}) {
+			t.Errorf("binDiff added = %v, want [new]: only the entry the callback created", added)
+		}
+	})
+	t.Run("a_callback_failure_is_propagated", func(t *testing.T) {
+		dir := t.TempDir()
+		in := &installer{toolsDir: dir, output: func(string) {}}
+		want := errors.New("install refused")
+
+		added, err := in.binDiff(dir, func() error { return want })
+		if !errors.Is(err, want) {
+			t.Errorf("binDiff err = %v, want the callback's own error", err)
+		}
+		if added != nil {
+			t.Errorf("binDiff added = %v, want nil for a failed callback", added)
+		}
+	})
+}
+
+// TestLinkPMBins_OwnershipFallback pins the conventional-bin-name fallback and
+// its limit. A first install whose diff saw nothing new would otherwise own no
+// bins at all and read as uninstalled forever; but the fallback is a LAST
+// resort, so a package whose ownership is already known must not silently
+// acquire a same-named binary it never created — uninstall would delete it.
+func TestLinkPMBins_OwnershipFallback(t *testing.T) {
+	t.Run("a_first_install_that_created_nothing_new_owns_the_conventional_name", func(t *testing.T) {
+		dir := t.TempDir()
+		in := &installer{toolsDir: dir, output: func(string) {}}
+		pmBin := pmBinWith(t, in, "tsc")
+
+		owned, err := in.linkPMBins(pmBin, nil, nil, "tsc")
+		if err != nil {
+			t.Fatalf("linkPMBins: %v", err)
+		}
+		if !slices.Equal(owned, []string{"tsc"}) {
+			t.Errorf("owned = %v, want [tsc] from the conventional bin name", owned)
+		}
+	})
+	t.Run("known_ownership_does_not_absorb_the_conventional_name", func(t *testing.T) {
+		dir := t.TempDir()
+		in := &installer{toolsDir: dir, output: func(string) {}}
+		pmBin := pmBinWith(t, in, "tsc", "typescript")
+
+		owned, err := in.linkPMBins(pmBin, nil, []string{"tsc"}, "typescript")
+		if err != nil {
+			t.Fatalf("linkPMBins: %v", err)
+		}
+		if !slices.Equal(owned, []string{"tsc"}) {
+			t.Errorf("owned = %v, want [tsc] only: the package's ownership was already known", owned)
+		}
+	})
+}
+
+// pmBinWith creates the package manager's bin dir holding the named entries,
+// plus the engine bin dir the links land in, and returns the pm bin path.
+func pmBinWith(t *testing.T, in *installer, names ...string) string {
+	t.Helper()
+	pmBin := filepath.Join(in.toolsDir, "npm", "bin")
+	if err := os.MkdirAll(pmBin, managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(pmBin, n), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return pmBin
+}
+
+// TestPruneOldVersions_RetainsTheNewestOnDiskNotTheHighestName pins which
+// superseded version the retention keeps. It is the tree a bad update falls
+// back to, and the one that earned that role is the one most recently
+// installed — which is not the highest version string: a deliberate downgrade
+// installs an older number last, and keeping the higher name instead would
+// discard the version the operator just chose.
+func TestPruneOldVersions_RetainsTheNewestOnDiskNotTheHighestName(t *testing.T) {
+	dir := t.TempDir()
+	out := &collector{}
+	in := &installer{toolsDir: dir, output: out.add}
+	root := filepath.Join(in.optDir(), "tool")
+	// v1.0.0 was installed most recently despite the lower version string.
+	ages := map[string]time.Duration{
+		"v3.0.0": 0, "v1.0.0": time.Hour, "v2.0.0": 48 * time.Hour,
+	}
+	for name, age := range ages {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(p, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	in.pruneOldVersions("tool", "v3.0.0", 1)
+
+	if _, err := os.Stat(filepath.Join(root, "v1.0.0")); err != nil {
+		t.Errorf("the most recently installed previous version was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "v2.0.0")); !os.IsNotExist(err) {
+		t.Errorf("stat of the older previous version = %v, want it pruned", err)
+	}
+	if got := out.joined(); got != "pruned old version tool/v2.0.0" {
+		t.Errorf("prune report = %q, want %q", got, "pruned old version tool/v2.0.0")
+	}
+}
+
+// TestRunShell_streamsEveryLineOfCommandOutput pins the install log. The
+// command's own output is the only diagnosis an operator gets for a manual
+// install, and the last line of a failing script is routinely the one without a
+// trailing newline — a shell's `printf` of an error, or output cut off when the
+// process died.
+func TestRunShell_streamsEveryLineOfCommandOutput(t *testing.T) {
+	out := &collector{}
+	in := &installer{toolsDir: t.TempDir(), output: out.add}
+
+	err := in.runShell(t.Context(), `printf 'first line\nlast line without a newline'`,
+		"1.0.0", filepath.Join(in.optDir(), "tool"))
+	if err != nil {
+		t.Fatalf("runShell: %v", err)
+	}
+	if got := out.joined(); got != "first line\nlast line without a newline" {
+		t.Errorf("streamed output = %q, want both lines", got)
+	}
+}
+
+// TestRunShell_namesTheRunningArchitecture pins the ARCH_* variables an install
+// command interpolates into a download URL. Getting the architecture backwards
+// downloads a working binary for the wrong machine, which installs cleanly and
+// fails at exec.
+func TestRunShell_namesTheRunningArchitecture(t *testing.T) {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		t.Skipf("the ARCH_* variables spell only amd64 and arm64; GOARCH here is %s", runtime.GOARCH)
+	}
+	out := &collector{}
+	in := &installer{toolsDir: t.TempDir(), output: out.add}
+
+	err := in.runShell(t.Context(), `printf '%s\n' "$ARCH_AMD64_OR_ARM64"`,
+		"1.0.0", filepath.Join(in.optDir(), "tool"))
+	if err != nil {
+		t.Fatalf("runShell: %v", err)
+	}
+	if got := out.joined(); got != runtime.GOARCH {
+		t.Errorf("ARCH_AMD64_OR_ARM64 = %q, want %q", got, runtime.GOARCH)
+	}
+}
+
+// TestUninstall_ReportsWhatItRemoved pins the uninstall's account of itself.
+// Every line here names something that is now gone, and the closing line is
+// what says the removal completed rather than stopped halfway.
+func TestUninstall_ReportsWhatItRemoved(t *testing.T) {
+	out := &collector{}
+	in := &installer{toolsDir: t.TempDir(), output: out.add}
+	if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(in.optDir(), "tool", "1.0.0", "tool")
+	if err := os.MkdirAll(filepath.Dir(target), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := in.linkBin("tool", target); err != nil {
+		t.Fatal(err)
+	}
+
+	st := &ToolStatus{Bins: []string{"tool"}}
+	if err := in.uninstall(t.Context(), "tool", &Tool{Source: SourceManual}, st); err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if got := out.joined(); got != "removed tool\nuninstalled tool" {
+		t.Errorf("uninstall report = %q, want the removed bin and the completion line", got)
+	}
+	if _, err := os.Lstat(filepath.Join(in.binDir(), "tool")); !os.IsNotExist(err) {
+		t.Errorf("lstat of the PATH entry = %v, want it removed", err)
+	}
+	if _, err := os.Stat(filepath.Join(in.optDir(), "tool")); !os.IsNotExist(err) {
+		t.Errorf("stat of the opt tree = %v, want it removed", err)
+	}
+}
+
+// TestUninstall_ToleratesButReportsAFailedUninstallCommand pins the deliberate
+// asymmetry: a manual uninstall command is upstream's cleanup, so its failure
+// must not block the footprint removal the engine is actually responsible for —
+// but it cannot be silent either, because the residue it left behind is now
+// nobody's and the log line is the only record that it exists.
+func TestUninstall_ToleratesButReportsAFailedUninstallCommand(t *testing.T) {
+	out := &collector{}
+	in := &installer{toolsDir: t.TempDir(), output: out.add}
+	if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &Tool{Source: SourceManual, Version: "1.0.0", Uninstall: "exit 1"}
+	if err := in.uninstall(t.Context(), "tool", tool, &ToolStatus{}); err != nil {
+		t.Fatalf("uninstall = %v, want a failing uninstall command tolerated", err)
+	}
+	if !strings.Contains(out.joined(), "uninstall command failed (continuing)") {
+		t.Errorf("uninstall report = %q, want the failed command reported", out.joined())
+	}
+	if !strings.Contains(out.joined(), "uninstalled tool") {
+		t.Errorf("uninstall report = %q, want the removal to have completed anyway", out.joined())
+	}
+}
+
+// TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails pins the
+// same-version reinstall window. The publish renames the live tree aside before
+// moving the new one in, so between those two renames the tool exists only under
+// the backup name: a commit barrier that fails there and does NOT put it back
+// leaves the version the state file still names missing from disk entirely, and
+// the fallback the retention policy kept is not the version that was running.
+func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *testing.T) {
+	base := t.TempDir()
+	in := &installer{toolsDir: filepath.Join(base, "tools"), output: func(string) {}}
+	spec := &InstallSpec{Format: formatRaw}
+	first := filepath.Join(base, "first-download")
+	if err := os.WriteFile(first, []byte("#!/bin/sh\necho live\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	versDir, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, first)
+	if err != nil {
+		t.Fatalf("baseline publish: %v", err)
+	}
+
+	// Fail only the barrier that commits the publishing rename, so the
+	// staging flush before it still succeeds.
+	swapBarriers(t, nil, func(p string) error {
+		if filepath.Base(p) == "tool" && filepath.Base(filepath.Dir(p)) == "opt" {
+			return enospc(p)
+		}
+		return syncPath(p)
+	}, nil)
+	second := filepath.Join(base, "second-download")
+	if err := os.WriteFile(second, []byte("#!/bin/sh\necho replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, second)
+	if err == nil || !strings.Contains(err.Error(), "commit install") {
+		t.Fatalf("reinstall = %v, want the commit barrier failure", err)
+	}
+	body, rerr := os.ReadFile(filepath.Join(versDir, "tool"))
+	if rerr != nil {
+		t.Fatalf("the live version tree was not restored: %v", rerr)
+	}
+	if string(body) != "#!/bin/sh\necho live\n" {
+		t.Errorf("restored tree holds %q, want the version that was live", body)
 	}
 }
