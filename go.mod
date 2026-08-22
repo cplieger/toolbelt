@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/cplieger/atomicfile/v3 v3.0.0
-	github.com/cplieger/httpx/v5 v5.0.1
+	github.com/cplieger/httpx/v5 v5.0.2
 	github.com/cplieger/keyenc v1.0.6
 	github.com/cplieger/pathinside/v2 v2.0.0
 	github.com/cplieger/scheduler/v4 v4.0.0
