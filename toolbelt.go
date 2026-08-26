@@ -53,6 +53,7 @@ const (
 	SourcePip    = "pip"    // pip:package (installed via uv)
 	SourceCargo  = "cargo"  // cargo:crate
 	SourceGo     = "go"     // go:module/path
+	SourceApt    = "apt"    // apt:package — Debian package, container layer
 	SourceManual = "manual" // user-provided install command
 )
 
@@ -153,7 +154,12 @@ type Engine struct {
 	// job. Readers take a snapshot via cat() and never see a partial
 	// swap; a snapshot taken before a swap stays internally consistent
 	// for the duration of that operation.
-	catalog         atomic.Pointer[Catalog]
+	catalog atomic.Pointer[Catalog]
+	// aptIdx is the Debian package list: the apt search corpus and the
+	// literal-name oracle the install gate consults. Lazily refreshed by
+	// the first search that asks for apt results, never at boot (see
+	// aptIndex).
+	aptIdx          *aptIndex
 	refresh         *CatalogRefresh
 	stopRefresh     context.CancelFunc
 	client          *http.Client
@@ -253,7 +259,6 @@ func New(cfg *Config) (*Engine, error) {
 		refresh:         cfg.Refresh,
 		catalogOverlays: cfg.CatalogOverlays,
 		client:          client,
-		versions:        newVersionResolver(client),
 		log:             log,
 		configDir:       cfg.ConfigDir,
 		toolsDir:        cfg.ToolsDir,
@@ -262,7 +267,13 @@ func New(cfg *Config) (*Engine, error) {
 	}
 	e.initCatalog(cfg)
 	e.queue = newJobQueue(cfg.OnJobChanged, cfg.OnJobOutput, log, e.executeJob)
-	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, log: log, output: func(string) {}}
+	// One index, shared by the three things that need a package list: the
+	// search corpus, the installer's literal-name oracle, and the version
+	// resolver's apt-cache read. Constructed before both so neither can
+	// hold a nil one.
+	e.aptIdx = newAptIndex(log)
+	e.versions = newVersionResolver(client, e.aptIdx)
+	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, log: log, output: func(string) {}, aptIdx: e.aptIdx}
 	// ensureManagedDir, not MkdirAll: this is where bin/ is normally BORN,
 	// so it is the only place the mode the filesystem stored for it can
 	// still be certified. linkBin re-establishes the same directory later

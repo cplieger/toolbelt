@@ -35,13 +35,19 @@ type versionResolver struct {
 	ghToken   string
 	mu        sync.Mutex
 	ghTokenMu sync.Mutex
+	// aptIdx guarantees a package index exists before apt-cache is asked
+	// anything. Both consumer images ship with /var/lib/apt/lists empty,
+	// and apt-cache answers "no Candidate line" rather than erroring on a
+	// missing index, so without this a first-ever apt add fails while
+	// looking like a broken package name.
+	aptIdx *aptIndex
 }
 
 // ghTokenRetry is how long an empty gh-token probe result is trusted.
 const ghTokenRetry = time.Minute
 
-func newVersionResolver(client *http.Client) *versionResolver {
-	return &versionResolver{client: client, cache: map[string]string{}}
+func newVersionResolver(client *http.Client, aptIdx *aptIndex) *versionResolver {
+	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx}
 }
 
 // Cached returns the cached latest version for a source, if any.
@@ -81,9 +87,37 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 		return v.latestCrate(ctx, ref)
 	case SourceGo:
 		return v.latestGoModule(ctx, ref)
+	case SourceApt:
+		return v.latestApt(ctx, ref)
 	default:
 		return "", fmt.Errorf("no version source for %q", source)
 	}
+}
+
+// latestApt reports the version apt would install: the distro's current
+// candidate. An apt package has no upstream version of its own to track,
+// so this is both the resolved version and the update signal, and it can
+// go DOWN when Debian reverts a package.
+func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, error) {
+	if !AptAvailable() {
+		return "", ErrAptUnavailable
+	}
+	// The oracle runs FIRST, because apt-cache policy expands a pattern
+	// exactly as apt-get install does: asked about "jq." it answers with a
+	// version belonging to whichever package matched, and this function
+	// would record it as the version of a package the user never named.
+	if err := v.aptIdx.knownName(ctx, pkg); err != nil {
+		return "", err
+	}
+	out, err := exec.CommandContext(ctx, "apt-cache", "policy", "--", pkg).Output()
+	if err != nil {
+		return "", fmt.Errorf("apt-cache policy %s: %w", pkg, err)
+	}
+	cand, err := aptCandidateFrom(string(out))
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", pkg, err)
+	}
+	return cand, nil
 }
 
 // latestAqua resolves a GitHub-hosted package's latest version: the
