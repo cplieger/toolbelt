@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -9,10 +10,12 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -41,6 +44,10 @@ type installer struct {
 	// Nil, or not yet loaded, degrades to the expansion-character
 	// fallback rather than to no check at all.
 	aptIdx *aptIndex
+	// tokens authenticates the release source's asset listing against the
+	// GitHub API, the same credential the version resolver uses. Nil means
+	// anonymous, which works until the 60/hour ceiling.
+	tokens *githubTokenCache
 }
 
 // Checksum outcomes recorded on ToolStatus.Checksum.
@@ -237,6 +244,8 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 		out.bins, err = in.installCargo(ctx, ref, t.Version)
 	case SourceGo:
 		out.bins, err = in.installGo(ctx, ref, t.Version)
+	case SourceRelease:
+		out.bins, out.checksum, err = in.installRelease(ctx, name, ref, t.Version, t.Release)
 	case SourceApt:
 		out.apt = true
 		err = in.installApt(ctx, ref)
@@ -259,14 +268,15 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 // declared files into bin. It returns the linked bins and the
 // verification outcome; pruning superseded versions is the caller's,
 // deliberately deferred until the new version's state record is durable.
-func (in *installer) installAqua(ctx context.Context, name, version string, aq *AquaPackage) (bins []string, checksum string, err error) {
-	if aq == nil {
-		return nil, "", fmt.Errorf("no aqua definition for %s (catalog missing?)", name)
-	}
-	spec, err := aq.ResolveSpec(version)
-	if err != nil {
-		return nil, "", err
-	}
+// installFromSpec runs the download, verify, extract and link sequence
+// over a resolved spec.
+//
+// Extracted from installAqua so the release source runs the same code
+// rather than a copy of it: everything a release install does after
+// choosing an asset is what already installs the aqua-backed majority,
+// and a second implementation of the verify-then-swap ordering is exactly
+// the kind of divergence that ends with one path skipping a check.
+func (in *installer) installFromSpec(ctx context.Context, name, version string, spec *InstallSpec) (bins []string, checksum string, err error) {
 	in.logf("downloading %s", spec.URL)
 
 	tmp, err := os.MkdirTemp(in.toolsDir, ".dl-"+name+"-*")
@@ -288,12 +298,23 @@ func (in *installer) installAqua(ctx context.Context, name, version string, aq *
 	if err != nil {
 		return nil, "", err
 	}
-	bins, err = in.linkDeclaredFiles(versDir, spec.Files)
+	bins, err = in.linkDeclaredFiles(versDir, spec.Files, spec.SearchFiles)
 	if err != nil {
 		return nil, "", err
 	}
 	in.logf("installed %s %s (%s)", name, version, strings.Join(bins, ", "))
 	return bins, checksum, nil
+}
+
+func (in *installer) installAqua(ctx context.Context, name, version string, aq *AquaPackage) (bins []string, checksum string, err error) {
+	if aq == nil {
+		return nil, "", fmt.Errorf("no aqua definition for %s (catalog missing?)", name)
+	}
+	spec, err := aq.ResolveSpec(version)
+	if err != nil {
+		return nil, "", err
+	}
+	return in.installFromSpec(ctx, name, version, spec)
 }
 
 // verifyArtifact enforces the checksum invariant before a byte of the
@@ -415,8 +436,10 @@ func restoreBackup(versDir, backup string) {
 }
 
 // linkDeclaredFiles resolves and symlinks each declared binary from the
-// install dir into the bin dir, returning the linked bin names.
-func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]string, error) {
+// install dir into the bin dir, returning the linked bin names. When
+// search is set the declared paths are guesses and a miss falls back to
+// finding the file in the tree (see InstallSpec.SearchFiles).
+func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search bool) ([]string, error) {
 	// The install dir IS the confinement boundary for every declared
 	// file, so the Root is constructed once here rather than at each
 	// check: pathinside/v2 buys its misuse-resistance at the
@@ -431,6 +454,19 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]stri
 		target, err := safeJoin(installRoot, src)
 		if err != nil {
 			return nil, err
+		}
+		if search {
+			found, ferr := searchInstallTree(versDir, target, path.Base(src))
+			if ferr != nil {
+				// One name of a guessed set going missing is upstream's
+				// business, not a failure of this install: a registry
+				// list that outran the release still installs everything
+				// the artifact does contain. The empty check below is
+				// what keeps that from degrading into a silent no-op.
+				in.logf("skipping %s: %v", f.Name, ferr)
+				continue
+			}
+			target = found
 		}
 		// Resolve symlinks BEFORE stat/chmod/link: tar and unzip
 		// sanitize .. and absolute member paths (fail-closed on the
@@ -472,7 +508,136 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile) ([]stri
 		}
 		bins = append(bins, f.Name)
 	}
+	if len(bins) == 0 {
+		// Reachable only through the search path, where a miss is
+		// tolerated per name. An install that published nothing is a
+		// failed install however many names it skipped, or the tool
+		// would read as present with no way to run it.
+		return nil, fmt.Errorf("the artifact contains none of the %d declared executables", len(files))
+	}
 	return bins, nil
+}
+
+// searchInstallTree resolves a GUESSED path: it returns guess unchanged
+// when a file is there, and otherwise finds the executable named base
+// inside root — or, failing that, the artifact's only executable.
+//
+// A release publishes no manifest, so the guess is the tool's own name at
+// the archive root and upstream's build decides whether that is true.
+// Searching is what makes a nested layout installable at all
+// (pandoc-3.10.2/bin/pandoc) and it stays a FALLBACK, so a layout that
+// matches the guess is never re-litigated by a walk.
+//
+// The ranking is a total order, because an install that picks a different
+// file on a re-run is worse than one that fails: shallowest first (the
+// binary sits above its resources, never below them), then a bin/ parent,
+// then lexicographic. Foreign-OS paths are dropped first, and only when
+// that leaves something — an archive carrying both a darwin/ and a linux/
+// subtree must not resolve to the darwin build, but a path that merely
+// reads like one must not lose the only candidate either.
+func searchInstallTree(root, guess, base string) (string, error) {
+	// A regular file, not merely something at the name: pandoc's archive
+	// carries a share/pandoc DATA directory, and a tool whose resource
+	// tree is named after it would otherwise resolve to the directory and
+	// fail later as a mode error with no hint of what happened. Stat
+	// rather than Lstat so a symlink to a real binary takes the fast path;
+	// the caller's containment check is what judges where it points.
+	if fi, err := os.Stat(guess); err == nil && fi.Mode().IsRegular() {
+		return guess, nil
+	}
+	named, executable, err := walkInstallTree(root, base)
+	if err != nil {
+		return "", err
+	}
+	cands := named
+	if len(cands) == 0 {
+		// Nothing carries the name. An archive holding exactly ONE
+		// executable has no ambiguity to resolve, and it is a common shape
+		// precisely because the packager expected the consumer to rename
+		// it: SwiftFormat's linux zip contains one file, `swiftformat_linux`,
+		// named after the ASSET rather than the tool. Two or more and this
+		// abstains, because guessing which of several binaries the caller
+		// meant is how the wrong tool ends up on PATH.
+		if len(executable) != 1 {
+			return "", fmt.Errorf("%s is not in the artifact: no file named %s was extracted, "+
+				"and it holds %d executables rather than one", base, base, len(executable))
+		}
+		cands = executable
+	}
+	if kept := rejectForeignOSPaths(root, cands); len(kept) > 0 {
+		cands = kept
+	}
+	slices.SortFunc(cands, func(a, b string) int {
+		if c := cmp.Compare(pathDepth(a), pathDepth(b)); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(binDirRank(b), binDirRank(a)); c != 0 {
+			return c
+		}
+		return cmp.Compare(a, b)
+	})
+	return cands[0], nil
+}
+
+// walkInstallTree returns the regular files under root named base, and
+// separately every regular file carrying an execute bit. tar and unzip
+// both preserve archive modes, so the executable set is upstream's own
+// statement about which members are programs.
+func walkInstallTree(root, base string) (named, executable []string, err error) {
+	// WalkDir does not follow symlinks, so a link planted by the archive
+	// cannot walk the search out of the tree. The candidate still goes
+	// through the caller's EvalSymlinks and containment checks.
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if d.Name() == base {
+			named = append(named, p)
+		}
+		fi, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if fi.Mode().Perm()&0o111 != 0 {
+			executable = append(executable, p)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("search the install tree for %s: %w", base, err)
+	}
+	return named, executable, nil
+}
+
+// rejectForeignOSPaths drops candidates whose path inside root names an
+// operating system that is not this one.
+func rejectForeignOSPaths(root string, cands []string) []string {
+	out := make([]string, 0, len(cands))
+	for _, p := range cands {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			rel = p
+		}
+		if !hasAnyToken(rel, releaseForeignOS) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// pathDepth counts a path's separators, the sort's primary key.
+func pathDepth(p string) int { return strings.Count(p, string(filepath.Separator)) }
+
+// binDirRank scores a candidate whose parent directory is bin, the
+// convention a nested archive follows when it has one.
+func binDirRank(p string) int {
+	if filepath.Base(filepath.Dir(p)) == "bin" {
+		return 1
+	}
+	return 0
 }
 
 // download fetches url to dest with a size cap, retrying transient

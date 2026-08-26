@@ -2,7 +2,6 @@ package toolbelt
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 )
 
@@ -75,17 +74,44 @@ var releaseForeignOS = []string{
 }
 
 // releaseArchTokens are the spellings of each architecture, widest
-// first. aqua's own replacement table is the source for these.
+// first. aqua's own replacement table is the source for these, plus the
+// underscore form protobuf's release tooling emits (`aarch_64`).
+//
+// `arm8` is deliberately NOT here even though it means ARMv8: zhanhb's
+// cidr-merger publishes arm5, arm6, arm7, arm8 AND arm64 for linux, and
+// admitting the rarer spelling as a match only moves the tie-break onto
+// the shorter of two equally correct names. Left unlisted it stays
+// NEUTRAL, so it remains eligible for a release that ships nothing else.
 var releaseArchTokens = map[string][]string{
 	"amd64": {"x86_64", "amd64", "x64", "64bit", "linux64"},
-	"arm64": {"aarch64", "arm64", "armv8"},
+	"arm64": {"aarch64", "aarch_64", "arm64", "armv8"},
 }
 
 // releaseForeignArch are architecture tokens that rule an asset out for
 // the host, keyed by the host's own GOARCH.
+//
+// The long tail is derived from the corpus, not guessed, and it is
+// load-bearing for a reason worth stating: an unrecognised spelling makes
+// an asset NEUTRAL rather than rejected, and a neutral asset wins whenever
+// nothing matches the host outright. protobuf-javascript publishes
+// `linux-aarch_64` and `linux-x86_32`; before `aarch_64` was a known arm64
+// spelling, an arm64 host matched neither, fell through to neutral, and
+// selected the 32-bit x86 build.
 var releaseForeignArch = map[string][]string{
-	"amd64": {"aarch64", "arm64", "armv7", "armv6", "armhf", "arm", "i386", "i686", "386", "riscv64", "ppc64le", "s390x", "mips", "loong64"},
-	"arm64": {"x86_64", "amd64", "x64", "armv7", "armv6", "armhf", "i386", "i686", "386", "riscv64", "ppc64le", "s390x", "mips", "loong64"},
+	"amd64": {
+		"aarch64", "aarch_64", "arm64", "armv8", "arm8", "armv7", "armv7a", "armv7hl", "armv6",
+		"armv5", "arm7", "arm6", "arm5", "armeabi", "armhf", "arm",
+		"i386", "i686", "386", "x86_32",
+		"riscv64", "riscv64gc", "ppc64le", "ppcle_64", "s390x", "s390_64",
+		"mips", "mips64", "mips64le", "mipsle", "loong64", "loongarch64",
+	},
+	"arm64": {
+		"x86_64", "amd64", "x64", "x86_32",
+		"armv7", "armv7a", "armv7hl", "armv6", "armv5", "arm7", "arm6", "arm5", "armeabi", "armhf", "arm",
+		"i386", "i686", "386",
+		"riscv64", "riscv64gc", "ppc64le", "ppcle_64", "s390x", "s390_64",
+		"mips", "mips64", "mips64le", "mipsle", "loong64", "loongarch64",
+	},
 }
 
 // releaseChecksumNames are the manifest file names a release publishes a
@@ -112,7 +138,8 @@ type assetChoice struct {
 }
 
 // chooseReleaseAsset picks one asset for goarch out of a release's file
-// names.
+// names, matching against every name the tool is known by: its registry
+// name first, then the executables it publishes (see releasePickBest).
 //
 // The ORDER is the part that was measured wrong twice, so it is spelled
 // out. Architecture must NOT come first: testing it before the
@@ -122,6 +149,11 @@ type assetChoice struct {
 // ubi orders it extension, then single candidate, then OS, then
 // architecture, and that recovers them.
 func chooseReleaseAsset(assets []string, tool, goarch string) (assetChoice, error) {
+	return chooseReleaseAssetNamed(assets, []string{tool}, goarch)
+}
+
+// chooseReleaseAssetNamed is chooseReleaseAsset with the full name set.
+func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice, error) {
 	if len(assets) == 0 {
 		return assetChoice{}, fmt.Errorf("the release publishes no assets")
 	}
@@ -163,11 +195,20 @@ func chooseReleaseAsset(assets []string, tool, goarch string) (assetChoice, erro
 		return assetChoice{}, fmt.Errorf("no asset for linux/%s among %s", goarch, strings.Join(cands, ", "))
 	}
 	cands = narrowed
+	// gnu-over-musl runs FIRST. Both narrow among assets that are all
+	// valid for this host, and the OS preference is the blunter of the two:
+	// facebook/dotslash publishes `dotslash-linux-musl.x86_64.tar.gz`
+	// beside `dotslash-ubuntu-22.04.x86_64.tar.gz`, and only the first
+	// names linux, so preferring the OS token first would hand the musl
+	// build the win and quietly reverse the gnu preference.
 	if len(cands) > 1 {
 		cands = releasePreferGnu(cands)
 	}
+	if len(cands) > 1 {
+		cands = releasePreferNativeOS(cands)
+	}
 
-	choice := assetChoice{Asset: releasePickBest(cands, tool)}
+	choice := assetChoice{Asset: releasePickBest(cands, names)}
 	choice.ChecksumAsset, choice.ChecksumIsManifest = releaseChecksumFor(assets, choice.Asset)
 	return choice, nil
 }
@@ -298,6 +339,34 @@ func releasePreferGnu(cands []string) []string {
 	return cands
 }
 
+// releasePreferNativeOS narrows to the assets that name THIS OS, when any
+// do.
+//
+// Foreign-OS rejection above cannot make this call: it removes the assets
+// naming somebody else's OS and leaves both the ones naming linux and the
+// ones naming nothing. Between those two, a name that says linux is a
+// build for linux, while a name that says nothing may be a source archive
+// — ethereum/solidity publishes solc-static-linux beside a
+// solidity_<version>.tar.gz of the sources, and the source archive is the
+// one whose stem matches the tool name.
+//
+// Abstains when nothing names the OS, which is the common case and the
+// reason it is a preference rather than a filter: most releases name the
+// platform in the architecture token alone, or not at all (yt-dlp ships
+// exactly `yt-dlp`).
+func releasePreferNativeOS(cands []string) []string {
+	var native []string
+	for _, a := range cands {
+		if hasToken(a, "linux") {
+			native = append(native, a)
+		}
+	}
+	if len(native) > 0 {
+		return native
+	}
+	return cands
+}
+
 // releasePickBest breaks a remaining tie.
 //
 // Name similarity first, then length. Length alone was measured picking
@@ -305,17 +374,36 @@ func releasePreferGnu(cands []string) []string {
 // restatectl over restate-cli, and a legacy gam build over the glibc2.39
 // one. Preferring the asset whose stem best matches the tool name fixes
 // all three, and length remains the tie-break under it.
-func releasePickBest(cands []string, tool string) string {
+//
+// Similarity is scored against EVERY name the tool is known by, best
+// wins, and the ORDER of that list breaks a tie. A registry name is a
+// catalog label and the asset is named after what upstream built:
+// `transifex` ships `tx-linux-amd64.tar.gz`, `graphite` ships `gt-linux`,
+// and scoring only the label gives those assets nothing to match. Both
+// directions occur in one corpus — babashka's binary is `bb` and its asset
+// is `babashka-…` — so neither name can be the only one scored.
+//
+// The label ranking first is what keeps rancher/k3k's two binaries apart:
+// the tool is `k3kcli`, whose executable the registry calls `k3k`, and the
+// release publishes `k3kcli-linux-amd64` (the CLI) beside
+// `k3k-linux-amd64` (the server). Both score 3, one on the label and one
+// on the executable name, and only the label's precedence picks the CLI
+// the entry is actually for.
+func releasePickBest(cands, names []string) string {
 	best := cands[0]
-	bestScore := releaseNameAffinity(best, tool)
+	bestScore, bestName := releaseNameAffinity(best, names)
 	for _, a := range cands[1:] {
-		score := releaseNameAffinity(a, tool)
+		score, nameIdx := releaseNameAffinity(a, names)
 		switch {
 		case score > bestScore:
-			best, bestScore = a, score
-		case score == bestScore && len(a) < len(best):
+			best, bestScore, bestName = a, score, nameIdx
+		case score < bestScore:
+		case nameIdx < bestName:
+			best, bestName = a, nameIdx
+		case nameIdx > bestName:
+		case len(a) < len(best):
 			best = a
-		case score == bestScore && len(a) == len(best) && a < best:
+		case len(a) == len(best) && a < best:
 			best = a
 		}
 	}
@@ -323,13 +411,26 @@ func releasePickBest(cands []string, tool string) string {
 }
 
 // releaseNameAffinity scores how much an asset name looks like it IS the
-// named tool rather than something shipped beside it.
-func releaseNameAffinity(asset, tool string) int {
-	if tool == "" {
+// named tool rather than something shipped beside it, taking the best
+// score over every name the tool answers to. The second result is the
+// index of the name that produced it, so a caller can prefer an earlier
+// name at equal score.
+func releaseNameAffinity(asset string, names []string) (score, nameIdx int) {
+	stem := strings.ToLower(releaseStem(asset))
+	nameIdx = len(names)
+	for i, name := range names {
+		if s := stemAffinity(stem, strings.ToLower(name)); s > score {
+			score, nameIdx = s, i
+		}
+	}
+	return score, nameIdx
+}
+
+// stemAffinity scores one asset stem against one lowercased name.
+func stemAffinity(stem, t string) int {
+	if t == "" {
 		return 0
 	}
-	stem := strings.ToLower(releaseStem(asset))
-	t := strings.ToLower(tool)
 	switch {
 	case stem == t:
 		return 4
@@ -445,6 +546,105 @@ func releaseBoundary(s string, i int) bool {
 	return false
 }
 
-// hostArch is the architecture the matcher selects for. A variable so a
-// test can assert both without a cross-compiled binary.
-var hostArch = runtime.GOARCH
+// ReleaseHints are the install hints a registry entry carries for a
+// release-backed tool, compiled into the catalog rather than guessed.
+//
+// 26 of the affected registry entries ship at least one hint. These are
+// the four that state something the heuristic cannot derive from a file
+// name: which of several binaries in one repository is this tool, and
+// where the executable sits inside the artifact.
+//
+// The registry's `asset_pattern` is deliberately NOT among them, and that
+// is a least-mechanism call rather than an omission. Its 8 users write
+// three different dialects (Tera `{{ arch(x64='amd64') }}`, mise's own
+// `{amd64_arch}` braces, and shell globs), one of them carries a Tera
+// `{% if %}` block, and consuming any of it means shipping a template
+// evaluator this library declined for the 10 `http:` entries. Measured
+// against every one of those repositories' real release file lists, the
+// heuristic in release.go already picks the right asset for all 8, so the
+// evaluator would buy nothing.
+type ReleaseHints struct {
+	// Matching narrows the candidate set by substring BEFORE the heuristic
+	// runs. It is the one selection hint that matters: the restate
+	// repository publishes restate-server, restate-cli and restatectl, and
+	// these are three separate tools whose assets no file-name heuristic
+	// can attribute.
+	Matching string `json:"matching,omitempty"`
+	// Bins are the names this tool publishes on PATH, carried only when
+	// they are not just the tool's own name — 40 of the 158 release-backed
+	// entries, and the single biggest correctness item in this struct. A
+	// release ships whatever upstream's build produced: `qdns` is the
+	// registry's name for `natesales/q`, whose binary is `q`, and `unison`
+	// ships `ucm`. Without this the install links a name the artifact does
+	// not contain.
+	//
+	// A set rather than one name because 14 of those 40 publish several
+	// (kotlin ships six kotlinc variants). An absent one is skipped rather
+	// than fatal: the registry and the release move independently, so a
+	// list that has gone stale must still install what IS there.
+	Bins []string `json:"bins,omitempty"`
+	// Bin and BinPath name the executable INSIDE the artifact: Bin a file
+	// name that differs from the published one, BinPath a directory to
+	// look in. helm-diff is the case both exist for — the archive holds
+	// `diff/bin/diff` and the tool is published as `helm-diff`.
+	Bin     string `json:"bin,omitempty"`
+	BinPath string `json:"bin_path,omitempty"`
+}
+
+// The registry's `rename_exe` is deliberately NOT among these, on the same
+// least-mechanism grounds as asset_pattern and with the same measurement
+// behind it. It names the name to PUBLISH, and across all 7 entries that
+// carry one it states something the publish set already says: 4 repeat the
+// tool's own name (swiftformat, tanzu, yt-dlp, helm-diff) and 3 repeat an
+// entry in Bins (aws-amplify, oh-my-pi, podman). An earlier draft read it
+// as the name to look for inside the artifact, which is the opposite of
+// what it means, and that mistake is what sent the swiftformat install
+// looking for a file called `swiftformat` in an archive holding
+// `swiftformat_linux`. The sole-executable fallback in searchInstallTree
+// is what actually resolves that shape, for every release rather than the
+// 7 the registry annotated.
+
+// IsZero reports whether the hints carry nothing, so a catalog entry can
+// omit the object entirely rather than emitting an empty one.
+//
+// Exported because the catalog COMPILER is the only caller: it decides per
+// entry whether there is a hint worth writing, and duplicating the field
+// list there is how a fifth hint gets added to one side and not the other.
+func (h *ReleaseHints) IsZero() bool {
+	return h == nil || (h.Matching == "" && h.Bin == "" && h.BinPath == "" && len(h.Bins) == 0)
+}
+
+// chooseReleaseAssetWithHints applies the selection hint before falling
+// back to the heuristic, and hands the heuristic every name the tool
+// answers to.
+//
+// A hint that narrows to something is authoritative: it is upstream's own
+// statement about its own release. A hint that matches NOTHING is ignored
+// rather than fatal, because the registry and the release move
+// independently, and a hint that stopped matching is exactly the case the
+// heuristic exists for.
+func chooseReleaseAssetWithHints(assets []string, tool, goarch string, hints *ReleaseHints) (assetChoice, error) {
+	names := []string{tool}
+	if hints != nil {
+		if hints.Matching != "" {
+			var kept []string
+			want := strings.ToLower(hints.Matching)
+			for _, a := range assets {
+				if strings.Contains(strings.ToLower(a), want) {
+					kept = append(kept, a)
+				}
+			}
+			if len(kept) > 0 {
+				assets = kept
+			}
+		}
+		// The registry name goes FIRST and the binaries after it, so a
+		// release naming both (babashka ships `babashka-<v>-linux-amd64`
+		// and the binary `bb`) keeps the label's own score.
+		names = append(names, hints.Bins...)
+		if hints.Bin != "" {
+			names = append(names, hints.Bin)
+		}
+	}
+	return chooseReleaseAssetNamed(assets, names, goarch)
+}

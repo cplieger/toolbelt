@@ -50,7 +50,7 @@ func newTestEngineClient(t *testing.T, cat *Catalog, client *http.Client, seed *
 	e := &Engine{
 		store:     st,
 		client:    client,
-		versions:  newVersionResolver(client, nil),
+		versions:  newTestVersionResolver(client),
 		log:       slog.Default(),
 		configDir: dir,
 		toolsDir:  toolsDir,
@@ -2280,4 +2280,63 @@ func TestReconcileFull_UpdatePassRefusedByAFullQueue(t *testing.T) {
 	if !logs.has("update pass not enqueued") {
 		t.Errorf("the dropped update pass was not logged: %v", logs.lines)
 	}
+}
+
+
+// TestToolInfo_CarriesChecksumOnlyWhileInstalled pins the fact behind the
+// client's "no checksum" badge. The badge must not be derived from the
+// source kind: 252 of the catalog's aqua entries declare no checksum
+// while 402 declare one, so only the recorded outcome of the install
+// that actually ran answers the question.
+//
+// The second half is the reason the row gates on Installed. A wiped
+// tools volume leaves tools-state.json behind — nothing in the delete
+// path ran — so a row that reported the surviving "verified" would be
+// vouching for bytes that are gone.
+func TestToolInfo_CarriesChecksumOnlyWhileInstalled(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "hello", nil)
+	// A manual source has no artifact to hash, so the install recorded
+	// nothing; write the outcome an aqua or release install would have.
+	if err := e.store.setToolStatus("hello", func(s *ToolStatus) {
+		s.Checksum = checksumVerified
+	}); err != nil {
+		t.Fatal(err)
+	}
+	row := inventoryRow(t, e, "hello")
+	if !row.Installed {
+		t.Fatalf("Inventory row for hello = %+v, want an installed row", row)
+	}
+	if row.Checksum != checksumVerified {
+		t.Errorf("Inventory row for hello: Checksum = %q, want %q", row.Checksum, checksumVerified)
+	}
+
+	if err := os.Remove(filepath.Join(e.toolsDir, "bin", "hello")); err != nil {
+		t.Fatal(err)
+	}
+	e.probes.forget("hello")
+	row = inventoryRow(t, e, "hello")
+	if row.Installed {
+		t.Fatalf("Inventory row for hello = %+v, want an uninstalled row after the bin was removed", row)
+	}
+	if row.Checksum != "" {
+		t.Errorf("Inventory row for hello with the binary gone: Checksum = %q, want %q", row.Checksum, "")
+	}
+}
+
+// inventoryRow returns the named inventory row, failing the test when it
+// is absent.
+func inventoryRow(t *testing.T, e *Engine, name string) ToolInfo {
+	t.Helper()
+	inv, err := e.Inventory()
+	if err != nil {
+		t.Fatalf("Setup: Inventory() = %v", err)
+	}
+	for _, row := range inv.Tools {
+		if row.Name == name {
+			return row
+		}
+	}
+	t.Fatalf("Setup: Inventory() has no row named %q: %+v", name, inv.Tools)
+	return ToolInfo{}
 }

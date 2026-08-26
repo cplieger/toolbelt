@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -104,6 +105,13 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, 
 	}
 	if cat, ok := e.cat().Lookup(name); ok {
 		v.Lsp = cat.Lsp
+	}
+	// The checksum answer describes an artifact that is present, so it
+	// travels only with an installed row: a status surviving a wiped
+	// volume would otherwise report "verified" about a binary that is
+	// gone.
+	if v.Installed {
+		v.Checksum = s.Checksum
 	}
 	if latest := e.versions.Cached(t.Source); latest != "" && latest != t.Version {
 		v.Latest = latest
@@ -233,6 +241,25 @@ func (e *Engine) aptHitsWithCandidate(hits []AptHit) []AptHit {
 // capped result set. apt-cache is a local index read, so this is a
 // runaway guard rather than a working budget.
 const aptCandidateBudget = 10 * time.Second
+
+// releaseTagResolvable reports whether a candidate tag actually publishes
+// an asset this host can install, without downloading anything.
+//
+// It is the release source's half of the pre-persist check: the manifest
+// must never record a version whose release has nothing for us, because
+// the recorded version is what every later install and probe reads.
+func (e *Engine) releaseTagResolvable(ctx context.Context, name, ref, tag string, hints *ReleaseHints) error {
+	rr, err := parseReleaseRef(ref)
+	if err != nil {
+		return err
+	}
+	assets, err := e.inst.listReleaseAssets(ctx, rr, tag)
+	if err != nil {
+		return err
+	}
+	_, err = chooseReleaseAssetWithHints(assets, name, runtime.GOARCH, hints)
+	return err
+}
 
 // Jobs returns the active job (with output tail) and recent history.
 func (e *Engine) Jobs() (active *Job, recent []*Job) { return e.queue.Snapshot() }
@@ -406,6 +433,9 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 	}
 	if t.Version == "" {
 		t.Version = cat.Version
+	}
+	if t.Release == nil {
+		t.Release = cat.Release
 	}
 }
 
@@ -1415,6 +1445,18 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 			return false, nil
 		}
 	}
+	// The same guard for a release-backed tool, and it is not optional
+	// there either: an upstream that renames its assets between releases
+	// would otherwise have the new tag written into the manifest and then
+	// fail to install on every run afterwards, with the working version
+	// already overwritten. The check costs one asset listing.
+	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceRelease {
+		if rerr := e.releaseTagResolvable(ctx, n, ref, latest, t.Release); rerr != nil {
+			output(fmt.Sprintf("%s: %s has no installable asset, keeping %s: %v",
+				n, latest, t.Version, rerr))
+			return false, nil
+		}
+	}
 	output(fmt.Sprintf("%s: %s -> %s", n, t.Version, latest))
 	if err := e.store.MutateManifest(func(mm *Manifest) error {
 		cur, ok := mm.Tools[n]
@@ -1620,6 +1662,10 @@ func validateSource(source, install string) error {
 	case SourceAqua:
 		if !strings.Contains(ref, "/") {
 			return errors.New("aqua source must be aqua:owner/repo")
+		}
+	case SourceRelease:
+		if _, rerr := parseReleaseRef(ref); rerr != nil {
+			return rerr
 		}
 	case SourceApt:
 		// The grammar gate, applied at the door. Everything downstream

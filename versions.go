@@ -26,15 +26,11 @@ const versionLookupBudget = 45 * time.Second
 // available" without network calls; the cache is refreshed by update
 // and reconcile jobs.
 type versionResolver struct {
-	ghTokenChecked time.Time
-	client         *http.Client
-	cache          map[string]string // source -> latest version
-	// ghToken caches the gh auth token lookup. Successes cache forever;
-	// an empty result is retried after ghTokenRetry so a forge login
-	// performed after boot is picked up.
-	ghToken   string
-	mu        sync.Mutex
-	ghTokenMu sync.Mutex
+	client *http.Client
+	cache  map[string]string // source -> latest version
+	// tokens is the shared GitHub API credential (see githubTokenCache).
+	tokens *githubTokenCache
+	mu     sync.Mutex
 	// aptIdx guarantees a package index exists before apt-cache is asked
 	// anything. Both consumer images ship with /var/lib/apt/lists empty,
 	// and apt-cache answers "no Candidate line" rather than erroring on a
@@ -43,11 +39,8 @@ type versionResolver struct {
 	aptIdx *aptIndex
 }
 
-// ghTokenRetry is how long an empty gh-token probe result is trusted.
-const ghTokenRetry = time.Minute
-
-func newVersionResolver(client *http.Client, aptIdx *aptIndex) *versionResolver {
-	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx}
+func newVersionResolver(client *http.Client, aptIdx *aptIndex, tokens *githubTokenCache) *versionResolver {
+	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx, tokens: tokens}
 }
 
 // Cached returns the cached latest version for a source, if any.
@@ -87,11 +80,63 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 		return v.latestCrate(ctx, ref)
 	case SourceGo:
 		return v.latestGoModule(ctx, ref)
+	case SourceRelease:
+		return v.latestRelease(ctx, ref)
 	case SourceApt:
 		return v.latestApt(ctx, ref)
 	default:
 		return "", fmt.Errorf("no version source for %q", source)
 	}
+}
+
+// latestRelease resolves the newest release tag of a forge repository.
+//
+// A release-backed tool's version IS the tag, so this reuses the same
+// GitHub paths the aqua source already uses, including the token read
+// that keeps a sweep over 147 repositories inside the rate limit. The
+// registry's version_prefix hint is not applied here: the tag is what
+// the download URL needs, and stripping a prefix would produce a version
+// that names no release.
+func (v *versionResolver) latestRelease(ctx context.Context, ref string) (string, error) {
+	rr, err := parseReleaseRef(ref)
+	if err != nil {
+		return "", err
+	}
+	switch rr.Host {
+	case releaseHostGitLab:
+		return v.latestGitLabRelease(ctx, rr)
+	default:
+		return v.latestGitHubRelease(ctx, rr)
+	}
+}
+
+func (v *versionResolver) latestGitHubRelease(ctx context.Context, rr releaseRef) (string, error) {
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	api := "https://api.github.com/repos/" + url.PathEscape(rr.Owner) + "/" + url.PathEscape(rr.Repo) + "/releases/latest"
+	if err := v.getJSON(ctx, api, &rel); err != nil {
+		return "", err
+	}
+	if rel.TagName == "" {
+		return "", fmt.Errorf("%s/%s has no latest release", rr.Owner, rr.Repo)
+	}
+	return rel.TagName, nil
+}
+
+func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef) (string, error) {
+	var rels []struct {
+		TagName string `json:"tag_name"`
+	}
+	project := url.PathEscape(rr.Owner + "/" + rr.Repo)
+	api := "https://gitlab.com/api/v4/projects/" + project + "/releases?per_page=1"
+	if err := v.getJSON(ctx, api, &rels); err != nil {
+		return "", err
+	}
+	if len(rels) == 0 || rels[0].TagName == "" {
+		return "", fmt.Errorf("%s/%s has no releases", rr.Owner, rr.Repo)
+	}
+	return rels[0].TagName, nil
 }
 
 // latestApt reports the version apt would install: the distro's current
@@ -322,37 +367,12 @@ func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) e
 		httpx.WithMaxAttempts(3),
 		httpx.WithMaxBodyBytes(4 << 20),
 	}
-	if strings.HasPrefix(rawURL, "https://api.github.com/") {
-		if tok := v.githubToken(); tok != "" {
-			opts = append(opts, httpx.WithHeaders(func(r *http.Request) {
-				r.Header.Set("Authorization", "Bearer "+tok)
-			}))
-		}
-	}
+	opts = append(opts, githubAuth(rawURL, v.tokens)...)
 	body, err := httpx.GetBytes(ctx, v.client, rawURL, opts...)
 	if err != nil {
 		return err
 	}
 	return json.Unmarshal(body, out)
-}
-
-// githubToken returns a GitHub API token when one is discoverable: the
-// gh CLI's stored token (a forge login flow provisions it). Failure is
-// fine — calls proceed anonymously and the probe retries later.
-func (v *versionResolver) githubToken() string {
-	v.ghTokenMu.Lock()
-	defer v.ghTokenMu.Unlock()
-	if v.ghToken != "" || time.Since(v.ghTokenChecked) < ghTokenRetry {
-		return v.ghToken
-	}
-	v.ghTokenChecked = time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
-	if err == nil {
-		v.ghToken = strings.TrimSpace(string(out))
-	}
-	return v.ghToken
 }
 
 // validVersionString allows only the characters real upstream version

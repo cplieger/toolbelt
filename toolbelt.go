@@ -48,13 +48,14 @@ import (
 // Source prefixes for Tool.Source. A source is "<kind>:<ref>" except
 // SourceManual which stands alone.
 const (
-	SourceAqua   = "aqua"   // aqua:owner/repo — evaluated aqua-registry definition
-	SourceNpm    = "npm"    // npm:package
-	SourcePip    = "pip"    // pip:package (installed via uv)
-	SourceCargo  = "cargo"  // cargo:crate
-	SourceGo     = "go"     // go:module/path
-	SourceApt    = "apt"    // apt:package — Debian package, container layer
-	SourceManual = "manual" // user-provided install command
+	SourceAqua    = "aqua"    // aqua:owner/repo — evaluated aqua-registry definition
+	SourceNpm     = "npm"     // npm:package
+	SourcePip     = "pip"     // pip:package (installed via uv)
+	SourceCargo   = "cargo"   // cargo:crate
+	SourceGo      = "go"      // go:module/path
+	SourceApt     = "apt"     // apt:package — Debian package, container layer
+	SourceRelease = "release" // release:<github|gitlab>/owner/repo — forge release asset
+	SourceManual  = "manual"  // user-provided install command
 )
 
 // ManifestVersion is the manifest schema version this engine reads and
@@ -272,8 +273,19 @@ func New(cfg *Config) (*Engine, error) {
 	// resolver's apt-cache read. Constructed before both so neither can
 	// hold a nil one.
 	e.aptIdx = newAptIndex(log)
-	e.versions = newVersionResolver(client, e.aptIdx)
-	e.inst = &installer{toolsDir: cfg.ToolsDir, client: client, log: log, output: func(string) {}, aptIdx: e.aptIdx}
+	// One token cache too, for the same reason: the version resolver and
+	// the release installer each spend a GitHub API call per install, and
+	// the anonymous rate limit is per PROCESS, not per caller.
+	tokens := &githubTokenCache{}
+	e.versions = newVersionResolver(client, e.aptIdx, tokens)
+	e.inst = &installer{
+		toolsDir: cfg.ToolsDir,
+		client:   client,
+		log:      log,
+		output:   func(string) {},
+		aptIdx:   e.aptIdx,
+		tokens:   tokens,
+	}
 	// ensureManagedDir, not MkdirAll: this is where bin/ is normally BORN,
 	// so it is the only place the mode the filesystem stored for it can
 	// still be certified. linkBin re-establishes the same directory later

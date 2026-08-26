@@ -311,6 +311,7 @@ type miseTool struct {
 	Description string   `toml:"description"`
 	Aliases     []string `toml:"aliases"`
 	OS          []string `toml:"os"`
+	Bins        []string `toml:"bins"`
 }
 
 // outcomeKind is what compileEntry decided about one registry entry.
@@ -385,6 +386,7 @@ func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome
 			continue
 		}
 		source, aq, err := resolveBackend(aquaDir, backend)
+		opts := backendOptions(raw)
 		if errors.Is(err, errUnsupported) {
 			noteReason(backend) // deliberately unsupported backend kind/type
 			continue
@@ -404,6 +406,9 @@ func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome
 		}
 		entry.Source = source
 		entry.Aqua = aq
+		if strings.HasPrefix(source, toolbelt.SourceRelease+":") {
+			entry.Release = releaseHints(name, mt.Bins, opts)
+		}
 		if entry.Description == "" && aq != nil {
 			entry.Description = firstLine(aq.Description)
 		}
@@ -413,6 +418,71 @@ func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome
 		firstReason = "no backends declared"
 	}
 	return entry, outcome{kind: outcomeUnavailable, reason: firstReason}, nil
+}
+
+// backendOptions returns a table-form backend's options map, or nil for
+// the string form which carries none.
+func backendOptions(raw any) map[string]any {
+	if v, ok := raw.(map[string]any); ok {
+		if o, ok := v["options"].(map[string]any); ok {
+			return o
+		}
+	}
+	return nil
+}
+
+// releaseHints reads the install hints a registry entry carries for a
+// release-backed tool.
+//
+// Two sources, because the registry keeps them apart: the binary SET is a
+// top-level `bins` field describing the tool, and the file-location hints
+// are options on the github/gitlab backend. Only the four the engine acts
+// on (see toolbelt.ReleaseHints): what this tool puts on PATH, which of
+// several binaries in one repository it is, and where the executable sits
+// inside the artifact. The registry's asset_pattern and rename_exe are
+// deliberately not read; both decisions and their evidence are documented
+// on the ReleaseHints type.
+func releaseHints(name string, bins []string, opts map[string]any) *toolbelt.ReleaseHints {
+	str := func(k string) string {
+		if opts == nil {
+			return ""
+		}
+		v, _ := opts[k].(string)
+		return strings.TrimSpace(v)
+	}
+	h := &toolbelt.ReleaseHints{
+		Matching:  str("matching"),
+		Bins:      releaseBins(name, bins),
+		Bin:       str("bin"),
+		BinPath:   str("bin_path"),
+	}
+	if h.IsZero() {
+		return nil
+	}
+	return h
+}
+
+// releaseBins normalizes the registry's binary list, returning nil when it
+// says nothing the installer does not already assume.
+//
+// The default IS the tool's own name, so carrying `bins = ["jq"]` for jq
+// would put 112 redundant lists in the catalog. What survives is the 40
+// entries where the published names genuinely differ.
+func releaseBins(name string, bins []string) []string {
+	out := make([]string, 0, len(bins))
+	for _, b := range bins {
+		if b = strings.TrimSpace(b); b != "" {
+			out = append(out, b)
+		}
+	}
+	if len(out) == 0 || slices.Equal(out, []string{name}) {
+		return nil
+	}
+	// Sorted so the catalog is byte-stable across registry edits that only
+	// reorder the list, and deduplicated because a repeated name would
+	// publish the same symlink twice.
+	slices.Sort(out)
+	return slices.Compact(out)
 }
 
 // backendString extracts the backend spec from a string or table form.
@@ -479,6 +549,14 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 			return "", nil, err
 		}
 		return "aqua:" + ref, aq, nil
+	case "github":
+		// mise's github backend (formerly ubi) installs a release asset,
+		// which is what the release source does. The registry names the
+		// repository and nothing else about the asset, so the choice is the
+		// matcher's; see release.go.
+		return toolbelt.SourceRelease + ":github/" + ref, nil, nil
+	case "gitlab":
+		return toolbelt.SourceRelease + ":gitlab/" + ref, nil, nil
 	case "npm":
 		return "npm:" + ref, nil, nil
 	case "pipx":
@@ -488,8 +566,9 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 	case "go":
 		return "go:" + ref, nil, nil
 	default:
-		// core:*, ubi:*, asdf:*, vfox:*, gem:*, dotnet:*, spm:* are
-		// not supported natively; core runtimes arrive via overlays.
+		// core:*, asdf:*, vfox:*, conda:*, gem:*, dotnet:*, spm:* are
+		// not supported natively; core runtimes arrive via overlays and the
+		// rest are recorded as unavailable with their backend as the reason.
 		return "", nil, errUnsupported
 	}
 }

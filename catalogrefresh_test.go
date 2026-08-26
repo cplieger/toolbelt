@@ -67,7 +67,7 @@ func newRefreshEngine(t *testing.T, cfg *Config) *Engine {
 		refresh:         cfg.Refresh,
 		catalogOverlays: cfg.CatalogOverlays,
 		client:          http.DefaultClient,
-		versions:        newVersionResolver(http.DefaultClient, nil),
+		versions:        newTestVersionResolver(http.DefaultClient),
 		log:             log,
 		configDir:       dir,
 		toolsDir:        toolsDir,

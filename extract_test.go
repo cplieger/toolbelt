@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -205,7 +206,7 @@ func TestLinkDeclaredFiles_RefusesSymlinkEscape(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}})
+			bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}}, false)
 			if err == nil {
 				t.Fatalf("linkDeclaredFiles = %v, want the symlink refused", bins)
 			}
@@ -395,7 +396,7 @@ func TestLinkDeclaredFiles_EnforcesTheStoredExecutableMode(t *testing.T) {
 			"exists to correct is not present on this filesystem", wfi.Mode().Perm())
 	}
 
-	bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}})
+	bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}}, false)
 	if err != nil {
 		t.Fatalf("linkDeclaredFiles: %v", err)
 	}
@@ -454,4 +455,84 @@ func TestEnforceExecutable_RefusesASymlinkInsteadOfChmodingItsTarget(t *testing.
 	if got := fi.Mode().Perm(); got != 0o600 {
 		t.Errorf("victim mode = %v, want 0600 untouched: the enforcement followed the symlink", got)
 	}
+}
+
+
+// TestLinkDeclaredFiles_SearchSkipsAbsentNames covers the best-effort half
+// of the release path. The registry's binary list and the release move
+// independently, so a list that has outrun upstream must still install
+// what the artifact does contain — llama.cpp declares 22 executables and
+// which of them ship varies by release.
+//
+// The floor is the second half: an install that published NOTHING is a
+// failed install however many names it skipped, or the tool reads as
+// present with no way to run it.
+func TestLinkDeclaredFiles_SearchSkipsAbsentNames(t *testing.T) {
+	declared := []AquaFile{{Name: "llama-cli"}, {Name: "llama-server"}, {Name: "llama-bench"}}
+
+	t.Run("some present", func(t *testing.T) {
+		in, versDir := searchFixture(t, []string{"llama-cli", "sub/llama-server"}, nil)
+		bins, err := in.linkDeclaredFiles(versDir, declared, true)
+		if err != nil {
+			t.Fatalf("linkDeclaredFiles(3 declared, 2 present) = %v, want the present two linked", err)
+		}
+		want := []string{"llama-cli", "llama-server"}
+		if !slices.Equal(bins, want) {
+			t.Errorf("linkDeclaredFiles(3 declared, 2 present) = %v, want %v", bins, want)
+		}
+	})
+
+	t.Run("none present", func(t *testing.T) {
+		// Two non-executables, so the sole-executable fallback has nothing
+		// to take either: with exactly one it would resolve every declared
+		// name onto it, which is the SwiftFormat shape, not this one.
+		in, versDir := searchFixture(t, nil, []string{"README.md", "LICENSE"})
+		bins, err := in.linkDeclaredFiles(versDir, declared, true)
+		if err == nil {
+			t.Fatalf("linkDeclaredFiles(3 declared, 0 present) = %v, want an error", bins)
+		}
+		if !strings.Contains(err.Error(), "none of the 3 declared executables") {
+			t.Errorf("linkDeclaredFiles(3 declared, 0 present) error = %v, want it to name the count", err)
+		}
+	})
+
+	// Without search the paths are DECLARATIONS, so a miss stays fatal: an
+	// aqua definition is authored against the artifact and a search there
+	// would bury a registry bug, or link a same-named file from elsewhere.
+	t.Run("no search keeps a miss fatal", func(t *testing.T) {
+		in, versDir := searchFixture(t, []string{"sub/llama-cli"}, nil)
+		if bins, err := in.linkDeclaredFiles(versDir, declared[:1], false); err == nil {
+			t.Errorf("linkDeclaredFiles(declared but nested, search off) = %v, want an error", bins)
+		}
+	})
+}
+
+// searchFixture builds an installer over a temp tools dir and writes a
+// version tree, returning the installer and that tree. The two file lists
+// are kept apart because the search reads the EXECUTE BIT: tar and unzip
+// preserve archive modes, so a fixture that marks its README executable is
+// not the artifact it claims to be.
+func searchFixture(t *testing.T, exec, plain []string) (*installer, string) {
+	t.Helper()
+	toolsDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(toolsDir, "bin"), 0o755); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	versDir := filepath.Join(toolsDir, "opt", "llama.cpp", "1.0.0")
+	write := func(f string, mode os.FileMode) {
+		p := filepath.Join(versDir, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), mode); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+	for _, f := range exec {
+		write(f, 0o755)
+	}
+	for _, f := range plain {
+		write(f, 0o644)
+	}
+	return &installer{toolsDir: toolsDir, output: func(string) {}}, versDir
 }
