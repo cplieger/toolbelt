@@ -12,6 +12,17 @@
 // standard webhttp error envelope, has_dependents additionally naming
 // the blocking tools.
 //
+// # Search
+//
+// GET /search?q=<query> returns installable catalog entries followed by
+// matching Debian packages. Adding &unavailable=1 appends the catalog
+// entries no install source exists for, each carrying the registry
+// backend that defeated the compiler. That block is opt-in rather than
+// default, because a UI offering things to install has no use for a row
+// it cannot act on, while an agent calling this API is better served by
+// "this tool is known and here is why it cannot be installed" than by an
+// empty result.
+//
 // # Cache policy
 //
 // The handler owns its cache policy: every response it produces
@@ -85,11 +96,18 @@ type SearchHit struct {
 	Apt bool `json:"apt,omitempty"`
 }
 
-// SearchResponse is the search route's body. Results arrive in three
-// blocks, in this order: installable catalog entries, Debian packages,
-// then the catalog entries no install source exists for. Each block is
-// capped independently by the engine, so a client renders them as
-// sections without re-sorting and one corpus cannot crowd out another.
+// SearchResponse is the search route's body. Results arrive in blocks,
+// in this order: installable catalog entries, Debian packages, then,
+// only when the caller asked for them, the catalog entries no install
+// source exists for. Each block is capped independently by the engine, so
+// a client renders them as sections without re-sorting and one corpus
+// cannot crowd out another.
+//
+// The third block is OPT-IN via `?unavailable=1`. Absent by default
+// because a dialog offering things to install has no use for a row it
+// cannot act on, while an agent reading this API does: it would rather be
+// told a tool is known and why it cannot be installed than get an empty
+// result and conclude the tool does not exist.
 //
 // AptAvailable distinguishes "no Debian package matched" from "the
 // package list could not be consulted", which look identical in an empty
@@ -208,11 +226,28 @@ func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	webhttp.WriteJSON(w, inv)
 }
 
+// searchUnavailableParam is the query parameter that opts a caller INTO
+// the uninstallable block. Absent means hidden, which is the default
+// every consumer gets by doing nothing.
+//
+// Hidden by default because the two consumers want opposite things and
+// only one of them is a person: vibekit's Add dialog offers what can be
+// installed, and a row it cannot act on is noise there. The headless
+// consumer's caller is an agent reading the loopback API, which benefits
+// from being told a tool is known and why it cannot be installed instead
+// of getting an empty result. A per-request parameter serves both without
+// a deployment flag or a per-app build.
+const searchUnavailableParam = "unavailable"
+
 func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	installable := e.Search(q)
 	aptHits, aptOK := e.SearchApt(q)
-	unavailable := e.SearchUnavailable(q)
+
+	var unavailable []toolbelt.CatalogEntry
+	if searchWantsUnavailable(r) {
+		unavailable = e.SearchUnavailable(q)
+	}
 
 	res := SearchResponse{
 		Results:      make([]SearchHit, 0, len(installable)+len(aptHits)+len(unavailable)),
@@ -234,6 +269,23 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		res.Results = append(res.Results, searchHit(&unavailable[i], true))
 	}
 	webhttp.WriteJSON(w, res)
+}
+
+// searchWantsUnavailable reads the opt-in parameter. Any of the usual
+// affirmative spellings counts, and a bare `?unavailable` counts too,
+// because a caller writing that plainly means yes and answering it with
+// silence would be the unhelpful reading.
+func searchWantsUnavailable(r *http.Request) bool {
+	qs := r.URL.Query()
+	if !qs.Has(searchUnavailableParam) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(qs.Get(searchUnavailableParam))) {
+	case "", "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // searchHit projects a catalog entry, dropping the embedded install
