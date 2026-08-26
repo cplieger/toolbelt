@@ -112,6 +112,11 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	installing := e.queue.InstallingSet()
 
 	res := &Inventory{Tools: []ToolInfo{}, System: e.systemTools(), Job: e.queue.Active()}
+	// Discovered packages exclude anything the manifest holds, whatever its
+	// source: a name in Tools is already rendered there, and a package that
+	// appeared in both groups would offer a delete control in one and not the
+	// other for the same thing.
+	res.AptPackages = e.discoveredApt(m)
 	dependents := dependentsIndex(m, e.backends())
 	names := make([]string, 0, len(m.Tools))
 	for n := range m.Tools {
@@ -1371,6 +1376,14 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 		return fmt.Errorf("record install state for %s: %w", name, err)
 	}
 	e.probes.forget(name)
+	// An apt install changes the host's package set, and it changes it for
+	// DEPENDENCIES too, so the discovered list has to be re-derived rather
+	// than adjusted for the one name. Invalidated here rather than on a
+	// timer: this is the moment a reader is looking, and it is the only
+	// moment the answer can have changed.
+	if res.apt && e.aptSeen != nil {
+		e.aptSeen.Invalidate()
+	}
 	return nil
 }
 
@@ -1808,4 +1821,31 @@ func validateSource(source, install string) error {
 		return fmt.Errorf("unknown source kind %q", kind)
 	}
 	return nil
+}
+
+// discoveredApt lists installed apt packages the manifest does not hold.
+//
+// Filtered against the manifest by NAME rather than by source, because an apt
+// package can also be the thing a manual or release entry installed under the
+// same name, and one thing must not appear in two inventory groups: the Tools
+// row carries a delete control and this group carries none, so a reader would
+// see the same package as both managed and not.
+func (e *Engine) discoveredApt(m *Manifest) []AptPackage {
+	if e.aptSeen == nil {
+		return nil
+	}
+	all := e.aptSeen.List(context.Background())
+	if len(all) == 0 {
+		return nil
+	}
+	out := make([]AptPackage, 0, len(all))
+	for _, p := range all {
+		if _, managed := m.Tools[p.Name]; !managed {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

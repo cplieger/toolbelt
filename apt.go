@@ -97,6 +97,12 @@ func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) erro
 	return nil
 }
 
+// aptStatusInstalled is the one ${db:Status-Status} value meaning the
+// package's files are on disk. config-files, half-configured and deinstall
+// all report a version too, which is why the status word is read rather
+// than the version's presence.
+const aptStatusInstalled = "installed"
+
 // aptHoldTimeout bounds an apt-mark call. It writes one dpkg selection and
 // touches no network, so this is a wedge guard rather than a work budget.
 const aptHoldTimeout = 30 * time.Second
@@ -151,7 +157,7 @@ func (in *installer) aptInstalled(ctx context.Context, pkg string) (version stri
 // it would report every apt entry as present while nothing is.
 func aptStatusFrom(out string) (version string, installed bool) {
 	status, version, ok := strings.Cut(strings.TrimSpace(out), " ")
-	if !ok || status != "installed" {
+	if !ok || status != aptStatusInstalled {
 		return "", false
 	}
 	return strings.TrimSpace(version), true

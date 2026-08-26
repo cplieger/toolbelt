@@ -150,7 +150,11 @@ type Config struct {
 // every other process (a CLI, an agent) must go through the consumer's
 // server rather than linking toolbelt against the same data dirs.
 type Engine struct {
-	store *store
+	// aptSeen lists installed apt packages with no manifest row: what the
+	// image asked for and what a user or an agent installed in the shell.
+	// Read-only, cached, invalidated when this engine runs an apt job.
+	aptSeen *aptDiscovery
+	store   *store
 	// catalog is the live catalog, swapped atomically by the refresh
 	// job. Readers take a snapshot via cat() and never see a partial
 	// swap; a snapshot taken before a swap stays internally consistent
@@ -285,6 +289,7 @@ func New(cfg *Config) (*Engine, error) {
 	// resolver's apt-cache read. Constructed before both so neither can
 	// hold a nil one.
 	e.aptIdx = newAptIndex(log)
+	e.aptSeen = &aptDiscovery{}
 	// One token cache too, for the same reason: the version resolver and
 	// the release installer each spend a GitHub API call per install, and
 	// the anonymous rate limit is per PROCESS, not per caller.
