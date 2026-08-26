@@ -78,14 +78,25 @@ type SearchHit struct {
 	// as it did before this pair existed.
 	Unavailable bool   `json:"unavailable,omitempty"`
 	Reason      string `json:"reason,omitempty"`
+	// Apt marks a Debian package rather than a catalog entry. Version
+	// then carries the distro's candidate, which routinely differs from
+	// the catalog's version for the same tool, and the row's install lands
+	// in the container layer rather than on the persistent volume.
+	Apt bool `json:"apt,omitempty"`
 }
 
-// SearchResponse is the search route's body. Installable results come
-// first, then the unavailable ones, each block capped independently by
-// the engine, so a client can render them as separate sections without
-// re-sorting.
+// SearchResponse is the search route's body. Results arrive in three
+// blocks, in this order: installable catalog entries, Debian packages,
+// then the catalog entries no install source exists for. Each block is
+// capped independently by the engine, so a client renders them as
+// sections without re-sorting and one corpus cannot crowd out another.
+//
+// AptAvailable distinguishes "no Debian package matched" from "the
+// package list could not be consulted", which look identical in an empty
+// result and mean opposite things.
 type SearchResponse struct {
-	Results []SearchHit `json:"results"`
+	Results      []SearchHit `json:"results"`
+	AptAvailable bool        `json:"apt_available"`
 }
 
 // JobsResponse is the jobs route's body: the active job (with output
@@ -200,10 +211,24 @@ func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	installable := e.Search(q)
+	aptHits, aptOK := e.SearchApt(q)
 	unavailable := e.SearchUnavailable(q)
-	res := SearchResponse{Results: make([]SearchHit, 0, len(installable)+len(unavailable))}
+
+	res := SearchResponse{
+		Results:      make([]SearchHit, 0, len(installable)+len(aptHits)+len(unavailable)),
+		AptAvailable: aptOK,
+	}
 	for i := range installable {
 		res.Results = append(res.Results, searchHit(&installable[i], false))
+	}
+	for i := range aptHits {
+		res.Results = append(res.Results, SearchHit{
+			Name:        aptHits[i].Name,
+			Description: aptHits[i].Description,
+			Source:      toolbelt.SourceApt + ":" + aptHits[i].Name,
+			Version:     aptHits[i].Candidate,
+			Apt:         true,
+		})
 	}
 	for i := range unavailable {
 		res.Results = append(res.Results, searchHit(&unavailable[i], true))
