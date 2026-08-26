@@ -95,7 +95,20 @@ type ToolInfo struct {
 	InstalledVersion string   `json:"installed_version,omitempty"`
 	Latest           string   `json:"latest,omitempty"`
 	LastError        string   `json:"last_error,omitempty"`
-	Requires         []string `json:"requires,omitempty"`
+	// Checksum reports how the INSTALLED artifact's integrity was
+	// established, copied from ToolStatus.Checksum: "verified" when the
+	// definition declared a checksum source and the digest matched,
+	// "unverified" when it declared none. Empty means the question does
+	// not apply — the tool is not installed, or its source has no
+	// artifact to checksum (npm, pip, cargo, go, apt, manual), where the
+	// package manager or the distro archive owns verification.
+	//
+	// A consumer showing a "no checksum" badge reads THIS, not the
+	// source kind: whether verification happened is a fact about the
+	// install that ran, and 252 of the catalog's aqua entries declare no
+	// checksum while the other 402 do.
+	Checksum   string   `json:"checksum,omitempty"`
+	Requires   []string `json:"requires,omitempty"`
 	// Dependents names the ENABLED entries that require this tool,
 	// directly (their Requires) or as the implied backend of their source
 	// kind. It is the answer a consumer needs BEFORE it sends a disable

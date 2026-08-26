@@ -60,6 +60,11 @@ type Tool struct {
 	VersionArgs []string `json:"version_args,omitempty"`
 	// Pin freezes the version: update runs skip this tool.
 	Pin bool `json:"pin,omitempty"`
+	// Release carries the registry's install hints for a release-backed
+	// tool (see ReleaseHints). Hydrated from the catalog; a user editing
+	// the manifest by hand needs none of it, because the matcher's
+	// heuristic is what runs without one.
+	Release *ReleaseHints `json:"release,omitempty"`
 	// Disabled marks the entry a template: recorded intent whose
 	// install is explicitly bypassed. The reconciler uninstalls a
 	// disabled tool's engine-owned footprint and keeps the entry.

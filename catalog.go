@@ -49,6 +49,9 @@ type CatalogEntry struct {
 	// "vfox:mise-plugins/vfox-postgres". It is the whole explanation a
 	// consumer can show for a tool it knows about and cannot install.
 	Reason string `json:"reason,omitempty"`
+	// Release carries the registry's install hints for a release-backed
+	// entry (see ReleaseHints). Absent for every other source.
+	Release *ReleaseHints `json:"release,omitempty"`
 }
 
 // Catalog is the compiled tool-catalog.json document.

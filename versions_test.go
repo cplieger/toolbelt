@@ -47,7 +47,7 @@ func TestLatestGitHubTag_PaginatesAndVersionCompares(t *testing.T) {
 	// srv.Client() routes every request to the handler whatever absolute
 	// api.github.com URL the resolver builds, so nothing has to redirect
 	// the request.
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 
 	aq := &AquaPackage{
 		Type: "http", RepoOwner: "golang", RepoName: "go",
@@ -67,7 +67,7 @@ func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"name":"nope"}]`)
 	}))
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 	aq := &AquaPackage{VersionFilter: `Version startsWith "go"`}
 	if _, err := v.latestGitHubTag(t.Context(), "o", "r", aq); err == nil {
 		t.Fatal("want error when nothing matches")
@@ -94,7 +94,7 @@ func TestLatestGitHubTag_WalksEveryPageOfTheCap(t *testing.T) {
 		}
 		fmt.Fprint(w, "["+strings.Join(names, ",")+"]")
 	}))
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 
 	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "v"})
 	if err != nil {
@@ -113,7 +113,7 @@ func TestLatestGitHubTag_PrefixRejectsForeignTags(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"name":"cli/v1.2.0"},{"name":"v9.9.9"}]`)
 	}))
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 
 	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "cli/v"})
 	if err != nil {
@@ -136,7 +136,7 @@ func TestLatestAqua_TagVersioningNeverReadsTheReleaseEndpoint(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"tag_name":"v0.0.1"}`)
 	}))
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 
 	got, err := v.Latest(t.Context(), "aqua:owner/repo", &AquaPackage{VersionSource: "github_tag"})
 	if err != nil {
@@ -159,7 +159,7 @@ func TestLatestAqua_LatestReleaseFailingTheFilterFallsBackToTags(t *testing.T) {
 		}
 		fmt.Fprint(w, `{"tag_name":"latest"}`)
 	}))
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 	aq := &AquaPackage{VersionFilter: `not (Version in ["latest", "stable"])`}
 
 	got, err := v.Latest(t.Context(), "aqua:owner/repo", aq)
@@ -206,7 +206,9 @@ func TestGitHubToken_AttachedOnlyWhenDiscoverable(t *testing.T) {
 				got = r.Header.Get("Authorization")
 				fmt.Fprint(w, `{"tag_name":"v1.0.0"}`)
 			}))
-			v := newVersionResolver(srv.Client(), nil)
+			// This case is ABOUT the credential, so it holds a real cache
+			// rather than the test helper's empty one.
+			v := newVersionResolver(srv.Client(), nil, &githubTokenCache{})
 
 			if _, err := v.Latest(t.Context(), "aqua:owner/repo", nil); err != nil {
 				t.Fatalf("Latest: %v", err)
@@ -290,7 +292,7 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 		gotPath = r.URL.Path
 		fmt.Fprint(w, `{"version":"5.3.0"}`)
 	}))
-	v := newVersionResolver(srv.Client(), nil)
+	v := newTestVersionResolver(srv.Client())
 	got, err := v.Latest(t.Context(), "npm:typescript-language-server", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -301,4 +303,12 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 	if gotPath != "/typescript-language-server/latest" {
 		t.Fatalf("endpoint = %q, want /typescript-language-server/latest", gotPath)
 	}
+}
+
+// newTestVersionResolver builds a resolver with no apt index and no
+// GitHub credential: a test drives httptest servers, so neither
+// collaborator has anything to contribute and passing them at every call
+// site would only be noise.
+func newTestVersionResolver(client *http.Client) *versionResolver {
+	return newVersionResolver(client, nil, nil)
 }
