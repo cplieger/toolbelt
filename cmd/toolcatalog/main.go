@@ -5,12 +5,20 @@
 // compile (the default) joins the mise registry (name -> preferred
 // install backends, descriptions, aliases; MIT, github.com/jdx/mise
 // /registry) with the aqua registry (per-package binary install
-// definitions; MIT, github.com/aquaproj/aqua-registry /pkgs) and one or
-// more overlay files (curated entries: LSP servers, runtimes, manual
-// definitions), emitting one tool-catalog.json an Engine loads
-// read-only. The base overlay set (overlays.json, embedded in the
-// binary) applies first unless -no-base-overlays; consumers layer
-// app-specific overlays with repeated -overlay flags.
+// definitions; MIT, github.com/aquaproj/aqua-registry /pkgs), emitting
+// one tool-catalog.json an Engine loads read-only.
+//
+// What it emits is a REFERENCE: everything the registries can express,
+// translated, with no opinion about which tools matter. It carries no
+// curated entry set of its own — an earlier version embedded one, which
+// put a product's tool list, its featured flags and its UI copy inside a
+// shared artifact.
+//
+// A product's own BUNDLED TOOLS — the ones it needs to function and the
+// ones it recommends, including any the registries do not carry — are
+// its file to own, not a layer over this one. It reaches the engine
+// through Config.CatalogOverlays at runtime, or through -overlay here for
+// a consumer that compiles its own catalog.
 //
 // Runs at image build time (the Dockerfile downloads both registry
 // tarballs at Renovate-pinned refs):
@@ -18,7 +26,7 @@
 //	go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@<tag> \
 //	    -mise <mise-repo>/registry \
 //	    -aqua <aqua-registry-repo>/pkgs \
-//	    -overlay overlays.json [-overlay app-overlays.json] \
+//	    [-overlay bundled-tools.json] \
 //	    -refs mise=<ref>,aqua=<ref> \
 //	    -out tool-catalog.json
 //
@@ -30,7 +38,12 @@
 // instead of a boot job:
 //
 //	go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@<tag> \
-//	    verify -catalog tool-catalog.json -require required-tools.txt
+//	    verify -catalog tool-catalog.json -require required-tools.txt \
+//	        [-overlay bundled-tools.json]
+//
+// A consumer passes its own bundled-tools file to verify, so the gate
+// judges the catalog its engine will actually hold rather than the
+// reference alone.
 //
 // An ordinary command in the root module: it shares the engine's
 // catalog and aqua schema types by construction (one version stream, no
@@ -39,7 +52,6 @@
 package main
 
 import (
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -71,16 +83,12 @@ type multiFlag []string
 func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
 func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
-//go:embed overlays.json
-var baseOverlays []byte
-
 func runCompile(args []string) {
 	fl := flag.NewFlagSet("compile", flag.ExitOnError)
 	miseDir := fl.String("mise", "", "path to the mise registry dir (registry/*.toml)")
 	aquaDir := fl.String("aqua", "", "path to the aqua-registry pkgs dir")
 	var overlays multiFlag
-	fl.Var(&overlays, "overlay", "overlay JSON path (repeatable; applied after the base set)")
-	noBase := fl.Bool("no-base-overlays", false, "skip the embedded base overlay set (runtimes, forge CLIs, language servers)")
+	fl.Var(&overlays, "overlay", "bundled-tools JSON path (repeatable; merged in order over the registry data)")
 	refsFlag := fl.String("refs", "", "comma-separated name=ref pairs recorded in the catalog")
 	outPath := fl.String("out", "tool-catalog.json", "output path")
 	_ = fl.Parse(args)
@@ -94,15 +102,11 @@ func runCompile(args []string) {
 		Licenses:    loadRegistryLicenses(*miseDir, *aquaDir),
 		Entries:     map[string]toolbelt.CatalogEntry{},
 		Unavailable: map[string]toolbelt.CatalogEntry{},
+		Backends:    toolbelt.DefaultBackends(),
 	}
 	stats := compileMiseEntries(catalog, *miseDir, *aquaDir)
 
 	resolver := func(ref string) (*toolbelt.AquaPackage, error) { return loadAquaDef(*aquaDir, ref) }
-	if !*noBase {
-		if err := toolbelt.ApplyOverlay(catalog, baseOverlays, resolver); err != nil {
-			log.Fatalf("toolcatalog: base overlays: %v", err)
-		}
-	}
 	for _, ov := range overlays {
 		data, err := os.ReadFile(ov)
 		if err != nil {
@@ -140,11 +144,31 @@ func runVerify(args []string) {
 	fl := flag.NewFlagSet("verify", flag.ExitOnError)
 	catalogPath := fl.String("catalog", "tool-catalog.json", "compiled catalog to verify")
 	requirePath := fl.String("require", "", "requirements file (one tool name per line, # comments)")
+	var overlays multiFlag
+	fl.Var(&overlays, "overlay", "bundled-tools JSON to merge before verifying (repeatable)")
 	_ = fl.Parse(args)
 	if *requirePath == "" {
 		log.Fatal("toolcatalog verify: -require is required")
 	}
 	catalog := readCatalog(*catalogPath)
+	// Applied with a NIL aqua resolver, which is exactly what the engine
+	// does at runtime: this gate has to judge the catalog the engine will
+	// actually hold, and a bundled tool carrying a bare aqua: source fails
+	// HERE rather than at a consumer's boot.
+	//
+	// Without this, a consumer whose required set includes one of its own
+	// bundled tools had to either drop it from the gate or move it into the
+	// shared artifact. The first loses the check; the second is how a
+	// product's tool list ends up in a general catalog.
+	for _, ov := range overlays {
+		data, err := os.ReadFile(ov)
+		if err != nil {
+			log.Fatalf("toolcatalog verify: bundled tools %s: %v", ov, err)
+		}
+		if err := toolbelt.ApplyOverlay(catalog, data, nil); err != nil {
+			log.Fatalf("toolcatalog verify: bundled tools %s: %v", ov, err)
+		}
+	}
 	names := readRequirements(*requirePath)
 	if errs := toolbelt.VerifyCatalog(catalog, names); len(errs) > 0 {
 		for _, e := range errs {
@@ -251,6 +275,10 @@ func checkCatalogInvariants(catalog *toolbelt.Catalog) {
 	// likelier cause is that backend classification broke and every entry
 	// fell into one bucket. ~200 tools have no install source on any
 	// healthy day.
+	if len(catalog.Backends) == 0 {
+		log.Fatal("toolcatalog: catalog carries no backends map: the engine would fall back " +
+			"to its built-in defaults, which is the coupling this field exists to remove")
+	}
 	const minUnavailable = 50
 	if len(catalog.Unavailable) < minUnavailable {
 		log.Fatalf("toolcatalog: only %d unavailable entries recorded (< %d): backend classification drift?",
@@ -451,10 +479,10 @@ func releaseHints(name string, bins []string, opts map[string]any) *toolbelt.Rel
 		return strings.TrimSpace(v)
 	}
 	h := &toolbelt.ReleaseHints{
-		Matching:  str("matching"),
-		Bins:      releaseBins(name, bins),
-		Bin:       str("bin"),
-		BinPath:   str("bin_path"),
+		Matching: str("matching"),
+		Bins:     releaseBins(name, bins),
+		Bin:      str("bin"),
+		BinPath:  str("bin_path"),
 	}
 	if h.IsZero() {
 		return nil
@@ -530,6 +558,47 @@ func platformListAllowsLinux(raw any) bool {
 // drift and must FAIL the build, not silently shrink the catalog.
 var errUnsupported = errors.New("unsupported")
 
+// coreBackendAqua translates mise's `core:` backends — its own built-in
+// installers, which this compiler does not implement — onto the aqua
+// package that installs THE SAME TOOL.
+//
+// This is registry TRANSLATION, not curation, and it belongs here for the
+// same reason the `github:` and `gitlab:` arms do: the registry states
+// which tool an entry is, and the compiler's whole job is to express that
+// in a source this engine can install from. An earlier design discarded
+// every `core:` backend and had a hand-written overlay revive the four
+// that mattered, which put a product's tool list inside a general
+// artifact and left the reason in a code comment.
+//
+// Measured against the pinned registries, mise declares 13 `core:` tools
+// and only these 5 have an aqua package for the same thing. The other 8
+// stay unavailable with their backend as the reason, which is what a
+// consumer needs to read to know it must supply them itself.
+//
+// Two near-misses are deliberately absent, because "aqua has a package
+// whose name matches" is not the test:
+//
+//   - python. mise means CPython; aqua's `astral-sh/uv` is a different
+//     tool that merely happens to be this engine's pip backend, and it
+//     already reaches the catalog as its own registry entry. Translating
+//     would hand somebody who asked for python an entry that installs uv.
+//   - rust. aqua's `rust-lang/rustup` installs the `rustup-init` binary,
+//     not a toolchain, so the entry would land with no `cargo` on PATH —
+//     and `cargo:` sources adopt `rust` expecting exactly that. A wrong
+//     translation is worse here than an honest gap: the tool would read
+//     as installed and the backend would still be missing.
+//
+// So of the four backends this engine's source kinds adopt, node and go
+// arrive by translation, uv arrives as its own registry entry, and rust
+// is a gap a consumer bundles itself.
+var coreBackendAqua = map[string]string{
+	"bun":  "oven-sh/bun",
+	"deno": "denoland/deno",
+	"go":   "golang/go",
+	"node": "nodejs/node",
+	"zig":  "ziglang/zig",
+}
+
 // resolveBackend maps a mise backend spec onto an engine source. aqua
 // backends must have a parseable, linux-supported definition in the
 // aqua registry checkout; ecosystem backends pass through.
@@ -549,6 +618,22 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 			return "", nil, err
 		}
 		return "aqua:" + ref, aq, nil
+	case "core":
+		// A core tool aqua does not package stays unavailable, reported
+		// with its backend so the reason names what could not be read.
+		aquaRef, ok := coreBackendAqua[ref]
+		if !ok {
+			return "", nil, errUnsupported
+		}
+		aq, err := loadAquaDef(aquaDir, aquaRef)
+		if err != nil {
+			// The translation table names a package the pinned aqua
+			// registry does not carry, or carries in a shape the runtime
+			// cannot evaluate. Not fatal: the tool is simply unavailable,
+			// exactly as it was before the table existed.
+			return "", nil, errUnsupported
+		}
+		return "aqua:" + aquaRef, aq, nil
 	case "github":
 		// mise's github backend (formerly ubi) installs a release asset,
 		// which is what the release source does. The registry names the
@@ -566,9 +651,9 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 	case "go":
 		return "go:" + ref, nil, nil
 	default:
-		// core:*, asdf:*, vfox:*, conda:*, gem:*, dotnet:*, spm:* are
-		// not supported natively; core runtimes arrive via overlays and the
-		// rest are recorded as unavailable with their backend as the reason.
+		// asdf:*, vfox:*, conda:*, gem:*, dotnet:*, spm:* are not
+		// supported natively and are recorded as unavailable with their
+		// backend as the reason.
 		return "", nil, errUnsupported
 	}
 }

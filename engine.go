@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
 	"runtime"
 	"slices"
@@ -20,6 +21,11 @@ var (
 	// ErrHasDependents marks a refused remove/disable: enabled entries
 	// still require the tool (directly or as an implied backend).
 	ErrHasDependents = errors.New("tool has dependents")
+	// ErrEssential marks a refused remove: the consumer's bundled-tools
+	// file declares this tool necessary (CatalogEntry.Essential).
+	// Disabling it is still allowed — see that field for why only deletion
+	// is refused.
+	ErrEssential = errors.New("tool is essential to this application")
 	// ErrDisabled marks an install attempt on a disabled template.
 	// Enabling is an explicit state change (Patch Disabled=false), never
 	// a side effect of a retry.
@@ -50,13 +56,47 @@ func (e *DependentsError) Error() string {
 // Is makes errors.Is(err, ErrHasDependents) match.
 func (e *DependentsError) Is(target error) bool { return target == ErrHasDependents }
 
-// backendDeps maps a source kind to the tool that must be installed
+// defaultBackends maps a source kind to the tool that must be installed
 // first for the backend to function at all.
-var backendDeps = map[string]string{
+//
+// It is the FALLBACK, not the authority: the answer belongs to the
+// catalog (Catalog.Backends), because which entry provides npm is a fact
+// about the catalog's contents while knowing how to run npm is the
+// engine's. This copy exists so a catalog compiled before that field
+// existed, or one that names only some kinds, still resolves a backend.
+var defaultBackends = map[string]string{
 	SourceNpm:   "node",
 	SourcePip:   "uv",
 	SourceCargo: "rust",
 	SourceGo:    "go",
+}
+
+// backendFor names the tool a source kind needs installed first, the
+// catalog's answer taking precedence over defaultBackends per KIND rather
+// than wholesale — a catalog that names one kind must not silently drop
+// the rest.
+func backendFor(backends map[string]string, kind string) (string, bool) {
+	if d, ok := backends[kind]; ok {
+		// An empty value is how a catalog says this kind needs no backend
+		// at all, which a missing key cannot express while a default
+		// exists.
+		return d, d != ""
+	}
+	d, ok := defaultBackends[kind]
+	return d, ok
+}
+
+// DefaultBackends returns the source-kind-to-backend-tool map a compiled
+// catalog should carry: npm needs node, pip needs uv, cargo needs rust,
+// go needs go.
+//
+// Exported for the catalog compiler, which stamps it into every artifact
+// so the answer travels as DATA rather than living only in this package's
+// source. A consumer that provides a different backend edits the field
+// in its own bundled-tools file; nothing has to reach a Go map.
+// Returns a fresh copy on every call.
+func DefaultBackends() map[string]string {
+	return maps.Clone(defaultBackends)
 }
 
 // --- read side ---
@@ -72,7 +112,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	installing := e.queue.InstallingSet()
 
 	res := &Inventory{Tools: []ToolInfo{}, System: e.systemTools(), Job: e.queue.Active()}
-	dependents := dependentsIndex(m)
+	dependents := dependentsIndex(m, e.backends())
 	names := make([]string, 0, len(m.Tools))
 	for n := range m.Tools {
 		names = append(names, n)
@@ -105,6 +145,7 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, 
 	}
 	if cat, ok := e.cat().Lookup(name); ok {
 		v.Lsp = cat.Lsp
+		v.Essential = cat.Essential
 	}
 	// The checksum answer describes an artifact that is present, so it
 	// travels only with an installed row: a status surviving a wiped
@@ -477,7 +518,7 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 	}
 	var out patchOutcome
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return patchManifest(m, name, &req, &out)
+		return patchManifest(m, name, &req, &out, e.backends())
 	})
 	if err != nil {
 		return nil, err
@@ -488,14 +529,14 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 // patchManifest applies one PatchRequest to the manifest: the dependent
 // refusal (or, with Force, the one-level disable cascade mirroring
 // RemoveWithDependents) plus the field overlay. Records what changed in out.
-func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome) error {
+func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome, backends map[string]string) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
 	}
 	var deps []string
 	if req.Disabled != nil && *req.Disabled && !t.Disabled {
-		deps = enabledDependents(m, name)
+		deps = enabledDependents(m, name, backends)
 		if len(deps) > 0 && !req.Force {
 			return &DependentsError{Dependents: deps}
 		}
@@ -600,14 +641,14 @@ func (e *Engine) rollbackPatch(name string, undo func(*Tool)) {
 // name, directly (Requires) or as the implied backend of their source
 // kind. Disabled templates never block; hydration re-adopts their
 // dependencies when they are enabled.
-func enabledDependents(m *Manifest, name string) []string {
+func enabledDependents(m *Manifest, name string, backends map[string]string) []string {
 	var out []string
 	for other := range m.Tools {
 		t := m.Tools[other]
 		if other == name || t.Disabled {
 			continue
 		}
-		if dependsOn(&t, other, name) {
+		if dependsOn(&t, other, name, backends) {
 			out = append(out, other)
 		}
 	}
@@ -619,14 +660,14 @@ func enabledDependents(m *Manifest, name string) []string {
 // pass over the manifest rather than one pass per row. Inventory renders
 // every tool, so the per-name form would make the read quadratic in the
 // manifest size for an answer the same walk already produces.
-func dependentsIndex(m *Manifest) map[string][]string {
+func dependentsIndex(m *Manifest, backends map[string]string) map[string][]string {
 	out := map[string][]string{}
 	for other := range m.Tools {
 		t := m.Tools[other]
 		if t.Disabled {
 			continue
 		}
-		for _, dep := range depsOf(other, &t) {
+		for _, dep := range depsOf(other, &t, backends) {
 			out[dep] = append(out[dep], other)
 		}
 	}
@@ -640,8 +681,8 @@ func dependentsIndex(m *Manifest) map[string][]string {
 // edge set from depsOf, the one place that decides what a dependency
 // edge is, so the refusal and the inventory's advisory answer cannot
 // disagree about one.
-func dependsOn(t *Tool, other, name string) bool {
-	return slices.Contains(depsOf(other, t), name)
+func dependsOn(t *Tool, other, name string, backends map[string]string) bool {
+	return slices.Contains(depsOf(other, t, backends), name)
 }
 
 // Install re-enqueues an install for an existing, enabled tool (retry /
@@ -711,7 +752,7 @@ func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	var dependents []string
 	removed := map[string]Tool{}
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return removeFromManifest(m, name, cascade, &dependents, removed)
+		return removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge())
 	})
 	if err != nil {
 		return nil, dependents, err
@@ -729,18 +770,64 @@ func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	return jv, dependents, nil
 }
 
+// removeKnowledge is the CATALOG-derived input a removal needs: what
+// counts as a dependency edge, and which names the product declares
+// essential. Bundled because both answers come from the same live catalog
+// and must be read once per call — a swap partway through a cascade would
+// otherwise change the rules mid-decision.
+type removeKnowledge struct {
+	backends  map[string]string
+	essential func(name string) bool
+}
+
+// removeKnowledge snapshots the live catalog for one removal.
+//
+// Essential is read HERE rather than from the manifest row, and that is
+// the point: it is the bundle's live answer, so a product that stops
+// depending on a tool releases it immediately instead of waiting for
+// something to re-resolve the row.
+func (e *Engine) removeKnowledge() removeKnowledge {
+	c := e.cat()
+	return removeKnowledge{
+		backends: e.backends(),
+		essential: func(name string) bool {
+			if c == nil {
+				return false
+			}
+			cat, ok := c.Lookup(name)
+			return ok && cat.Essential
+		},
+	}
+}
+
 // removeFromManifest deletes name (and, with cascade, its enabled
 // dependents) from m, recording the removed entries. It refuses with
 // *DependentsError when enabled entries require name and cascade is
 // false.
-func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool) error {
+func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool, rc removeKnowledge) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
 	}
-	*dependents = enabledDependents(m, name)
+	// Before the dependents check, so the answer does not depend on
+	// whether anything happens to require it, and so RemoveWithDependents
+	// cannot delete it as somebody else's collateral.
+	if rc.essential(name) {
+		return fmt.Errorf("%w: %s", ErrEssential, name)
+	}
+	*dependents = enabledDependents(m, name, rc.backends)
 	if len(*dependents) > 0 && !cascade {
 		return &DependentsError{Dependents: *dependents}
+	}
+	// A cascade must not take an essential row down with it. Refusing the
+	// whole call is the honest answer: the caller asked for a set, and
+	// removing part of it would leave the user believing the rest went too.
+	if cascade {
+		for _, d := range *dependents {
+			if rc.essential(d) {
+				return fmt.Errorf("%w: %s, which requires %s", ErrEssential, d, name)
+			}
+		}
 	}
 	removed[name] = t
 	delete(m.Tools, name)
@@ -951,11 +1038,14 @@ func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output 
 	var failed []string
 	var firstErr error
 	blockers := installBlockers{}
+	// Resolved once for the whole plan: a catalog swap mid-job must not
+	// change what counts as a dependency edge partway through.
+	backends := e.backends()
 	for _, n := range p.ordered {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if cause, blocked := blockers.cause(m, n); blocked {
+		if cause, blocked := blockers.cause(m, n, backends); blocked {
 			e.recordBlocked(n, cause, output)
 			blockers[n] = cause
 			continue
@@ -993,12 +1083,12 @@ type installBlockers map[string]string
 // this replaces: with node unable to run, `pyright` was installed anyway
 // and failed with `npm failed: exit status 127` about ITSELF, so three
 // rows accused themselves of a fault none of them had.
-func (b installBlockers) cause(m *Manifest, n string) (string, bool) {
+func (b installBlockers) cause(m *Manifest, n string, backends map[string]string) (string, bool) {
 	t, ok := m.Tools[n]
 	if !ok {
 		return "", false
 	}
-	for _, dep := range depsOf(n, &t) {
+	for _, dep := range depsOf(n, &t, backends) {
 		root, stopped := b[dep]
 		if !stopped {
 			continue
@@ -1085,7 +1175,7 @@ func (p *installPlan) visit(ctx context.Context, n string, stack []string) error
 		p.enabled = append(p.enabled, n)
 	}
 	stack = append(stack, n)
-	for _, dep := range depsOf(n, &t) {
+	for _, dep := range depsOf(n, &t, p.e.backends()) {
 		if err := p.visit(ctx, dep, stack); err != nil {
 			return err
 		}
@@ -1140,10 +1230,10 @@ func (e *Engine) adoptDependency(ctx context.Context, m *Manifest, n string) (To
 // inventory's advisory dependents field, so none of the three can hold a
 // different idea of what depends on what. Self-references are dropped
 // (an entry named after its own backend, e.g. the `go` entry itself).
-func depsOf(name string, t *Tool) []string {
+func depsOf(name string, t *Tool, backends map[string]string) []string {
 	var deps []string
 	kind, _, _ := strings.Cut(t.Source, ":")
-	if d, ok := backendDeps[kind]; ok && d != name {
+	if d, ok := backendFor(backends, kind); ok && d != name {
 		deps = append(deps, d)
 	}
 	for _, r := range t.Requires {

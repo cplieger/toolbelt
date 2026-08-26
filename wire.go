@@ -87,14 +87,14 @@ type Job struct {
 // ToolInfo is one tool row in Inventory: the manifest entry joined with
 // the engine's install state.
 type ToolInfo struct {
-	Name             string   `json:"name"`
-	Source           string   `json:"source,omitempty"`
-	Version          string   `json:"version,omitempty"`
-	Description      string   `json:"description,omitempty"`
-	Origin           string   `json:"origin,omitempty"`
-	InstalledVersion string   `json:"installed_version,omitempty"`
-	Latest           string   `json:"latest,omitempty"`
-	LastError        string   `json:"last_error,omitempty"`
+	Name             string `json:"name"`
+	Source           string `json:"source,omitempty"`
+	Version          string `json:"version,omitempty"`
+	Description      string `json:"description,omitempty"`
+	Origin           string `json:"origin,omitempty"`
+	InstalledVersion string `json:"installed_version,omitempty"`
+	Latest           string `json:"latest,omitempty"`
+	LastError        string `json:"last_error,omitempty"`
 	// Checksum reports how the INSTALLED artifact's integrity was
 	// established, copied from ToolStatus.Checksum: "verified" when the
 	// definition declared a checksum source and the digest matched,
@@ -107,8 +107,8 @@ type ToolInfo struct {
 	// source kind: whether verification happened is a fact about the
 	// install that ran, and 252 of the catalog's aqua entries declare no
 	// checksum while the other 402 do.
-	Checksum   string   `json:"checksum,omitempty"`
-	Requires   []string `json:"requires,omitempty"`
+	Checksum string   `json:"checksum,omitempty"`
+	Requires []string `json:"requires,omitempty"`
 	// Dependents names the ENABLED entries that require this tool,
 	// directly (their Requires) or as the implied backend of their source
 	// kind. It is the answer a consumer needs BEFORE it sends a disable
@@ -123,6 +123,11 @@ type ToolInfo struct {
 	Dependents []string `json:"dependents,omitempty"`
 	Pin        bool     `json:"pin,omitempty"`
 	Disabled   bool     `json:"disabled,omitempty"`
+	// Essential marks a tool this application NEEDS: the engine
+	// refuses to remove it (ErrEssential), so a consumer renders it apart
+	// from the tools a user chose and offers no delete control. Disable
+	// remains available, which is the honest escape hatch.
+	Essential bool `json:"essential,omitempty"`
 	// Lsp marks a language-server entry (catalog knowledge); consumers
 	// use it for the no-LSP-enabled warning and UI badges.
 	Lsp        bool `json:"lsp,omitempty"`

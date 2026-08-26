@@ -184,6 +184,18 @@ type Engine struct {
 // cat returns the current catalog snapshot.
 func (e *Engine) cat() *Catalog { return e.catalog.Load() }
 
+// backends is the source-kind-to-backend-tool map the dependency edge
+// reads, taken from the loaded catalog. Nil is fine: backendFor falls
+// back per kind, so an engine with no catalog at all still adopts the
+// standard backends.
+func (e *Engine) backends() map[string]string {
+	c := e.cat()
+	if c == nil {
+		return nil
+	}
+	return c.Backends
+}
+
 // urlPolicyTransport validates every request URL (including redirect
 // hops re-entering RoundTrip) against the SSRF URL policy before the
 // underlying transport dials.

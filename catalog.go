@@ -44,6 +44,28 @@ type CatalogEntry struct {
 	// Lsp marks language-server entries; drives the consumers'
 	// no-LSP-enabled warning and UI badges.
 	Lsp bool `json:"lsp,omitempty"`
+	// Essential marks a tool the PRODUCT depends on: removing it breaks a
+	// feature the user did not ask to lose. The engine refuses to remove
+	// such a row (ErrEssential) and a consumer groups it apart from the
+	// tools a user chose, with no delete control.
+	//
+	// It is declared by a consumer's BUNDLED TOOLS file, never by registry
+	// data, because "vibekit cannot do forge auth without gh" is a fact
+	// about vibekit and not about gh. The reference carries none of these.
+	//
+	// The companion flag is Featured, and together they are the two
+	// reasons a product bundles a tool at all: Essential means NECESSARY
+	// (a feature breaks without it) and Featured means RECOMMENDED
+	// (surfaced first, removable like anything else).
+	//
+	// It is not a lock on the version (Pin) and not a lock on the
+	// installed state: an essential tool can still be updated, and it can
+	// still be DISABLED, which is the escape hatch for a user who wants it
+	// gone without breaking the manifest's shape. Only deletion is
+	// refused, because deletion is the operation the product cannot
+	// recover from silently — the row carrying the install knowledge is
+	// what disappears.
+	Essential bool `json:"essential,omitempty"`
 	// Reason is set only on Catalog.Unavailable entries: the registry
 	// backend the compiler could not use, e.g. "core:python" or
 	// "vfox:mise-plugins/vfox-postgres". It is the whole explanation a
@@ -86,6 +108,18 @@ type Catalog struct {
 	// fact about the registry, whereas "this release has no asset for
 	// your arch" is a runtime answer belonging to the install job.
 	Unavailable map[string]CatalogEntry `json:"unavailable,omitempty"`
+	// Backends names the tool each source kind needs installed before it
+	// can install anything: npm needs node, pip needs uv, and so on. The
+	// engine adopts the named tool as a dependency (see backendFor).
+	//
+	// It is DATA rather than a map in the engine because it is a fact
+	// about the catalog, not about the mechanism. The engine knows how to
+	// run npm; which catalog entry provides npm is the catalog's answer,
+	// and a consumer that bundles a different provider says so
+	// here instead of patching a Go map it cannot reach. An absent or
+	// partial map falls back to defaultBackends, so a catalog compiled
+	// before this field existed keeps working.
+	Backends map[string]string `json:"backends,omitempty"`
 	// aliases indexes alias -> entry name, built once at load so
 	// Lookup doesn't scan ~700 entries per aliased miss on hot
 	// inventory paths. Nil (a literal-constructed catalog) falls back
