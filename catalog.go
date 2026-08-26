@@ -44,6 +44,11 @@ type CatalogEntry struct {
 	// Lsp marks language-server entries; drives the consumers'
 	// no-LSP-enabled warning and UI badges.
 	Lsp bool `json:"lsp,omitempty"`
+	// Reason is set only on Catalog.Unavailable entries: the registry
+	// backend the compiler could not use, e.g. "core:python" or
+	// "vfox:mise-plugins/vfox-postgres". It is the whole explanation a
+	// consumer can show for a tool it knows about and cannot install.
+	Reason string `json:"reason,omitempty"`
 }
 
 // Catalog is the compiled tool-catalog.json document.
@@ -58,6 +63,26 @@ type Catalog struct {
 	// makes every copy (baked, cached, fetched) self-contained.
 	Licenses map[string]string       `json:"licenses,omitempty"`
 	Entries  map[string]CatalogEntry `json:"entries"`
+	// Unavailable holds registry entries for which no install source
+	// exists at all: tools this catalog knows about and cannot install
+	// (mise core:, vfox:, conda:, gem:, spm: backends, and aqua package
+	// types the runtime evaluator does not cover). Each carries a Reason.
+	//
+	// Deliberately a SEPARATE map rather than a state field on Entries.
+	// The compiled catalog is published to a stable URL and fetched at
+	// runtime by engines of any age, so a sourceless row inside Entries
+	// would reach an older engine's Search, hydrate an empty Source
+	// through mergeCatalogDefaults, and fail Add on a row its UI had
+	// offered. An unknown top-level key is ignored wholesale instead, so
+	// an old engine behaves exactly as it does today. It also keeps the
+	// Entries floor in cmd/toolcatalog meaningful: a registry that
+	// compiles nothing cannot pad the count with skipped rows.
+	//
+	// The two key sets are disjoint (asserted at compile time), and
+	// membership is architecture-INDEPENDENT: "no source exists" is a
+	// fact about the registry, whereas "this release has no asset for
+	// your arch" is a runtime answer belonging to the install job.
+	Unavailable map[string]CatalogEntry `json:"unavailable,omitempty"`
 	// aliases indexes alias -> entry name, built once at load so
 	// Lookup doesn't scan ~700 entries per aliased miss on hot
 	// inventory paths. Nil (a literal-constructed catalog) falls back
@@ -79,6 +104,9 @@ func parseCatalog(data []byte) (*Catalog, error) {
 	if c.Entries == nil {
 		c.Entries = map[string]CatalogEntry{}
 	}
+	if c.Unavailable == nil {
+		c.Unavailable = map[string]CatalogEntry{}
+	}
 	c.aliases = buildAliasIndex(c.Entries)
 	return &c, nil
 }
@@ -97,7 +125,7 @@ func loadCatalogFile(path string) (*Catalog, error) {
 // nothing, manual/ecosystem sources still install, and entries that
 // need catalog knowledge fail their jobs with a named error.
 func loadCatalog(path string, log *slog.Logger) *Catalog {
-	empty := &Catalog{Entries: map[string]CatalogEntry{}}
+	empty := &Catalog{Entries: map[string]CatalogEntry{}, Unavailable: map[string]CatalogEntry{}}
 	if path == "" {
 		return empty
 	}
@@ -157,13 +185,46 @@ func (c *Catalog) Search(query string) []CatalogEntry {
 	if q == "" {
 		return c.Featured()
 	}
+	return rankEntries(c.Entries, q)
+}
+
+// SearchUnavailable ranks the entries no install source exists for
+// (see [Catalog.Unavailable]) with the same scoring Search uses, so a
+// consumer can tell a user that a tool is known and why it cannot be
+// installed instead of showing an empty result. An empty query returns
+// nothing: the unavailable set has no featured members and listing 200
+// uninstallable tools is not a browse surface.
+//
+// The returned entries alias the catalog: do not mutate their slice fields
+// (see [CatalogEntry]).
+func (c *Catalog) SearchUnavailable(query string) []CatalogEntry {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return nil
+	}
+	return rankEntries(c.Unavailable, q)
+}
+
+// rankEntries scores one entry map against a lowercased query and
+// returns the best searchLimit matches.
+//
+// Ties break on NAME LENGTH before name, and that is load-bearing rather
+// than cosmetic. Every prefix match scores the same, so with a
+// name-ascending tie-break alone a short exact-ish name loses to every
+// alphabetically-earlier longer one that shares its prefix. Measured
+// over Debian trixie's 68,799 package names, `python3` ranked 909th of
+// 6,607 hits for the query "python" (behind python-acme-doc and 907
+// siblings) and `nodejs` ranked 1,701st for "node"; with the length
+// tie-break they rank 1st and 3rd. The catalog's own corpus benefits the
+// same way, so the fix belongs here and not in a per-corpus wrapper.
+func rankEntries(entries map[string]CatalogEntry, q string) []CatalogEntry {
 	type scored struct {
 		e     CatalogEntry
 		score int
 	}
 	var hits []scored
-	for name := range c.Entries {
-		e := c.Entries[name]
+	for name := range entries {
+		e := entries[name]
 		score := matchScore(name, &e, q)
 		if score == 0 {
 			continue
@@ -171,8 +232,12 @@ func (c *Catalog) Search(query string) []CatalogEntry {
 		hits = append(hits, scored{e, score})
 	}
 	slices.SortStableFunc(hits, func(a, b scored) int {
-		// score descending, then name ascending.
-		return cmp.Or(cmp.Compare(b.score, a.score), cmp.Compare(a.e.Name, b.e.Name))
+		// score descending, then name length ascending, then name ascending.
+		return cmp.Or(
+			cmp.Compare(b.score, a.score),
+			cmp.Compare(len(a.e.Name), len(b.e.Name)),
+			cmp.Compare(a.e.Name, b.e.Name),
+		)
 	})
 	lim := min(len(hits), searchLimit)
 	out := make([]CatalogEntry, 0, lim)
@@ -265,6 +330,18 @@ func VerifyCatalog(c *Catalog, require []string) []error {
 func verifyEntry(c *Catalog, name string) error {
 	e, ok := c.Lookup(name)
 	if !ok {
+		// A required name that compiled into Unavailable is a REQUIREMENT
+		// failure, not a missing name, and saying so is the difference
+		// between "the registry renamed it" and "the registry stopped
+		// giving us a way to install it". Without this branch the floor
+		// gate weakens silently the moment a required tool's backend
+		// changes upstream.
+		if u, uok := c.Unavailable[name]; uok {
+			if u.Reason != "" {
+				return fmt.Errorf("no install source (%s)", u.Reason)
+			}
+			return errors.New("no install source")
+		}
 		return errors.New("not in the catalog")
 	}
 	if e.Source == "" {
@@ -325,18 +402,36 @@ func applyOverlayDoc(c *Catalog, ov overlayDoc, resolveAqua func(ref string) (*A
 	for name := range ov.Entries {
 		patch := ov.Entries[name]
 		if patch.Source == "" {
-			cur, ok := c.Entries[name]
+			// A display patch targets whichever map holds the name. An
+			// unavailable entry is patchable too: its description is what a
+			// consumer shows beside the reason, and refusing here would make
+			// an overlay's currency depend on whether the registry happened
+			// to compile that tool this week.
+			if cur, ok := c.Entries[name]; ok {
+				mergeOverlayEntry(&cur, &patch)
+				c.Entries[name] = cur
+				continue
+			}
+			cur, ok := c.Unavailable[name]
 			if !ok {
 				return fmt.Errorf("overlay patches unknown tool %q", name)
 			}
 			mergeOverlayEntry(&cur, &patch)
-			c.Entries[name] = cur
+			c.Unavailable[name] = cur
 			continue
 		}
 		if err := overlayReplaceEntry(name, &patch, resolveAqua); err != nil {
 			return err
 		}
 		c.Entries[name] = patch
+		// An overlay supplying a source is exactly how a tool the compiler
+		// skipped becomes installable (node, go, java, rust and glab are all
+		// mise core:/gitlab: drops that overlays.json revives). Without this
+		// delete, all five sit in BOTH maps: the invariants pass for each row
+		// on its own, Search offers the installable one, SearchUnavailable
+		// simultaneously reports it as having no installer, and the two
+		// answers disagree with no way for a consumer to tell which is true.
+		delete(c.Unavailable, name)
 	}
 	// Overlay entries may add names and aliases; rebuild the index.
 	c.aliases = buildAliasIndex(c.Entries)

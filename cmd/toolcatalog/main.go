@@ -89,10 +89,11 @@ func runCompile(args []string) {
 	}
 
 	catalog := &toolbelt.Catalog{
-		Refs:      parseRefs(*refsFlag),
-		Generated: time.Now().UTC().Format(time.RFC3339),
-		Licenses:  loadRegistryLicenses(*miseDir, *aquaDir),
-		Entries:   map[string]toolbelt.CatalogEntry{},
+		Refs:        parseRefs(*refsFlag),
+		Generated:   time.Now().UTC().Format(time.RFC3339),
+		Licenses:    loadRegistryLicenses(*miseDir, *aquaDir),
+		Entries:     map[string]toolbelt.CatalogEntry{},
+		Unavailable: map[string]toolbelt.CatalogEntry{},
 	}
 	stats := compileMiseEntries(catalog, *miseDir, *aquaDir)
 
@@ -190,10 +191,17 @@ func readRequirements(path string) []string {
 }
 
 // compileStats counts the outcome of a catalog compile run.
-type compileStats struct{ tools, aquaBacked, skipped int }
+type compileStats struct{ tools, aquaBacked, unavailable, foreign int }
 
 // compileMiseEntries walks the mise registry, compiling each usable
-// tool into the catalog and returning the run's counts.
+// tool into the catalog and recording the rest.
+//
+// A tool with no usable backend is NOT discarded: it lands in
+// catalog.Unavailable with the backend that defeated it, so a consumer
+// can answer "we know this tool and cannot install it" instead of
+// returning nothing for a name the user can see in the registry. Only
+// entries that are not for linux at all are dropped outright, since
+// nothing here could ever install them.
 func compileMiseEntries(catalog *toolbelt.Catalog, miseDir, aquaDir string) compileStats {
 	var stats compileStats
 	entries, err := os.ReadDir(miseDir)
@@ -205,38 +213,69 @@ func compileMiseEntries(catalog *toolbelt.Catalog, miseDir, aquaDir string) comp
 			continue
 		}
 		name := strings.TrimSuffix(de.Name(), ".toml")
-		entry, ok, cerr := compileEntry(miseDir, aquaDir, name)
+		entry, outcome, cerr := compileEntry(miseDir, aquaDir, name)
 		if cerr != nil {
 			log.Fatalf("toolcatalog: %s: %v", name, cerr)
 		}
-		if !ok {
-			stats.skipped++
-			continue
-		}
-		catalog.Entries[name] = entry
-		stats.tools++
-		if strings.HasPrefix(entry.Source, "aqua:") {
-			stats.aquaBacked++
+		switch outcome.kind {
+		case outcomeCompiled:
+			catalog.Entries[name] = entry
+			stats.tools++
+			if strings.HasPrefix(entry.Source, "aqua:") {
+				stats.aquaBacked++
+			}
+		case outcomeUnavailable:
+			entry.Reason = outcome.reason
+			catalog.Unavailable[name] = entry
+			stats.unavailable++
+		case outcomeForeign:
+			stats.foreign++
 		}
 	}
 	return stats
 }
 
 // checkCatalogInvariants fails the build if the compiled catalog is
-// implausibly small or a featured entry lacks a source.
+// implausibly small or self-contradictory.
 func checkCatalogInvariants(catalog *toolbelt.Catalog) {
 	// Build invariants: a Renovate ref bump that guts the catalog must
-	// fail loudly, not ship. Floor chosen well under the current ~700
+	// fail loudly, not ship. Floor chosen well under the current ~720
 	// but far above any plausible healthy shrink.
 	const minEntries = 400
 	if len(catalog.Entries) < minEntries {
-		log.Fatalf("toolcatalog: only %d entries compiled (< %d) — registry format drift?",
+		log.Fatalf("toolcatalog: only %d installable entries compiled (< %d): registry format drift?",
 			len(catalog.Entries), minEntries)
+	}
+	// The other direction is a real failure too, and it is the one a naive
+	// reading misses: if the compiler suddenly resolves everything, the
+	// likelier cause is that backend classification broke and every entry
+	// fell into one bucket. ~200 tools have no install source on any
+	// healthy day.
+	const minUnavailable = 50
+	if len(catalog.Unavailable) < minUnavailable {
+		log.Fatalf("toolcatalog: only %d unavailable entries recorded (< %d): backend classification drift?",
+			len(catalog.Unavailable), minUnavailable)
 	}
 	for name := range catalog.Entries {
 		e := catalog.Entries[name]
-		if e.Featured && e.Source == "" {
-			log.Fatalf("toolcatalog: featured entry %q has no source", name)
+		if e.Source == "" {
+			log.Fatalf("toolcatalog: installable entry %q has no source", name)
+		}
+		// Disjointness. An overlay supplying a source for a skipped tool
+		// must evict it from the other map (ApplyOverlay does); a name in
+		// both makes Search and SearchUnavailable disagree about one tool
+		// with no way for a consumer to tell which answer is true.
+		if _, dup := catalog.Unavailable[name]; dup {
+			log.Fatalf("toolcatalog: %q is in both entries and unavailable", name)
+		}
+	}
+	for name := range catalog.Unavailable {
+		u := catalog.Unavailable[name]
+		if u.Source != "" {
+			log.Fatalf("toolcatalog: unavailable entry %q carries source %q", name, u.Source)
+		}
+		if u.Reason == "" {
+			log.Fatalf("toolcatalog: unavailable entry %q carries no reason", name)
 		}
 	}
 }
@@ -250,8 +289,8 @@ func writeCatalog(catalog *toolbelt.Catalog, outPath string, stats compileStats)
 	if err := os.WriteFile(outPath, data, 0o600); err != nil {
 		log.Fatalf("toolcatalog: write: %v", err)
 	}
-	fmt.Printf("toolcatalog: %d tools (%d aqua-backed, %d skipped) -> %s (%d KB)\n",
-		stats.tools, stats.aquaBacked, stats.skipped, outPath, len(data)/1024)
+	fmt.Printf("toolcatalog: %d tools (%d aqua-backed), %d unavailable, %d non-linux -> %s (%d KB)\n",
+		stats.tools, stats.aquaBacked, stats.unavailable, stats.foreign, outPath, len(data)/1024)
 }
 
 func parseRefs(s string) map[string]string {
@@ -274,51 +313,106 @@ type miseTool struct {
 	OS          []string `toml:"os"`
 }
 
+// outcomeKind is what compileEntry decided about one registry entry.
+type outcomeKind int
+
+const (
+	outcomeCompiled    outcomeKind = iota // a supported backend resolved
+	outcomeUnavailable                    // linux-capable, no supported backend
+	outcomeForeign                        // not for linux at all
+)
+
+// outcome pairs the decision with the backend that produced it. reason
+// is set only for outcomeUnavailable and is the string a consumer shows.
+type outcome struct {
+	kind   outcomeKind
+	reason string
+}
+
+// linuxCapable reports whether a mise entry's `os` list admits linux.
+//
+// Matching is by PREFIX, not equality: the registry writes both `linux`
+// and platform-qualified forms such as `linux-x64`, and an equality test
+// drops the qualified ones as foreign. Measured on mise c2a0cb9,
+// `android-cli` is dropped that way while declaring linux support. An
+// absent or empty list means no restriction.
+func linuxCapable(list []string) bool {
+	if len(list) == 0 {
+		return true
+	}
+	for _, v := range list {
+		if v == "linux" || strings.HasPrefix(v, "linux-") {
+			return true
+		}
+	}
+	return false
+}
+
 // compileEntry builds one catalog entry from a mise registry file,
-// resolving the first backend the engine supports. ok=false means the
-// tool has no usable backend (or is not for linux) and is skipped.
-func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, bool, error) {
+// resolving the first backend the engine supports. The outcome says
+// whether it compiled, is linux-capable with no usable backend (the
+// caller records it as unavailable, carrying the returned reason), or is
+// not for linux at all.
+//
+// The returned entry is populated in every case except a hard error, so
+// an unavailable tool still carries its description and aliases.
+func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome, error) {
 	var mt miseTool
 	if _, err := toml.DecodeFile(filepath.Join(miseDir, name+".toml"), &mt); err != nil {
-		return toolbelt.CatalogEntry{}, false, err
+		return toolbelt.CatalogEntry{}, outcome{}, err
 	}
-	if len(mt.OS) > 0 && !slices.Contains(mt.OS, "linux") {
-		return toolbelt.CatalogEntry{}, false, nil
+	if !linuxCapable(mt.OS) {
+		return toolbelt.CatalogEntry{}, outcome{kind: outcomeForeign}, nil
 	}
 	entry := toolbelt.CatalogEntry{
 		Name:        name,
 		Description: strings.TrimSpace(mt.Description),
 		Aliases:     mt.Aliases,
 	}
+	// The first backend that names a reason is the one reported: it is the
+	// registry's own preference, so it is the answer to "why can this not
+	// be installed" that matches what a user reads upstream.
+	var firstReason string
+	noteReason := func(r string) {
+		if firstReason == "" {
+			firstReason = r
+		}
+	}
 	for _, raw := range mt.Backends {
 		backend := backendString(raw)
 		if backend == "" {
+			noteReason("no linux platform")
 			continue
 		}
 		source, aq, err := resolveBackend(aquaDir, backend)
 		if errors.Is(err, errUnsupported) {
-			continue // deliberately unsupported backend kind/type
+			noteReason(backend) // deliberately unsupported backend kind/type
+			continue
 		}
 		if errors.Is(err, fs.ErrNotExist) {
 			// The mise entry references an aqua package the pinned
 			// aqua-registry ref doesn't have (the two registries move
 			// independently). Skip this backend, try the next.
+			noteReason(backend + " (not in the pinned aqua registry)")
 			continue
 		}
 		if err != nil {
 			// Unreadable/unparseable definition = registry format
 			// drift. FAIL the build so a Renovate ref bump can't ship
 			// a silently shrunken catalog.
-			return toolbelt.CatalogEntry{}, false, fmt.Errorf("backend %s: %w", backend, err)
+			return toolbelt.CatalogEntry{}, outcome{}, fmt.Errorf("backend %s: %w", backend, err)
 		}
 		entry.Source = source
 		entry.Aqua = aq
 		if entry.Description == "" && aq != nil {
 			entry.Description = firstLine(aq.Description)
 		}
-		return entry, true, nil
+		return entry, outcome{kind: outcomeCompiled}, nil
 	}
-	return toolbelt.CatalogEntry{}, false, nil
+	if firstReason == "" {
+		firstReason = "no backends declared"
+	}
+	return entry, outcome{kind: outcomeUnavailable, reason: firstReason}, nil
 }
 
 // backendString extracts the backend spec from a string or table form.
