@@ -1,0 +1,17 @@
+# repo aquaproj/aqua
+# tag v2.62.3
+aqua_2.62.3_checksums.txt
+aqua_2.62.3_checksums.txt.sigstore.json
+aqua_darwin_amd64.tar.gz
+aqua_darwin_amd64.tar.gz.sbom.json
+aqua_darwin_arm64.tar.gz
+aqua_darwin_arm64.tar.gz.sbom.json
+aqua_linux_amd64.tar.gz
+aqua_linux_amd64.tar.gz.sbom.json
+aqua_linux_arm64.tar.gz
+aqua_linux_arm64.tar.gz.sbom.json
+aqua_windows_amd64.zip
+aqua_windows_amd64.zip.sbom.json
+aqua_windows_arm64.zip
+aqua_windows_arm64.zip.sbom.json
+multiple.intoto.jsonl

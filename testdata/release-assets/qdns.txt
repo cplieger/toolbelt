@@ -1,0 +1,15 @@
+# repo natesales/q
+# tag v0.19.12
+q_0.19.12_checksums.txt
+q_0.19.12_darwin_amd64.tar.gz
+q_0.19.12_darwin_arm64.tar.gz
+q_0.19.12_freebsd_amd64.tar.gz
+q_0.19.12_freebsd_arm64.tar.gz
+q_0.19.12_linux_amd64.deb
+q_0.19.12_linux_amd64.rpm
+q_0.19.12_linux_amd64.tar.gz
+q_0.19.12_linux_arm64.deb
+q_0.19.12_linux_arm64.rpm
+q_0.19.12_linux_arm64.tar.gz
+q_0.19.12_windows_amd64.zip
+q_0.19.12_windows_arm64.zip

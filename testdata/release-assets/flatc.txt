@@ -1,0 +1,8 @@
+# repo google/flatbuffers
+# tag v25.12.19-2026-02-06-03fffb2
+Linux.flatc.binary.clang++-18.zip
+Linux.flatc.binary.g++-13.zip
+Mac.flatc.binary.zip
+MacIntel.flatc.binary.zip
+multiple.intoto.jsonl
+Windows.flatc.binary.zip

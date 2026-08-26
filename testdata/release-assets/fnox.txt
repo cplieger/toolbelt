@@ -1,0 +1,10 @@
+# repo jdx/fnox
+# tag v1.34.1
+fnox-aarch64-apple-darwin.tar.gz
+fnox-aarch64-pc-windows-msvc.zip
+fnox-aarch64-unknown-linux-gnu.tar.gz
+fnox-aarch64-unknown-linux-musl.tar.gz
+fnox-x86_64-apple-darwin.tar.gz
+fnox-x86_64-pc-windows-msvc.zip
+fnox-x86_64-unknown-linux-gnu.tar.gz
+fnox-x86_64-unknown-linux-musl.tar.gz

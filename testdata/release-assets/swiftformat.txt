@@ -1,0 +1,9 @@
+# repo nicklockwood/SwiftFormat
+# tag 0.62.1
+SwiftFormat.amd64.msi
+SwiftFormat.arm64.msi
+swiftformat.artifactbundle.zip
+SwiftFormat.for.Xcode.app.zip
+swiftformat.zip
+swiftformat_linux.zip
+swiftformat_linux_aarch64.zip

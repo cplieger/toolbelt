@@ -1,0 +1,9 @@
+# repo kristoff-it/superhtml
+# tag v0.7.0
+aarch64-linux.tar.xz
+aarch64-macos.zip
+aarch64-windows.zip
+wasm32-wasi-lsponly.tar.xz
+x86_64-linux-musl.tar.xz
+x86_64-macos.zip
+x86_64-windows.zip

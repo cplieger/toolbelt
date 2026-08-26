@@ -1,0 +1,6 @@
+# repo uber/mockolo
+# tag 2.6.1
+mockolo.artifactbundle.zip
+mockolo.macos-universal.tar.gz
+mockolo.ubuntu-aarch64.tar.gz
+mockolo.ubuntu-x86_64.tar.gz

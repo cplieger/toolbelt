@@ -1,0 +1,16 @@
+# repo microsoft/aspire
+# tag v13.5.3
+aspire-cli-linux-arm64-13.5.3.tar.gz
+aspire-cli-linux-arm64-13.5.3.tar.gz.sha512
+aspire-cli-linux-musl-x64-13.5.3.tar.gz
+aspire-cli-linux-musl-x64-13.5.3.tar.gz.sha512
+aspire-cli-linux-x64-13.5.3.tar.gz
+aspire-cli-linux-x64-13.5.3.tar.gz.sha512
+aspire-cli-osx-arm64-13.5.3.tar.gz
+aspire-cli-osx-arm64-13.5.3.tar.gz.sha512
+aspire-cli-osx-x64-13.5.3.tar.gz
+aspire-cli-osx-x64-13.5.3.tar.gz.sha512
+aspire-cli-win-arm64-13.5.3.zip
+aspire-cli-win-arm64-13.5.3.zip.sha512
+aspire-cli-win-x64-13.5.3.zip
+aspire-cli-win-x64-13.5.3.zip.sha512

@@ -1,0 +1,11 @@
+# repo flux-subsystem-argo/flamingo
+# tag v0.10.2
+flamingo_0.10.2_checksums.txt
+flamingo_0.10.2_darwin_amd64.tar.gz
+flamingo_0.10.2_darwin_arm64.tar.gz
+flamingo_0.10.2_linux_amd64.tar.gz
+flamingo_0.10.2_linux_arm.tar.gz
+flamingo_0.10.2_linux_arm64.tar.gz
+flamingo_0.10.2_windows_386.zip
+flamingo_0.10.2_windows_amd64.zip
+flamingo_0.10.2_windows_arm64.zip

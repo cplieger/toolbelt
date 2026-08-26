@@ -1,0 +1,8 @@
+# repo codefresh-io/cli
+# tag v1.2.5
+codefresh-v1.2.5-alpine-arm64.tar.gz
+codefresh-v1.2.5-alpine-x64.tar.gz
+codefresh-v1.2.5-linux-arm64.tar.gz
+codefresh-v1.2.5-linux-x64.tar.gz
+codefresh-v1.2.5-macos-x64.tar.gz
+codefresh-v1.2.5-win-x64.zip

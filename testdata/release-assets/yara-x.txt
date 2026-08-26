@@ -1,0 +1,8 @@
+# repo VirusTotal/yara-x
+# tag v1.20.0
+yara-x-capi-v1.20.0-x86_64-pc-windows-msvc.zip
+yara-x-v1.20.0-aarch64-apple-darwin.tar.gz
+yara-x-v1.20.0-aarch64-unknown-linux-gnu.tar.gz
+yara-x-v1.20.0-x86_64-apple-darwin.tar.gz
+yara-x-v1.20.0-x86_64-pc-windows-msvc.zip
+yara-x-v1.20.0-x86_64-unknown-linux-gnu.tar.gz

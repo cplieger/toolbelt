@@ -1,0 +1,8 @@
+# repo foundry-rs/starknet-foundry
+# tag v0.63.0
+starknet-foundry-v0.63.0-aarch64-apple-darwin.tar.gz
+starknet-foundry-v0.63.0-aarch64-unknown-linux-gnu.tar.gz
+starknet-foundry-v0.63.0-aarch64-unknown-linux-musl.tar.gz
+starknet-foundry-v0.63.0-x86_64-apple-darwin.tar.gz
+starknet-foundry-v0.63.0-x86_64-unknown-linux-gnu.tar.gz
+starknet-foundry-v0.63.0-x86_64-unknown-linux-musl.tar.gz

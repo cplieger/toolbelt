@@ -1,0 +1,24 @@
+# repo ddworken/hishtory
+# tag v0.335
+hishtory-darwin-amd64
+hishtory-darwin-amd64-unsigned
+hishtory-darwin-amd64.intoto.jsonl
+hishtory-darwin-arm64
+hishtory-darwin-arm64-unsigned
+hishtory-darwin-arm64.intoto.jsonl
+hishtory-freebsd-amd64
+hishtory-freebsd-amd64.intoto.jsonl
+hishtory-linux-amd64
+hishtory-linux-amd64.intoto.jsonl
+hishtory-linux-arm
+hishtory-linux-arm.intoto.jsonl
+hishtory-linux-arm64
+hishtory-linux-arm64.intoto.jsonl
+hishtory-netbsd-amd64
+hishtory-netbsd-amd64.intoto.jsonl
+hishtory-release-validation-completed
+hishtory-server-darwin-amd64
+hishtory-server-darwin-arm64
+hishtory-server-linux-amd64
+hishtory-server-linux-arm
+hishtory-server-linux-arm64

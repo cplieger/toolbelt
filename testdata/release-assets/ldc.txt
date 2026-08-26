@@ -1,0 +1,19 @@
+# repo ldc-developers/ldc
+# tag v1.42.0
+ldc-1.42.0-src.tar.gz
+ldc-1.42.0-src.zip
+ldc2-1.42.0-alpine-aarch64.tar.xz
+ldc2-1.42.0-alpine-x86_64.tar.xz
+ldc2-1.42.0-android-aarch64.tar.xz
+ldc2-1.42.0-android-armv7a.tar.xz
+ldc2-1.42.0-freebsd-x86_64.tar.xz
+ldc2-1.42.0-linux-aarch64.tar.xz
+ldc2-1.42.0-linux-x86_64.tar.xz
+ldc2-1.42.0-osx-arm64.tar.xz
+ldc2-1.42.0-osx-universal.tar.xz
+ldc2-1.42.0-osx-x86_64.tar.xz
+ldc2-1.42.0-windows-multilib.7z
+ldc2-1.42.0-windows-multilib.exe
+ldc2-1.42.0-windows-x64.7z
+ldc2-1.42.0-windows-x86.7z
+ldc2-1.42.0.sha256sums.txt

@@ -1,0 +1,15 @@
+# repo onyx-lang/onyx
+# tag v0.1.13-beta
+onyx-darwin-none-amd64.tar.gz
+onyx-darwin-none-arm64.tar.gz
+onyx-darwin-ovm-amd64.tar.gz
+onyx-darwin-ovm-arm64.tar.gz
+onyx-darwin-wasmer-amd64.tar.gz
+onyx-darwin-wasmer-arm64.tar.gz
+onyx-linux-none-amd64.tar.gz
+onyx-linux-none-arm64.tar.gz
+onyx-linux-ovm-amd64.tar.gz
+onyx-linux-ovm-arm64.tar.gz
+onyx-linux-wasmer-amd64.tar.gz
+onyx-linux-wasmer-arm64.tar.gz
+onyx-windows-wasmer-amd64.zip

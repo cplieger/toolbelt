@@ -1,0 +1,13 @@
+# repo jgm/pandoc
+# tag 3.10.2
+pandoc-3.10.2-1-amd64.deb
+pandoc-3.10.2-1-arm64.deb
+pandoc-3.10.2-arm64-macOS.pkg
+pandoc-3.10.2-arm64-macOS.zip
+pandoc-3.10.2-linux-amd64.tar.gz
+pandoc-3.10.2-linux-arm64.tar.gz
+pandoc-3.10.2-windows-x86_64.msi
+pandoc-3.10.2-windows-x86_64.zip
+pandoc-3.10.2-x86_64-macOS.pkg
+pandoc-3.10.2-x86_64-macOS.zip
+pandoc-wasm-3.10.2.zip

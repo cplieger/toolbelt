@@ -1,0 +1,18 @@
+# repo nats-io/nsc
+# tag v2.15.0
+nsc-darwin-amd64.zip
+nsc-darwin-arm64.zip
+nsc-freebsd-amd64.zip
+nsc-linux-386.zip
+nsc-linux-amd64.zip
+nsc-linux-arm64.zip
+nsc-linux-armv6.zip
+nsc-linux-armv7.zip
+nsc-v2.15.0-386.deb
+nsc-v2.15.0-amd64.deb
+nsc-v2.15.0-arm64.deb
+nsc-v2.15.0-armv6.deb
+nsc-v2.15.0-armv7.deb
+nsc-windows-amd64.zip
+SHA256SUMS-nsc.txt
+SHA256SUMS-nsc.txt.cosign.sig

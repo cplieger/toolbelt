@@ -1,0 +1,28 @@
+# repo zhanhb/cidr-merger
+# tag v1.1.3
+cidr-merger-darwin-amd64
+cidr-merger-darwin-arm64
+cidr-merger-dragonfly-amd64
+cidr-merger-freebsd-386
+cidr-merger-freebsd-amd64
+cidr-merger-linux-386
+cidr-merger-linux-amd64
+cidr-merger-linux-arm5
+cidr-merger-linux-arm6
+cidr-merger-linux-arm64
+cidr-merger-linux-arm7
+cidr-merger-linux-arm8
+cidr-merger-linux-mips-hard
+cidr-merger-linux-mips-soft
+cidr-merger-linux-mips64-hard
+cidr-merger-linux-mips64-soft
+cidr-merger-linux-mips64le-hard
+cidr-merger-linux-mips64le-soft
+cidr-merger-linux-mipsle-hard
+cidr-merger-linux-mipsle-soft
+cidr-merger-netbsd-386
+cidr-merger-netbsd-amd64
+cidr-merger-openbsd-386
+cidr-merger-openbsd-amd64
+cidr-merger-windows-386.exe
+cidr-merger-windows-amd64.exe

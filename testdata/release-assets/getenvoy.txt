@@ -1,0 +1,7 @@
+# repo tetratelabs-attic/getenvoy
+# tag v0.4.1
+getenvoy_0.4.1_checksums.txt
+getenvoy_0.4.1_darwin_amd64.tar.gz
+getenvoy_0.4.1_darwin_arm64.tar.gz
+getenvoy_0.4.1_linux_amd64.tar.gz
+getenvoy_0.4.1_linux_arm64.tar.gz

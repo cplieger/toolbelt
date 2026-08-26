@@ -1,0 +1,33 @@
+# repo restatedev/restate
+# tag v1.7.7
+dist-manifest.json
+restate-cli-aarch64-apple-darwin.tar.xz
+restate-cli-aarch64-apple-darwin.tar.xz.sha256
+restate-cli-aarch64-unknown-linux-musl.tar.xz
+restate-cli-aarch64-unknown-linux-musl.tar.xz.sha256
+restate-cli-x86_64-apple-darwin.tar.xz
+restate-cli-x86_64-apple-darwin.tar.xz.sha256
+restate-cli-x86_64-unknown-linux-musl.tar.xz
+restate-cli-x86_64-unknown-linux-musl.tar.xz.sha256
+restate-server-aarch64-apple-darwin.tar.xz
+restate-server-aarch64-apple-darwin.tar.xz.sha256
+restate-server-aarch64-unknown-linux-musl.tar.xz
+restate-server-aarch64-unknown-linux-musl.tar.xz.sha256
+restate-server-x86_64-apple-darwin.tar.xz
+restate-server-x86_64-apple-darwin.tar.xz.sha256
+restate-server-x86_64-unknown-linux-musl.tar.xz
+restate-server-x86_64-unknown-linux-musl.tar.xz.sha256
+restate-server.rb
+restate.rb
+restatectl-aarch64-apple-darwin.tar.xz
+restatectl-aarch64-apple-darwin.tar.xz.sha256
+restatectl-aarch64-unknown-linux-musl.tar.xz
+restatectl-aarch64-unknown-linux-musl.tar.xz.sha256
+restatectl-x86_64-apple-darwin.tar.xz
+restatectl-x86_64-apple-darwin.tar.xz.sha256
+restatectl-x86_64-unknown-linux-musl.tar.xz
+restatectl-x86_64-unknown-linux-musl.tar.xz.sha256
+restatectl.rb
+sha256.sum
+source.tar.gz
+source.tar.gz.sha256

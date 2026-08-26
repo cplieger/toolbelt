@@ -1,0 +1,10 @@
+# repo software-mansion/scarb
+# tag v2.20.1
+checksums.sha256
+scarb-v2.20.1-aarch64-apple-darwin.tar.gz
+scarb-v2.20.1-aarch64-unknown-linux-gnu.tar.gz
+scarb-v2.20.1-aarch64-unknown-linux-musl.tar.gz
+scarb-v2.20.1-x86_64-apple-darwin.tar.gz
+scarb-v2.20.1-x86_64-pc-windows-msvc.zip
+scarb-v2.20.1-x86_64-unknown-linux-gnu.tar.gz
+scarb-v2.20.1-x86_64-unknown-linux-musl.tar.gz

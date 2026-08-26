@@ -1,0 +1,20 @@
+# repo protocolbuffers/protobuf-javascript
+# tag v4.0.2
+MODULE.bazel.intoto.jsonl
+protobuf-javascript-4.0.2-linux-aarch_64.tar.gz
+protobuf-javascript-4.0.2-linux-aarch_64.zip
+protobuf-javascript-4.0.2-linux-ppcle_64.tar.gz
+protobuf-javascript-4.0.2-linux-ppcle_64.zip
+protobuf-javascript-4.0.2-linux-s390_64.tar.gz
+protobuf-javascript-4.0.2-linux-s390_64.zip
+protobuf-javascript-4.0.2-linux-x86_32.tar.gz
+protobuf-javascript-4.0.2-linux-x86_32.zip
+protobuf-javascript-4.0.2-linux-x86_64.tar.gz
+protobuf-javascript-4.0.2-linux-x86_64.zip
+protobuf-javascript-4.0.2-osx-aarch_64.zip
+protobuf-javascript-4.0.2-osx-x86_64.zip
+protobuf-javascript-4.0.2-win32.zip
+protobuf-javascript-4.0.2-win64.zip
+protobuf-javascript-4.0.2.tar.gz
+protobuf-javascript-4.0.2.tar.gz.intoto.jsonl
+source.json.intoto.jsonl

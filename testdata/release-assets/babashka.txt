@@ -1,0 +1,18 @@
+# repo babashka/babashka
+# tag v1.13.219
+babashka-1.13.219-linux-aarch64-static.tar.gz
+babashka-1.13.219-linux-aarch64-static.tar.gz.sha256
+babashka-1.13.219-linux-amd64-static.tar.gz
+babashka-1.13.219-linux-amd64-static.tar.gz.sha256
+babashka-1.13.219-linux-amd64.tar.gz
+babashka-1.13.219-linux-amd64.tar.gz.sha256
+babashka-1.13.219-macos-aarch64.tar.gz
+babashka-1.13.219-macos-aarch64.tar.gz.sha256
+babashka-1.13.219-macos-amd64.tar.gz
+babashka-1.13.219-macos-amd64.tar.gz.sha256
+babashka-1.13.219-reflection.json
+babashka-1.13.219-reflection.json.sha256
+babashka-1.13.219-standalone.jar
+babashka-1.13.219-standalone.jar.sha256
+babashka-1.13.219-windows-amd64.zip
+babashka-1.13.219-windows-amd64.zip.sha256

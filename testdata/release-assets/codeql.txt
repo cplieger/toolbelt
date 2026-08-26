@@ -1,0 +1,9 @@
+# repo github/codeql-cli-binaries
+# tag v2.26.4
+codeql-linux64.zip
+codeql-linux64.zip.checksum.txt
+codeql-osx64.zip
+codeql-osx64.zip.checksum.txt
+codeql-win64.zip
+codeql-win64.zip.checksum.txt
+codeql.zip

@@ -1,0 +1,15 @@
+# repo coursier/coursier
+# tag v2.1.24
+coursier
+coursier.jar
+cs-aarch64-apple-darwin-sdk.zip
+cs-aarch64-apple-darwin.gz
+cs-x86_64-apple-darwin-sdk.zip
+cs-x86_64-apple-darwin.gz
+cs-x86_64-pc-linux-container.gz
+cs-x86_64-pc-linux-mostly-static.gz
+cs-x86_64-pc-linux-static-sdk.zip
+cs-x86_64-pc-linux-static.gz
+cs-x86_64-pc-linux.gz
+cs-x86_64-pc-win32-sdk.zip
+cs-x86_64-pc-win32.zip

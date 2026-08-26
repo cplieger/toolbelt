@@ -1,0 +1,13 @@
+# repo can1357/oh-my-pi
+# tag v18.0.6
+LICENSE
+omp-browser-relay-extension.zip
+omp-darwin-arm64
+omp-darwin-x64
+omp-linux-arm64
+omp-linux-musl-arm64
+omp-linux-musl-x64
+omp-linux-x64
+omp-windows-x64.exe
+SHA256SUMS.txt
+THIRD-PARTY-NOTICES.txt

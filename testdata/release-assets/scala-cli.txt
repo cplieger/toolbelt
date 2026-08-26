@@ -1,0 +1,22 @@
+# repo VirtusLab/scala-cli
+# tag v1.16.0
+scala-cli
+scala-cli-aarch64-apple-darwin-sdk.zip
+scala-cli-aarch64-apple-darwin.gz
+scala-cli-aarch64-apple-darwin.pkg
+scala-cli-aarch64-pc-linux-static-sdk.zip
+scala-cli-aarch64-pc-linux.gz
+scala-cli-x86_64-apple-darwin-sdk.zip
+scala-cli-x86_64-apple-darwin.gz
+scala-cli-x86_64-apple-darwin.pkg
+scala-cli-x86_64-pc-linux-mostly-static.gz
+scala-cli-x86_64-pc-linux-static-sdk.zip
+scala-cli-x86_64-pc-linux-static.gz
+scala-cli-x86_64-pc-linux.deb
+scala-cli-x86_64-pc-linux.gz
+scala-cli-x86_64-pc-linux.rpm
+scala-cli-x86_64-pc-win32-sdk.zip
+scala-cli-x86_64-pc-win32.msi
+scala-cli-x86_64-pc-win32.zip
+scala-cli.jar
+vc_redist.x64.exe

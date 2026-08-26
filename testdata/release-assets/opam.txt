@@ -1,0 +1,30 @@
+# repo ocaml/opam
+# tag 2.5.2
+opam-2.5.2-arm64-linux
+opam-2.5.2-arm64-linux.sig
+opam-2.5.2-arm64-macos
+opam-2.5.2-arm64-macos.sig
+opam-2.5.2-armhf-linux
+opam-2.5.2-armhf-linux.sig
+opam-2.5.2-i686-linux
+opam-2.5.2-i686-linux.sig
+opam-2.5.2-ppc64le-linux
+opam-2.5.2-ppc64le-linux.sig
+opam-2.5.2-riscv64-linux
+opam-2.5.2-riscv64-linux.sig
+opam-2.5.2-s390x-linux
+opam-2.5.2-s390x-linux.sig
+opam-2.5.2-x86_64-freebsd
+opam-2.5.2-x86_64-freebsd.sig
+opam-2.5.2-x86_64-linux
+opam-2.5.2-x86_64-linux.sig
+opam-2.5.2-x86_64-macos
+opam-2.5.2-x86_64-macos.sig
+opam-2.5.2-x86_64-netbsd
+opam-2.5.2-x86_64-netbsd.sig
+opam-2.5.2-x86_64-openbsd
+opam-2.5.2-x86_64-openbsd.sig
+opam-2.5.2-x86_64-windows.exe
+opam-2.5.2-x86_64-windows.exe.sig
+opam-full-2.5.2.tar.gz
+opam-full-2.5.2.tar.gz.sig

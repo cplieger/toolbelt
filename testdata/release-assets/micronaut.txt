@@ -1,0 +1,7 @@
+# repo micronaut-projects/micronaut-starter
+# tag v5.1.2
+micronaut-cli-5.1.2.zip
+mn-darwin-aarch64-v5.1.2.zip
+mn-darwin-amd64-v5.1.2.zip
+mn-linux-amd64-v5.1.2.zip
+mn-win-amd64-v5.1.2.zip

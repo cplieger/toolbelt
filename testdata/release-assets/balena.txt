@@ -1,0 +1,16 @@
+# repo balena-io/balena-cli
+# tag v25.2.6
+balena-cli-v25.2.6-linux-arm64-standalone.tar.gz
+balena-cli-v25.2.6-linux-x64-standalone.tar.gz
+balena-cli-v25.2.6-macOS-arm64-installer.pkg
+balena-cli-v25.2.6-macOS-arm64-standalone.tar.gz
+balena-cli-v25.2.6-macOS-x64-installer.pkg
+balena-cli-v25.2.6-macOS-x64-standalone.tar.gz
+balena-cli-v25.2.6-windows-x64-installer.exe
+balena-cli-v25.2.6-windows-x64-standalone.tar.gz
+balena-v25.2.6-b5b9692-darwin-arm64-buildmanifest
+balena-v25.2.6-b5b9692-darwin-x64-buildmanifest
+balena-v25.2.6-b5b9692-linux-arm64-buildmanifest
+balena-v25.2.6-b5b9692-linux-x64-buildmanifest
+balena-v25.2.6-b5b9692-win32-x64-buildmanifest
+npm-sbom.json

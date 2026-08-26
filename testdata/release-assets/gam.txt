@@ -1,0 +1,19 @@
+# repo GAM-team/GAM
+# tag v7.48.00
+gam-7.48.00-linux-arm64-glibc2.35.tar.xz
+gam-7.48.00-linux-arm64-glibc2.39.tar.xz
+gam-7.48.00-linux-arm64-glibc2.43.tar.xz
+gam-7.48.00-linux-arm64-legacy.tar.xz
+gam-7.48.00-linux-x86_64-glibc2.35.tar.xz
+gam-7.48.00-linux-x86_64-glibc2.39.tar.xz
+gam-7.48.00-linux-x86_64-glibc2.43.tar.xz
+gam-7.48.00-linux-x86_64-legacy.tar.xz
+gam-7.48.00-macos14.8-arm64.tar.xz
+gam-7.48.00-macos15.7-arm64.tar.xz
+gam-7.48.00-macos15.7-x86_64.tar.xz
+gam-7.48.00-macos26.5-arm64.tar.xz
+gam-7.48.00-macos26.6-x86_64.tar.xz
+gam-7.48.00-windows-arm64.exe
+gam-7.48.00-windows-arm64.zip
+gam-7.48.00-windows-x86_64.exe
+gam-7.48.00-windows-x86_64.zip

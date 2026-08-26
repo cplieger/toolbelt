@@ -1,0 +1,19 @@
+# repo vmware-tanzu/tanzu-cli
+# tag v1.5.4
+cli.tanzu.vmware.com_cliplugins.yaml
+tanzu-cli-binaries-checksums.txt
+tanzu-cli-binaries-checksums.txt.asc
+tanzu-cli-darwin-amd64.tar.gz
+tanzu-cli-darwin-arm64.tar.gz
+tanzu-cli-linux-amd64.tar.gz
+tanzu-cli-linux-arm64-unstable.tar.gz
+tanzu-cli-windows-amd64.zip
+tanzu-cli-windows-arm64-windows11.zip
+tanzu-plugins-admin-darwin-amd64.tar.gz
+tanzu-plugins-admin-darwin-arm64.tar.gz
+tanzu-plugins-admin-linux-amd64.tar.gz
+tanzu-plugins-admin-linux-arm64.tar.gz
+tanzu-plugins-admin-windows-amd64.zip
+tanzu-plugins-admin-windows-arm64.zip
+tanzu-plugins-checksums.txt
+tanzu-plugins-checksums.txt.asc

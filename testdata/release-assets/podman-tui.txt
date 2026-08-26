@@ -1,0 +1,6 @@
+# repo containers/podman-tui
+# tag v1.11.3
+podman-tui-release-darwin_amd64.zip
+podman-tui-release-linux_amd64.zip
+podman-tui-release-windows_amd64.zip
+sha256sum

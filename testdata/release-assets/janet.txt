@@ -1,0 +1,8 @@
+# repo janet-lang/janet
+# tag v1.41.2
+janet-1.41.2-windows-x64-installer.msi
+janet-v1.41.2-linux-x64.tar.gz
+janet-v1.41.2-macos-aarch64.tar.gz
+janet.c
+janet.h
+shell.c

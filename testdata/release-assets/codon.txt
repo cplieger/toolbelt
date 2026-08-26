@@ -1,0 +1,8 @@
+# repo exaloop/codon
+# tag v0.19.6
+codon-darwin-arm64.tar.gz
+codon-darwin-x86_64.tar.gz
+codon-linux-aarch64.tar.gz
+codon-linux-x86_64.tar.gz
+codon-manylinux2014-aarch64.tar.gz
+codon-manylinux2014-x86_64.tar.gz

@@ -1,0 +1,11 @@
+# repo mhausenblas/cidrchk
+# tag v0.5
+cidrchk_0.5_checksums.txt
+cidrchk_darwin_386.tar.gz
+cidrchk_darwin_amd64.tar.gz
+cidrchk_linux_386.tar.gz
+cidrchk_linux_amd64.tar.gz
+cidrchk_linux_arm.tar.gz
+cidrchk_linux_arm64.tar.gz
+cidrchk_windows_386.zip
+cidrchk_windows_amd64.zip

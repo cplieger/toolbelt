@@ -1,0 +1,3 @@
+# repo erlang/rebar3
+# tag 3.27.0
+rebar3

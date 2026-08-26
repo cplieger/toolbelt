@@ -1,0 +1,6 @@
+# repo apauley/hledger-flow
+# tag v0.16.4
+hledger-flow-linux-arm64.tar.gz
+hledger-flow-linux-x64.tar.gz
+hledger-flow-macos-arm64.tar.gz
+hledger-flow-macos-x64.tar.gz

@@ -1,0 +1,20 @@
+# repo facebook/dotslash
+# tag v0.5.9
+dotslash-linux-musl.aarch64.tar.gz
+dotslash-linux-musl.arm64.v0.5.9.tar.gz
+dotslash-linux-musl.x86_64.tar.gz
+dotslash-linux-musl.x86_64.v0.5.9.tar.gz
+dotslash-macos-amd64.v0.5.9.tar.gz
+dotslash-macos-arm64.tar.gz
+dotslash-macos-arm64.v0.5.9.tar.gz
+dotslash-macos-x86_64.tar.gz
+dotslash-macos.tar.gz
+dotslash-macos.v0.5.9.tar.gz
+dotslash-ubuntu-22.04.aarch64.tar.gz
+dotslash-ubuntu-22.04.arm64.v0.5.9.tar.gz
+dotslash-ubuntu-22.04.x86_64.tar.gz
+dotslash-ubuntu-22.04.x86_64.v0.5.9.tar.gz
+dotslash-windows-arm64.tar.gz
+dotslash-windows-arm64.v0.5.9.tar.gz
+dotslash-windows.tar.gz
+dotslash-windows.v0.5.9.tar.gz

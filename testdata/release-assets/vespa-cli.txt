@@ -1,0 +1,9 @@
+# repo vespa-engine/vespa
+# tag v8.738.17
+vespa-cli_8.738.17_darwin_amd64.tar.gz
+vespa-cli_8.738.17_darwin_arm64.tar.gz
+vespa-cli_8.738.17_linux_amd64.tar.gz
+vespa-cli_8.738.17_linux_arm64.tar.gz
+vespa-cli_8.738.17_sha256sums.txt
+vespa-cli_8.738.17_windows_386.zip
+vespa-cli_8.738.17_windows_amd64.zip

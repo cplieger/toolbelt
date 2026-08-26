@@ -1,0 +1,7 @@
+# repo sighupio/furyctl
+# tag v0.35.1
+checksums.txt
+furyctl-darwin-amd64.tar.gz
+furyctl-darwin-arm64.tar.gz
+furyctl-linux-amd64.tar.gz
+furyctl-linux-arm64.tar.gz

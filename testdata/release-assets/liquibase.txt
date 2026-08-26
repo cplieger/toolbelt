@@ -1,0 +1,7 @@
+# repo liquibase/liquibase
+# tag v5.0.4
+liquibase-5.0.4.tar.gz
+liquibase-5.0.4.zip
+liquibase-additional-5.0.4.zip
+liquibase-core-5.0.4.jar
+liquibase-windows-x64-installer-5.0.4.exe

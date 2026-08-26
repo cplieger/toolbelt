@@ -1,0 +1,9 @@
+# repo flyway/flyway
+# tag flyway-13.4.0
+flyway-commandline-13.4.0-linux-alpine-x64.tar.gz
+flyway-commandline-13.4.0-linux-x64.tar.gz
+flyway-commandline-13.4.0-macosx-arm64.tar.gz
+flyway-commandline-13.4.0-macosx-x64.tar.gz
+flyway-commandline-13.4.0-windows-x64.zip
+flyway-commandline-13.4.0.tar.gz
+flyway-commandline-13.4.0.zip

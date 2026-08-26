@@ -1,0 +1,12 @@
+# repo nolabs-ai/nono
+# tag v0.74.0
+nono-cli-0.74.0-1.aarch64.rpm
+nono-cli-0.74.0-1.x86_64.rpm
+nono-cli_0.74.0_amd64.deb
+nono-cli_0.74.0_arm64.deb
+nono-v0.74.0-aarch64-apple-darwin.tar.gz
+nono-v0.74.0-aarch64-unknown-linux-gnu.tar.gz
+nono-v0.74.0-x86_64-apple-darwin.tar.gz
+nono-v0.74.0-x86_64-unknown-linux-gnu.tar.gz
+nono-v0.74.0-x86_64-unknown-linux-musl.tar.gz
+SHA256SUMS.txt

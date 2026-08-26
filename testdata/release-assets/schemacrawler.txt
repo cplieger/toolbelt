@@ -1,0 +1,4 @@
+# repo schemacrawler/SchemaCrawler
+# tag v17.14.1
+schemacrawler-17.14.1-bin.zip
+schemacrawler-17.14.1-bin.zip.SHA-512

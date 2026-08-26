@@ -1,0 +1,5 @@
+# repo jondot/hygen
+# tag v6.2.11
+hygen.linux.v6.2.11.tar.gz
+hygen.macos.v6.2.11.tar.gz
+hygen.win.exe.v6.2.11.zip

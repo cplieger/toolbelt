@@ -1,0 +1,7 @@
+# repo signadot/cli
+# tag v1.8.0
+checksums.txt
+signadot-cli_mcp_darwin_amd64.tar.gz
+signadot-cli_mcp_darwin_arm64.tar.gz
+signadot-cli_mcp_linux_amd64.tar.gz
+signadot-cli_mcp_linux_arm64.tar.gz

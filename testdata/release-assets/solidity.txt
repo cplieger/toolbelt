@@ -1,0 +1,8 @@
+# repo ethereum/solidity
+# tag v0.8.36
+solc-macos
+solc-static-linux
+solc-static-linux-arm
+solc-windows.exe
+solidity_0.8.36.tar.gz
+soljson.js

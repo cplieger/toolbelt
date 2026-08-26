@@ -1,0 +1,12 @@
+# repo apollographql/rover
+# tag v0.41.0
+md5sums.txt
+rover-v0.41.0-aarch64-apple-darwin.tar.gz
+rover-v0.41.0-aarch64-unknown-linux-gnu.tar.gz
+rover-v0.41.0-schema.graphql
+rover-v0.41.0-x86_64-apple-darwin.tar.gz
+rover-v0.41.0-x86_64-pc-windows-msvc.tar.gz
+rover-v0.41.0-x86_64-unknown-linux-gnu.tar.gz
+rover-v0.41.0-x86_64-unknown-linux-musl.tar.gz
+sha1sums.txt
+sha256sums.txt

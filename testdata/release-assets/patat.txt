@@ -1,0 +1,4 @@
+# repo jaspervdj/patat
+# tag v0.15.2.0
+patat-v0.15.2.0-darwin-arm64.zip
+patat-v0.15.2.0-linux-x86_64.tar.gz

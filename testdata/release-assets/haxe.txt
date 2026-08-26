@@ -1,0 +1,10 @@
+# repo HaxeFoundation/haxe
+# tag 4.3.7
+haxe-4.3.7-linux-arm64.tar.gz
+haxe-4.3.7-linux64.tar.gz
+haxe-4.3.7-osx-installer.pkg
+haxe-4.3.7-osx.tar.gz
+haxe-4.3.7-win.exe
+haxe-4.3.7-win.zip
+haxe-4.3.7-win64.exe
+haxe-4.3.7-win64.zip
