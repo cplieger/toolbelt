@@ -135,6 +135,20 @@ type ToolInfo struct {
 	Installing bool `json:"installing"`
 }
 
+// AptPackage is one installed Debian package this engine does not manage:
+// something a user or an agent installed in the shell. Read-only — there is
+// no manifest row behind it, so nothing updates it and nothing can remove it
+// from here.
+//
+// Reported so a consumer's tools surface can answer "what is on this box"
+// without pretending the engine installed it. A reader who wants one managed
+// adds it by name, which creates the row; until then the engine touches
+// neither the package nor apt's record of it.
+type AptPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
 // SystemTool is one image-baked binary surfaced read-only (Config.System).
 type SystemTool struct {
 	Name      string `json:"name"`
@@ -147,6 +161,12 @@ type Inventory struct {
 	Job    *Job         `json:"job,omitempty"`
 	Tools  []ToolInfo   `json:"tools"`
 	System []SystemTool `json:"system"`
+	// AptPackages are installed Debian packages with no manifest row: the
+	// ones a user or an agent installed themselves. Absent when apt is not
+	// this host's package manager, or when the enumeration failed — an
+	// inventory that cannot answer says nothing rather than reporting an
+	// empty box as a fact.
+	AptPackages []AptPackage `json:"apt_packages,omitempty"`
 }
 
 // ReconcileMode selects how much a Reconcile job does.

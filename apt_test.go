@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -455,4 +456,94 @@ func TestAptSetHold(t *testing.T) {
 			t.Error("apt-mark ran for a name the grammar gate refused")
 		}
 	})
+}
+
+// TestParseDpkgPackages covers what a reader is shown of the host's package
+// set, which is decided by two exclusions that are each insufficient alone.
+//
+// apt's auto-installed record removes DEPENDENCIES — measured on a Debian
+// trixie container, 438 of 536 packages — and the base priorities remove what
+// is left of the OS, which is manually marked because debootstrap marks it so.
+// What survives is what a Dockerfile asked for plus what a user or an agent
+// installed later, which is the whole question this group answers.
+func TestParseDpkgPackages(t *testing.T) {
+	// Tab-separated, mirroring the -f format: a Priority can be EMPTY, and
+	// with spaces an empty field shifts every column after it so a priority
+	// would be read as a status.
+	dump := []byte(strings.Join([]string{
+		"curl\t8.14.1-2\tinstalled\toptional\tno",            // a Dockerfile install
+		"jq\t1.7.1-3\tinstalled\toptional\tno",               // ditto
+		"ca-certificates\t20250419\tinstalled\tstandard\tno", // standard is NOT base: see aptBasePriorities
+		"bash\t5.2.37-2\tinstalled\trequired\tyes",           // base system, excluded
+		"less\t668-1\tinstalled\timportant\tno",              // base system, excluded
+		"libc6\t2.41-12\tinstalled\trequired\tno",            // base system, excluded
+		"libsmartcols1\t2.41-5\tinstalled\toptional\tno",     // a dependency, excluded by auto
+		"gone\t1.0\tconfig-files\toptional\tno",              // purged: reports a version, files absent
+		"halfway\t1.0\thalf-configured\toptional\tno",        // ditto
+		"libfoo:i386\t2.0\tinstalled\toptional\tno",          // arch-qualified, reported bare
+		"noprio\t1.0\tinstalled\t\tno",                       // empty Priority must not shift columns
+	}, "\n"))
+	auto := map[string]bool{"libsmartcols1": true}
+
+	got := parseDpkgPackages(dump, auto)
+	want := []AptPackage{
+		{Name: "ca-certificates", Version: "20250419"},
+		{Name: "curl", Version: "8.14.1-2"},
+		{Name: "jq", Version: "1.7.1-3"},
+		{Name: "libfoo", Version: "2.0"},
+		{Name: "noprio", Version: "1.0"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("parseDpkgPackages = %+v, want %+v", got, want)
+	}
+}
+
+// TestAptAutoInstalled covers the dependency exclusion's parser. The file is
+// stanza-oriented, so the package name and its flag are on different lines and
+// a stanza WITHOUT the flag must not inherit the previous one's name.
+func TestAptAutoInstalled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "extended_states")
+	body := strings.Join([]string{
+		"Package: dep-one",
+		"Architecture: amd64",
+		"Auto-Installed: 1",
+		"",
+		"Package: asked-for",
+		"Architecture: amd64",
+		"Auto-Installed: 0",
+		"",
+		"Package: no-flag-at-all",
+		"Architecture: amd64",
+		"",
+		// An ORPHAN flag: a stanza whose Package line is missing. Without
+		// resetting the name at the stanza break, this marks the PREVIOUS
+		// package as a dependency and hides a tool the reader installed.
+		"Auto-Installed: 1",
+		"",
+		"Package: dep-two",
+		"Auto-Installed: 1",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	got := aptAutoInstalled(path)
+	for _, name := range []string{"dep-one", "dep-two"} {
+		if !got[name] {
+			t.Errorf("aptAutoInstalled: %q missing, want it excluded as a dependency", name)
+		}
+	}
+	for _, name := range []string{"asked-for", "no-flag-at-all"} {
+		if got[name] {
+			t.Errorf("aptAutoInstalled: %q marked auto, want it shown", name)
+		}
+	}
+
+	// An unreadable file shows MORE rather than fewer: apt's own default for
+	// a package it has no record of is manual, and a reader can dismiss an
+	// over-long list while an empty one reports a false fact.
+	if auto := aptAutoInstalled(filepath.Join(t.TempDir(), "absent")); len(auto) != 0 {
+		t.Errorf("aptAutoInstalled(absent) = %v, want an empty set", auto)
+	}
 }
