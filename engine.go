@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Sentinel errors. Compare with errors.Is; *DependentsError additionally
@@ -177,6 +178,61 @@ func (e *Engine) filterInstalled(hits []CatalogEntry) []CatalogEntry {
 	}
 	return out
 }
+
+// SearchApt ranks Debian packages against a query.
+//
+// ok=false means no package list is available: apt is not usable on this
+// host, or no index has been loaded yet. A consumer must render that
+// differently from an empty result, because "apt search is unavailable"
+// and "no package matches" look identical and mean opposite things, and
+// conflating them is the exact shape of the bug this whole change fixes.
+//
+// The first call triggers a background refresh and returns whatever is
+// loaded, which on a cold engine is nothing. That is deliberate: a search
+// request must not block on a network round trip, and the refresh is
+// lazy precisely so a headless consumer that never searches never pays
+// for the index at all.
+func (e *Engine) SearchApt(query string) ([]AptHit, bool) {
+	if !AptAvailable() {
+		return nil, false
+	}
+	if e.aptIdx.stale() {
+		go e.aptIdx.refresh(context.WithoutCancel(context.Background()))
+	}
+	hits, ok := e.aptIdx.Search(query)
+	if !ok {
+		return nil, false
+	}
+	return e.aptHitsWithCandidate(hits), true
+}
+
+// aptHitsWithCandidate fills in the version apt would install, for the
+// capped result set only.
+//
+// It is resolved here rather than in the index because it costs one
+// apt-cache invocation per package: over 68,799 packages that would be
+// absurd, over the eight a search returns it is what lets a user see that
+// the catalog offers 14.1.1 while Debian offers 14.1.0-1 and choose
+// knowingly. A package whose candidate cannot be read keeps an empty
+// version rather than dropping out of the results.
+func (e *Engine) aptHitsWithCandidate(hits []AptHit) []AptHit {
+	if len(hits) == 0 {
+		return hits
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), aptCandidateBudget)
+	defer cancel()
+	for i := range hits {
+		if v, err := e.inst.aptCandidate(ctx, hits[i].Name); err == nil {
+			hits[i].Candidate = v
+		}
+	}
+	return hits
+}
+
+// aptCandidateBudget bounds the whole candidate-resolution pass over one
+// capped result set. apt-cache is a local index read, so this is a
+// runaway guard rather than a working budget.
+const aptCandidateBudget = 10 * time.Second
 
 // Jobs returns the active job (with output tail) and recent history.
 func (e *Engine) Jobs() (active *Job, recent []*Job) { return e.queue.Snapshot() }

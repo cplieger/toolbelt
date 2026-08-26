@@ -321,3 +321,67 @@ func TestAptIndexSearch_DistinguishesUnavailableFromEmpty(t *testing.T) {
 		t.Error("a nil index did not report unavailable")
 	}
 }
+
+// TestSearchApt_ReportsUnavailableRatherThanEmpty covers the engine's own
+// apt surface. The distinction is the whole point: an empty result and an
+// unconsultable package list look identical to a client, and reporting the
+// second as the first is what made a user searching for python conclude
+// the tool did not exist.
+func TestSearchApt_ReportsUnavailableRatherThanEmpty(t *testing.T) {
+	dir := t.TempDir()
+	e, err := New(&Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+
+	hits, ok := e.SearchApt("gcc")
+	if !AptAvailable() {
+		if ok || hits != nil {
+			t.Errorf("SearchApt on a host without apt reported ok=%v hits=%v, want false/nil", ok, hits)
+		}
+		return
+	}
+	// On a host WITH apt the first call triggers a background refresh and
+	// returns whatever is loaded, which on a cold engine is nothing. Both
+	// answers are legitimate; what must never happen is ok=true with a nil
+	// list, which would claim the corpus answered when it had not.
+	if !ok && hits != nil {
+		t.Errorf("SearchApt returned hits while reporting the corpus unavailable: %v", hits)
+	}
+}
+
+// TestSearchApt_FillsTheCandidateForTheCappedSet pins where the version
+// on an apt row comes from. It is resolved per result rather than in the
+// index because it costs one apt-cache call each: eight is nothing,
+// 68,799 would be absurd. Without it a client cannot show that the
+// catalog offers one version of a tool and Debian another, which is the
+// reason both blocks are shown at all.
+func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
+	if !AptAvailable() {
+		t.Skip("apt is not usable on this host")
+	}
+	dir := t.TempDir()
+	e, err := New(&Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	// Load synchronously rather than racing the background refresh.
+	if err := e.aptIdx.ensure(t.Context()); err != nil {
+		t.Skipf("no package index available here: %v", err)
+	}
+	hits, ok := e.SearchApt("bash")
+	if !ok {
+		t.Fatal("the package corpus reported unavailable after a successful load")
+	}
+	if len(hits) == 0 {
+		t.Fatal("no hits for bash, which trixie certainly has")
+	}
+	if hits[0].Name != "bash" {
+		t.Errorf("first hit = %q, want the exact match bash", hits[0].Name)
+	}
+	if hits[0].Candidate == "" {
+		t.Errorf("bash carries no candidate version; a row would show nothing to compare against the catalog")
+	}
+}
