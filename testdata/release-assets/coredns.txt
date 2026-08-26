@@ -1,0 +1,28 @@
+# repo coredns/coredns
+# tag v1.14.7
+coredns_1.14.7_darwin_amd64.tgz
+coredns_1.14.7_darwin_amd64.tgz.sha256
+coredns_1.14.7_darwin_arm64.tgz
+coredns_1.14.7_darwin_arm64.tgz.sha256
+coredns_1.14.7_linux_amd64.tgz
+coredns_1.14.7_linux_amd64.tgz.sha256
+coredns_1.14.7_linux_arm.tgz
+coredns_1.14.7_linux_arm.tgz.sha256
+coredns_1.14.7_linux_arm64.tgz
+coredns_1.14.7_linux_arm64.tgz.sha256
+coredns_1.14.7_linux_loong64.tgz
+coredns_1.14.7_linux_loong64.tgz.sha256
+coredns_1.14.7_linux_mips.tgz
+coredns_1.14.7_linux_mips.tgz.sha256
+coredns_1.14.7_linux_mips64le.tgz
+coredns_1.14.7_linux_mips64le.tgz.sha256
+coredns_1.14.7_linux_ppc64le.tgz
+coredns_1.14.7_linux_ppc64le.tgz.sha256
+coredns_1.14.7_linux_riscv64.tgz
+coredns_1.14.7_linux_riscv64.tgz.sha256
+coredns_1.14.7_linux_s390x.tgz
+coredns_1.14.7_linux_s390x.tgz.sha256
+coredns_1.14.7_windows_amd64.tgz
+coredns_1.14.7_windows_amd64.tgz.sha256
+coredns_1.14.7_windows_amd64.zip
+coredns_1.14.7_windows_amd64.zip.sha256

@@ -1,0 +1,12 @@
+# repo tigerbeetle/tigerbeetle
+# tag 0.17.9
+tigerbeetle-aarch64-linux-debug.zip
+tigerbeetle-aarch64-linux.zip
+tigerbeetle-universal-macos-debug.zip
+tigerbeetle-universal-macos.zip
+tigerbeetle-x86_64-linux-debug.zip
+tigerbeetle-x86_64-linux.zip
+tigerbeetle-x86_64-windows-debug.zip
+tigerbeetle-x86_64-windows.zip
+vortex-driver-zig-aarch64-linux.zip
+vortex-driver-zig-x86_64-linux.zip

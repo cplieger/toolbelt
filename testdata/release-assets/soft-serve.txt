@@ -1,0 +1,36 @@
+# repo charmbracelet/soft-serve
+# tag v0.12.2
+checksums.txt
+checksums.txt.sigstore.json
+soft-serve-0.12.2-1.aarch64.rpm
+soft-serve-0.12.2-1.armv7hl.rpm
+soft-serve-0.12.2-1.i386.rpm
+soft-serve-0.12.2-1.x86_64.rpm
+soft-serve-0.12.2.tar.gz
+soft-serve-0.12.2.tar.gz.sbom.json
+soft-serve_0.12.2_aarch64.apk
+soft-serve_0.12.2_amd64.deb
+soft-serve_0.12.2_arm64.deb
+soft-serve_0.12.2_armhf.deb
+soft-serve_0.12.2_armv7.apk
+soft-serve_0.12.2_Darwin_arm64.tar.gz
+soft-serve_0.12.2_Darwin_arm64.tar.gz.sbom.json
+soft-serve_0.12.2_Darwin_x86_64.tar.gz
+soft-serve_0.12.2_Darwin_x86_64.tar.gz.sbom.json
+soft-serve_0.12.2_Freebsd_arm64.tar.gz
+soft-serve_0.12.2_Freebsd_arm64.tar.gz.sbom.json
+soft-serve_0.12.2_Freebsd_x86_64.tar.gz
+soft-serve_0.12.2_Freebsd_x86_64.tar.gz.sbom.json
+soft-serve_0.12.2_i386.deb
+soft-serve_0.12.2_Linux_arm.tar.gz
+soft-serve_0.12.2_Linux_arm.tar.gz.sbom.json
+soft-serve_0.12.2_Linux_arm64.tar.gz
+soft-serve_0.12.2_Linux_arm64.tar.gz.sbom.json
+soft-serve_0.12.2_Linux_i386.tar.gz
+soft-serve_0.12.2_Linux_i386.tar.gz.sbom.json
+soft-serve_0.12.2_Linux_x86_64.tar.gz
+soft-serve_0.12.2_Linux_x86_64.tar.gz.sbom.json
+soft-serve_0.12.2_Windows_x86_64.zip
+soft-serve_0.12.2_Windows_x86_64.zip.sbom.json
+soft-serve_0.12.2_x86.apk
+soft-serve_0.12.2_x86_64.apk

@@ -1,0 +1,5 @@
+# repo quarkusio/quarkus
+# tag 3.39.1
+checksums_sha256.txt
+quarkus-cli-3.39.1.tar.gz
+quarkus-cli-3.39.1.zip

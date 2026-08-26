@@ -1,0 +1,11 @@
+# repo vultr/vultr-cli
+# tag v3.11.0
+vultr-cli_v3.11.0_checksums.txt
+vultr-cli_v3.11.0_linux_amd64.tar.gz
+vultr-cli_v3.11.0_linux_arm32-v6.tar.gz
+vultr-cli_v3.11.0_linux_arm32-v7.tar.gz
+vultr-cli_v3.11.0_linux_arm64.tar.gz
+vultr-cli_v3.11.0_macOs_amd64.tar.gz
+vultr-cli_v3.11.0_macOs_arm64.tar.gz
+vultr-cli_v3.11.0_windows_amd64.zip
+vultr-cli_v3.11.0_windows_arm64.zip

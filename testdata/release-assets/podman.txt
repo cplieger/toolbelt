@@ -1,0 +1,11 @@
+# repo podman-container-tools/podman
+# tag v6.1.0
+podman-installer-macos-arm64.pkg
+podman-installer-windows-amd64.msi
+podman-installer-windows-arm64.msi
+podman-remote-release-darwin_arm64.zip
+podman-remote-release-windows_amd64.zip
+podman-remote-release-windows_arm64.zip
+podman-remote-static-linux_amd64.tar.gz
+podman-remote-static-linux_arm64.tar.gz
+shasums

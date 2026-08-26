@@ -1,0 +1,6 @@
+# repo ndmitchell/hlint
+# tag v3.10
+hlint-3.10-x86_64-linux.tar.gz
+hlint-3.10-x86_64-osx.tar.gz
+hlint-3.10-x86_64-windows.zip
+hlint-3.10.tar.gz

@@ -1,0 +1,4 @@
+# repo mobile-dev-inc/maestro
+# tag cli-2.9.0
+checksums_sha256.txt
+maestro.zip

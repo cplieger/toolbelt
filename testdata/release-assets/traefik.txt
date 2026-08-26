@@ -1,0 +1,22 @@
+# repo traefik/traefik
+# tag v3.7.12
+traefik-v3.7.12.src.tar.gz
+traefik_v3.7.12_checksums.txt
+traefik_v3.7.12_darwin_amd64.tar.gz
+traefik_v3.7.12_darwin_arm64.tar.gz
+traefik_v3.7.12_freebsd_386.tar.gz
+traefik_v3.7.12_freebsd_amd64.tar.gz
+traefik_v3.7.12_linux_386.tar.gz
+traefik_v3.7.12_linux_amd64.tar.gz
+traefik_v3.7.12_linux_arm64.tar.gz
+traefik_v3.7.12_linux_armv6.tar.gz
+traefik_v3.7.12_linux_armv7.tar.gz
+traefik_v3.7.12_linux_ppc64le.tar.gz
+traefik_v3.7.12_linux_riscv64.tar.gz
+traefik_v3.7.12_linux_s390x.tar.gz
+traefik_v3.7.12_openbsd_386.tar.gz
+traefik_v3.7.12_openbsd_amd64.tar.gz
+traefik_v3.7.12_openbsd_riscv64.tar.gz
+traefik_v3.7.12_windows_386.zip
+traefik_v3.7.12_windows_amd64.zip
+traefik_v3.7.12_windows_arm64.zip

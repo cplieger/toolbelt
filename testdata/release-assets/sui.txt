@@ -1,0 +1,7 @@
+# repo MystenLabs/sui
+# tag testnet-v1.78.1
+sui-testnet-v1.78.1-macos-arm64.tgz
+sui-testnet-v1.78.1-macos-x86_64.tgz
+sui-testnet-v1.78.1-ubuntu-aarch64.tgz
+sui-testnet-v1.78.1-ubuntu-x86_64.tgz
+sui-testnet-v1.78.1-windows-x86_64.tgz

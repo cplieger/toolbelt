@@ -1,0 +1,19 @@
+# repo cloudfoundry/cli
+# tag v8.18.4
+cf8-cli-installer_8.18.4_aarch64.rpm
+cf8-cli-installer_8.18.4_arm64.deb
+cf8-cli-installer_8.18.4_i686.deb
+cf8-cli-installer_8.18.4_i686.rpm
+cf8-cli-installer_8.18.4_macosarm.pkg
+cf8-cli-installer_8.18.4_osx.pkg
+cf8-cli-installer_8.18.4_win32.zip
+cf8-cli-installer_8.18.4_winx64.zip
+cf8-cli-installer_8.18.4_x86-64.deb
+cf8-cli-installer_8.18.4_x86-64.rpm
+cf8-cli_8.18.4_linux_arm64.tgz
+cf8-cli_8.18.4_linux_i686.tgz
+cf8-cli_8.18.4_linux_x86-64.tgz
+cf8-cli_8.18.4_macosarm.tgz
+cf8-cli_8.18.4_osx.tgz
+cf8-cli_8.18.4_win32.zip
+cf8-cli_8.18.4_winx64.zip

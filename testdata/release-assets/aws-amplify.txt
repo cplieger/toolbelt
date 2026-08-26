@@ -1,0 +1,6 @@
+# repo aws-amplify/amplify-cli
+# tag v14.5.1
+amplify-pkg-linux-arm64.tgz
+amplify-pkg-linux.tgz
+amplify-pkg-macos.tgz
+amplify-pkg-win.exe.tgz

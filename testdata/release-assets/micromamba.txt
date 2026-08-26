@@ -1,0 +1,32 @@
+# repo mamba-org/micromamba-releases
+# tag 2.9.0-0
+micromamba-linux-64
+micromamba-linux-64.sha256
+micromamba-linux-64.tar.bz2
+micromamba-linux-64.tar.bz2.sha256
+micromamba-linux-aarch64
+micromamba-linux-aarch64.sha256
+micromamba-linux-aarch64.tar.bz2
+micromamba-linux-aarch64.tar.bz2.sha256
+micromamba-linux-ppc64le
+micromamba-linux-ppc64le.sha256
+micromamba-linux-ppc64le.tar.bz2
+micromamba-linux-ppc64le.tar.bz2.sha256
+micromamba-osx-64
+micromamba-osx-64.sha256
+micromamba-osx-64.tar.bz2
+micromamba-osx-64.tar.bz2.sha256
+micromamba-osx-arm64
+micromamba-osx-arm64.sha256
+micromamba-osx-arm64.tar.bz2
+micromamba-osx-arm64.tar.bz2.sha256
+micromamba-win-64
+micromamba-win-64.exe
+micromamba-win-64.sha256
+micromamba-win-64.tar.bz2
+micromamba-win-64.tar.bz2.sha256
+micromamba-win-arm64
+micromamba-win-arm64.exe
+micromamba-win-arm64.sha256
+micromamba-win-arm64.tar.bz2
+micromamba-win-arm64.tar.bz2.sha256

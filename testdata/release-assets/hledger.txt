@@ -1,0 +1,6 @@
+# repo simonmichael/hledger
+# tag 1.52.2
+hledger-linux-x64.tar.gz
+hledger-mac-arm64.tar.gz
+hledger-mac-x64.tar.gz
+hledger-windows-x64.zip

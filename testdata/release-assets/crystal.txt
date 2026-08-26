@@ -1,0 +1,13 @@
+# repo crystal-lang/crystal
+# tag 1.21.0
+crystal-1.21.0-1-darwin-universal.tar.gz
+crystal-1.21.0-1-linux-aarch64-bundled.tar.gz
+crystal-1.21.0-1-linux-aarch64.tar.gz
+crystal-1.21.0-1-linux-x86_64-bundled.tar.gz
+crystal-1.21.0-1-linux-x86_64.tar.gz
+crystal-1.21.0-1.universal.pkg
+crystal-1.21.0-docs.tar.gz
+crystal-1.21.0-windows-aarch64-gnu-unsupported.zip
+crystal-1.21.0-windows-x86_64-gnu-unsupported.zip
+crystal-1.21.0-windows-x86_64-msvc-unsupported.exe
+crystal-1.21.0-windows-x86_64-msvc-unsupported.zip

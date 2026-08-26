@@ -1,0 +1,22 @@
+# repo openfga/openfga
+# tag v1.19.0
+checksums.txt
+checksums.txt.pem
+checksums.txt.sig
+openfga.intoto.jsonl
+openfga_1.19.0_darwin_amd64.tar.gz
+openfga_1.19.0_darwin_amd64.tar.gz.sbom.json
+openfga_1.19.0_darwin_arm64.tar.gz
+openfga_1.19.0_darwin_arm64.tar.gz.sbom.json
+openfga_1.19.0_linux_386.tar.gz
+openfga_1.19.0_linux_386.tar.gz.sbom.json
+openfga_1.19.0_linux_amd64.tar.gz
+openfga_1.19.0_linux_amd64.tar.gz.sbom.json
+openfga_1.19.0_linux_arm64.tar.gz
+openfga_1.19.0_linux_arm64.tar.gz.sbom.json
+openfga_1.19.0_windows_386.tar.gz
+openfga_1.19.0_windows_386.tar.gz.sbom.json
+openfga_1.19.0_windows_amd64.tar.gz
+openfga_1.19.0_windows_amd64.tar.gz.sbom.json
+openfga_1.19.0_windows_arm64.tar.gz
+openfga_1.19.0_windows_arm64.tar.gz.sbom.json

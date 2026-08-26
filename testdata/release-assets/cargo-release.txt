@@ -1,0 +1,7 @@
+# repo crate-ci/cargo-release
+# tag v1.1.5
+cargo-release-v1.1.5-aarch64-apple-darwin.tar.gz
+cargo-release-v1.1.5-aarch64-unknown-linux-musl.tar.gz
+cargo-release-v1.1.5-x86_64-apple-darwin.tar.gz
+cargo-release-v1.1.5-x86_64-pc-windows-msvc.zip
+cargo-release-v1.1.5-x86_64-unknown-linux-musl.tar.gz

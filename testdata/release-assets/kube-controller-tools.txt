@@ -1,0 +1,10 @@
+# repo kubernetes-sigs/controller-tools
+# tag v0.21.0
+controller-gen-darwin-amd64
+controller-gen-darwin-arm64
+controller-gen-linux-amd64
+controller-gen-linux-arm64
+controller-gen-linux-ppc64le
+controller-gen-linux-s390x
+controller-gen-windows-amd64.exe
+controller-gen-windows-arm64.exe

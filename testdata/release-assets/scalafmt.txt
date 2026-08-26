@@ -1,0 +1,10 @@
+# repo scalameta/scalafmt
+# tag v3.11.5
+scalafmt-aarch64-apple-darwin.zip
+scalafmt-aarch64-pc-linux.zip
+scalafmt-linux-glibc
+scalafmt-linux-musl
+scalafmt-macos
+scalafmt-x86_64-apple-darwin.zip
+scalafmt-x86_64-pc-linux.zip
+scalafmt-x86_64-pc-win32.zip

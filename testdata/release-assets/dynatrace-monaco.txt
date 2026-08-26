@@ -1,0 +1,19 @@
+# repo Dynatrace/dynatrace-configuration-as-code
+# tag v2.29.1
+cosign.pub
+dependencies-and-licenses.txt
+monaco-darwin-amd64
+monaco-darwin-amd64.sha256
+monaco-darwin-arm64
+monaco-darwin-arm64.sha256
+monaco-linux-386
+monaco-linux-386.sha256
+monaco-linux-amd64
+monaco-linux-amd64.sha256
+monaco-linux-arm64
+monaco-linux-arm64.sha256
+monaco-windows-386.exe
+monaco-windows-386.exe.sha256
+monaco-windows-amd64.exe
+monaco-windows-amd64.exe.sha256
+sbom.cdx.json

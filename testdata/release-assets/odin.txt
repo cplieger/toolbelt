@@ -1,0 +1,7 @@
+# repo odin-lang/Odin
+# tag dev-2026-08
+odin-linux-amd64-dev-2026-08.tar.gz
+odin-linux-arm64-dev-2026-08.tar.gz
+odin-macos-amd64-dev-2026-08.tar.gz
+odin-macos-arm64-dev-2026-08.tar.gz
+odin-windows-amd64-dev-2026-08.zip

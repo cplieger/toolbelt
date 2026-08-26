@@ -1,0 +1,13 @@
+# repo depot/cli
+# tag v2.102.7
+depot_2.102.7_checksums.txt
+depot_2.102.7_darwin_amd64.tar.gz
+depot_2.102.7_darwin_arm64.tar.gz
+depot_2.102.7_linux_386.tar.gz
+depot_2.102.7_linux_amd64.tar.gz
+depot_2.102.7_linux_arm64.tar.gz
+depot_2.102.7_linux_armv6.tar.gz
+depot_2.102.7_windows_386.zip
+depot_2.102.7_windows_amd64.zip
+depot_2.102.7_windows_arm64.zip
+depot_2.102.7_windows_armv6.zip

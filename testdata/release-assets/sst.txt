@@ -1,0 +1,17 @@
+# repo sst/sst
+# tag v4.17.1
+checksums.txt
+sst-linux-386.deb
+sst-linux-386.rpm
+sst-linux-386.tar.gz
+sst-linux-amd64.deb
+sst-linux-amd64.rpm
+sst-linux-arm64.deb
+sst-linux-arm64.rpm
+sst-linux-arm64.tar.gz
+sst-linux-x86_64.tar.gz
+sst-mac-arm64.tar.gz
+sst-mac-x86_64.tar.gz
+sst-windows-386.zip
+sst-windows-arm64.zip
+sst-windows-x86_64.zip

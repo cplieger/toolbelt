@@ -1,0 +1,9 @@
+# repo 0ghny/gitconfig
+# tag v1.2.0
+gitconfig_1.2.0_checksums.txt
+gitconfig_1.2.0_darwin_amd64.tar.gz
+gitconfig_1.2.0_darwin_arm64.tar.gz
+gitconfig_1.2.0_linux_amd64.tar.gz
+gitconfig_1.2.0_linux_arm64.tar.gz
+gitconfig_1.2.0_windows_amd64.tar.gz
+gitconfig_1.2.0_windows_arm64.tar.gz

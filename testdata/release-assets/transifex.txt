@@ -1,0 +1,10 @@
+# repo transifex/cli
+# tag v1.6.17
+checksums.txt
+tx-darwin-amd64.tar.gz
+tx-darwin-arm64.tar.gz
+tx-linux-386.tar.gz
+tx-linux-amd64.tar.gz
+tx-linux-arm64.tar.gz
+tx-windows-386.zip
+tx-windows-amd64.zip

@@ -1,0 +1,11 @@
+# repo owasp-amass/amass
+# tag v5.1.1
+amass_checksums.txt
+amass_darwin_amd64.tar.gz
+amass_darwin_arm64.tar.gz
+amass_linux_386.tar.gz
+amass_linux_amd64.tar.gz
+amass_linux_arm64.tar.gz
+amass_linux_armv6.tar.gz
+amass_linux_armv7.tar.gz
+amass_windows_amd64.tar.gz

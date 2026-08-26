@@ -1,0 +1,12 @@
+# repo pocketbase/pocketbase
+# tag v0.40.1
+checksums.txt
+pocketbase_0.40.1_darwin_amd64.zip
+pocketbase_0.40.1_darwin_arm64.zip
+pocketbase_0.40.1_linux_amd64.zip
+pocketbase_0.40.1_linux_arm64.zip
+pocketbase_0.40.1_linux_armv7.zip
+pocketbase_0.40.1_linux_ppc64le.zip
+pocketbase_0.40.1_linux_s390x.zip
+pocketbase_0.40.1_windows_amd64.zip
+pocketbase_0.40.1_windows_arm64.zip

@@ -1,0 +1,8 @@
+# repo opensearch-project/opensearch-cli
+# tag v1.2.0
+opensearch-cli-1.2.0-linux-arm64.zip
+opensearch-cli-1.2.0-linux-x64.zip
+opensearch-cli-1.2.0-macos-arm64.pkg
+opensearch-cli-1.2.0-macos-x64.pkg
+opensearch-cli-1.2.0-windows-x64.zip
+opensearch-cli-1.2.0-windows-x86.zip

@@ -1,0 +1,5 @@
+# repo krzysztofzablocki/Sourcery
+# tag 2.3.0
+sourcery-2.3.0-ubuntu-22.04.5-lts-jammy-x86_64.tar.xz
+sourcery-2.3.0.artifactbundle.zip
+sourcery-2.3.0.zip

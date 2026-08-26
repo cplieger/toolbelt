@@ -1,0 +1,7 @@
+# repo unisonweb/unison
+# tag release/1.4.0
+ucm-linux-arm64.tar.gz
+ucm-linux-x64.tar.gz
+ucm-macos-arm64.tar.gz
+ucm-macos-x64.tar.gz
+ucm-windows-x64.zip

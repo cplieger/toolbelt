@@ -1,0 +1,8 @@
+# repo pantsbuild/scie-pants
+# tag v0.13.2
+scie-pants-linux-aarch64
+scie-pants-linux-aarch64.sha256
+scie-pants-linux-x86_64
+scie-pants-linux-x86_64.sha256
+scie-pants-macos-aarch64
+scie-pants-macos-aarch64.sha256

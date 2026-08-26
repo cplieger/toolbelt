@@ -1,0 +1,20 @@
+# repo tus/tusd
+# tag v2.10.0
+tusd_darwin_amd64.zip
+tusd_darwin_amd64.zip.sha256
+tusd_darwin_arm64.zip
+tusd_darwin_arm64.zip.sha256
+tusd_linux_386.tar.gz
+tusd_linux_386.tar.gz.sha256
+tusd_linux_amd64.tar.gz
+tusd_linux_amd64.tar.gz.sha256
+tusd_linux_arm.tar.gz
+tusd_linux_arm.tar.gz.sha256
+tusd_linux_arm64.tar.gz
+tusd_linux_arm64.tar.gz.sha256
+tusd_snapshot_amd64.deb
+tusd_snapshot_arm64.deb
+tusd_windows_386.zip
+tusd_windows_386.zip.sha256
+tusd_windows_amd64.zip
+tusd_windows_amd64.zip.sha256

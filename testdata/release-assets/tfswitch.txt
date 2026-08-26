@@ -1,0 +1,12 @@
+# repo warrensbox/terraform-switcher
+# tag v1.19.0
+terraform-switcher_v1.19.0_checksums.txt
+terraform-switcher_v1.19.0_darwin_amd64.tar.gz
+terraform-switcher_v1.19.0_darwin_arm64.tar.gz
+terraform-switcher_v1.19.0_linux_386.tar.gz
+terraform-switcher_v1.19.0_linux_amd64.tar.gz
+terraform-switcher_v1.19.0_linux_arm64.tar.gz
+terraform-switcher_v1.19.0_linux_armv6.tar.gz
+terraform-switcher_v1.19.0_linux_armv7.tar.gz
+terraform-switcher_v1.19.0_windows_386.zip
+terraform-switcher_v1.19.0_windows_amd64.zip

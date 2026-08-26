@@ -1,0 +1,12 @@
+# repo purescript/purescript
+# tag v0.15.16
+linux-arm64.sha
+linux-arm64.tar.gz
+linux64.sha
+linux64.tar.gz
+macos-arm64.sha
+macos-arm64.tar.gz
+macos.sha
+macos.tar.gz
+win64.sha
+win64.tar.gz

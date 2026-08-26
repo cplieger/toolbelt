@@ -1,0 +1,13 @@
+# repo vmware/pinniped
+# tag v0.47.0
+install-local-user-authenticator.yaml
+install-pinniped-concierge-crds.yaml
+install-pinniped-concierge-resources.yaml
+install-pinniped-concierge.yaml
+install-pinniped-supervisor.yaml
+pinniped-cli-darwin-amd64
+pinniped-cli-darwin-arm64
+pinniped-cli-linux-amd64
+pinniped-cli-linux-arm64
+pinniped-cli-windows-amd64.exe
+pinniped-cli-windows-arm64.exe

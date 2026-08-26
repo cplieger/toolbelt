@@ -1,0 +1,9 @@
+# repo elm/compiler
+# tag 0.19.2
+elm-0.19.2-linux-arm.gz
+elm-0.19.2-linux-x64.gz
+elm-0.19.2-mac-arm.gz
+elm-0.19.2-mac-x64.gz
+elm-0.19.2-windows-x64.gz
+installer-for-mac.pkg
+installer-for-windows.exe

@@ -1,0 +1,16 @@
+# repo clj-kondo/clj-kondo
+# tag v2026.08.04
+clj-kondo-2026.08.04-linux-aarch64.zip
+clj-kondo-2026.08.04-linux-aarch64.zip.sha256
+clj-kondo-2026.08.04-linux-amd64.zip
+clj-kondo-2026.08.04-linux-amd64.zip.sha256
+clj-kondo-2026.08.04-linux-static-amd64.zip
+clj-kondo-2026.08.04-linux-static-amd64.zip.sha256
+clj-kondo-2026.08.04-macos-aarch64.zip
+clj-kondo-2026.08.04-macos-aarch64.zip.sha256
+clj-kondo-2026.08.04-macos-amd64.zip
+clj-kondo-2026.08.04-macos-amd64.zip.sha256
+clj-kondo-2026.08.04-standalone.jar
+clj-kondo-2026.08.04-standalone.jar.sha256
+clj-kondo-2026.08.04-windows-amd64.zip
+clj-kondo-2026.08.04-windows-amd64.zip.sha256

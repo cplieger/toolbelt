@@ -1,0 +1,7 @@
+# repo mint-lang/mint
+# tag 0.29.0
+mint-0.29.0-linux-x86_64
+mint-0.29.0-osx-arm64
+mint-0.29.0-osx-arm64-openssl3
+mint-0.29.0-osx-x86_64
+mint-0.29.0-osx-x86_64-openssl3

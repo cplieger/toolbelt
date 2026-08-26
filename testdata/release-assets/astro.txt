@@ -1,0 +1,12 @@
+# repo astronomer/astro-cli
+# tag v1.45.0
+astro_1.45.0_checksums.txt
+astro_1.45.0_darwin_amd64.tar.gz
+astro_1.45.0_darwin_arm64.tar.gz
+astro_1.45.0_linux_386.tar.gz
+astro_1.45.0_linux_amd64.tar.gz
+astro_1.45.0_linux_arm64.tar.gz
+astro_1.45.0_windows_amd64.exe
+astro_1.45.0_windows_amd64.zip
+astro_1.45.0_windows_arm64.exe
+astro_1.45.0_windows_arm64.zip

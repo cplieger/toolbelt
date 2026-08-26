@@ -1,0 +1,12 @@
+# repo kubevela/velad
+# tag v1.9.5
+velad-v1.9.5-darwin-amd64.tar.gz
+velad-v1.9.5-darwin-amd64.zip
+velad-v1.9.5-darwin-arm64.tar.gz
+velad-v1.9.5-darwin-arm64.zip
+velad-v1.9.5-linux-amd64.tar.gz
+velad-v1.9.5-linux-amd64.zip
+velad-v1.9.5-linux-arm64.tar.gz
+velad-v1.9.5-linux-arm64.zip
+velad-v1.9.5-windows-amd64.tar.gz
+velad-v1.9.5-windows-amd64.zip

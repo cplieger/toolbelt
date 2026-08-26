@@ -1,0 +1,11 @@
+# repo daytonaio/daytona
+# tag v0.190.0
+daemon-amd64
+daytona-darwin-amd64
+daytona-darwin-arm64
+daytona-linux-amd64
+daytona-linux-arm64
+daytona-runner_0.190.0_amd64.deb
+daytona-windows-amd64.exe
+daytona-windows-arm64.exe
+runner-amd64

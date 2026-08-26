@@ -1,0 +1,9 @@
+# repo cube2222/octosql
+# tag v0.13.0
+octosql_0.13.0_checksums.txt
+octosql_0.13.0_darwin_amd64.tar.gz
+octosql_0.13.0_darwin_arm64.tar.gz
+octosql_0.13.0_linux_amd64.tar.gz
+octosql_0.13.0_linux_arm64.tar.gz
+octosql_0.13.0_windows_amd64.tar.gz
+octosql_0.13.0_windows_arm64.tar.gz

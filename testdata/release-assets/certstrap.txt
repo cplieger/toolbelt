@@ -1,0 +1,5 @@
+# repo square/certstrap
+# tag v1.3.0
+certstrap-darwin-amd64
+certstrap-linux-amd64
+certstrap-windows-amd64

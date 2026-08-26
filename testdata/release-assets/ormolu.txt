@@ -1,0 +1,6 @@
+# repo tweag/ormolu
+# tag 0.8.1.1
+ormolu-aarch64-darwin.zip
+ormolu-x86_64-darwin.zip
+ormolu-x86_64-linux.zip
+ormolu-x86_64-windows.zip

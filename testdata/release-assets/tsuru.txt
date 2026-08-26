@@ -1,0 +1,10 @@
+# repo tsuru/tsuru-client
+# tag 1.36.0
+CHANGELOG.md
+metadata.json
+tsuru_1.36.0_checksums.txt
+tsuru_1.36.0_linux_amd64.tar.gz
+tsuru_1.36.0_linux_arm64.tar.gz
+tsuru_1.36.0_macOS_amd64.tar.gz
+tsuru_1.36.0_macOS_arm64.tar.gz
+tsuru_1.36.0_windows_amd64.zip

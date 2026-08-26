@@ -1,0 +1,17 @@
+# repo jckuester/awsrm
+# tag v0.4.0
+awsrm_0.4.0_darwin_amd64.tar.gz
+awsrm_0.4.0_darwin_arm64.tar.gz
+awsrm_0.4.0_freebsd_amd64.tar.gz
+awsrm_0.4.0_freebsd_arm64.tar.gz
+awsrm_0.4.0_freebsd_armv6.tar.gz
+awsrm_0.4.0_freebsd_armv7.tar.gz
+awsrm_0.4.0_linux_amd64.tar.gz
+awsrm_0.4.0_linux_arm64.tar.gz
+awsrm_0.4.0_linux_armv6.tar.gz
+awsrm_0.4.0_linux_armv7.tar.gz
+awsrm_0.4.0_windows_amd64.zip
+awsrm_0.4.0_windows_arm64.zip
+awsrm_0.4.0_windows_armv6.zip
+awsrm_0.4.0_windows_armv7.zip
+checksums.txt

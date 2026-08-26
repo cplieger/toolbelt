@@ -1,0 +1,7 @@
+# repo cloudflare/workerd
+# tag v1.20260826.1
+workerd-darwin-64.gz
+workerd-darwin-arm64.gz
+workerd-linux-64.gz
+workerd-linux-arm64.gz
+workerd-windows-64.gz

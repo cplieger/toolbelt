@@ -1,0 +1,7 @@
+# repo jdx/wait-for-gh-rate-limit
+# tag v1.1.2
+wait-for-gh-rate-limit-aarch64-apple-darwin.tar.gz
+wait-for-gh-rate-limit-aarch64-pc-windows-msvc.zip
+wait-for-gh-rate-limit-aarch64-unknown-linux-gnu.tar.gz
+wait-for-gh-rate-limit-x86_64-pc-windows-msvc.zip
+wait-for-gh-rate-limit-x86_64-unknown-linux-gnu.tar.gz

@@ -1,0 +1,12 @@
+# repo microsoft/apm
+# tag v0.28.0
+apm-darwin-arm64.tar.gz
+apm-darwin-arm64.tar.gz.sha256
+apm-darwin-x86_64.tar.gz
+apm-darwin-x86_64.tar.gz.sha256
+apm-linux-arm64.tar.gz
+apm-linux-arm64.tar.gz.sha256
+apm-linux-x86_64.tar.gz
+apm-linux-x86_64.tar.gz.sha256
+apm-windows-x86_64.zip
+apm-windows-x86_64.zip.sha256

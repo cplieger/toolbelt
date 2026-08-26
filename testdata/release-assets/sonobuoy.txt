@@ -1,0 +1,12 @@
+# repo vmware-tanzu/sonobuoy
+# tag v0.57.5
+sonobuoy_0.57.5_checksums.txt
+sonobuoy_0.57.5_darwin_amd64.tar.gz
+sonobuoy_0.57.5_darwin_arm64.tar.gz
+sonobuoy_0.57.5_linux_386.tar.gz
+sonobuoy_0.57.5_linux_amd64.tar.gz
+sonobuoy_0.57.5_linux_arm64.tar.gz
+sonobuoy_0.57.5_linux_ppc64le.tar.gz
+sonobuoy_0.57.5_linux_s390x.tar.gz
+sonobuoy_0.57.5_windows_386.tar.gz
+sonobuoy_0.57.5_windows_amd64.tar.gz

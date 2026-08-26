@@ -1,0 +1,12 @@
+# repo allure-framework/allurectl
+# tag 2.22.1
+allurectl_darwin_amd64
+allurectl_darwin_arm64
+allurectl_linux_386
+allurectl_linux_amd64
+allurectl_linux_arm64
+allurectl_linux_ppc64
+allurectl_linux_ppc64le
+allurectl_windows_386.exe
+allurectl_windows_amd64.exe
+allurectl_windows_arm64.exe

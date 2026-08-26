@@ -1,0 +1,4 @@
+# repo SwiftGen/SwiftGen
+# tag 6.6.3
+swiftgen-6.6.3.artifactbundle.zip
+swiftgen-6.6.3.zip

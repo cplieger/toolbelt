@@ -1,0 +1,10 @@
+# repo apollographql/router
+# tag v2.17.0
+md5sums.txt
+router-v2.17.0-aarch64-apple-darwin.tar.gz
+router-v2.17.0-aarch64-unknown-linux-gnu.tar.gz
+router-v2.17.0-x86_64-apple-darwin.tar.gz
+router-v2.17.0-x86_64-pc-windows-msvc.tar.gz
+router-v2.17.0-x86_64-unknown-linux-gnu.tar.gz
+sha1sums.txt
+sha256sums.txt

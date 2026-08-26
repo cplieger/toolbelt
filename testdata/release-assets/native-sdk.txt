@@ -1,0 +1,11 @@
+# repo vercel-labs/native
+# tag v0.10.1
+CHECKSUMS.txt
+native-sdk-darwin-arm64
+native-sdk-darwin-x64
+native-sdk-linux-arm64
+native-sdk-linux-musl-arm64
+native-sdk-linux-musl-x64
+native-sdk-linux-x64
+native-sdk-win32-arm64.exe
+native-sdk-win32-x64.exe

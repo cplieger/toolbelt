@@ -1,0 +1,16 @@
+# repo PyO3/maturin
+# tag v1.15.0
+maturin-aarch64-apple-darwin.tar.gz
+maturin-aarch64-pc-windows-msvc.zip
+maturin-aarch64-unknown-linux-musl.tar.gz
+maturin-arm-unknown-linux-musleabihf.tar.gz
+maturin-armv7-unknown-linux-musleabihf.tar.gz
+maturin-i686-pc-windows-msvc.zip
+maturin-i686-unknown-linux-musl.tar.gz
+maturin-loongarch64-unknown-linux-musl.tar.gz
+maturin-powerpc64le-unknown-linux-musl.tar.gz
+maturin-riscv64gc-unknown-linux-musl.tar.gz
+maturin-s390x-unknown-linux-gnu.tar.gz
+maturin-x86_64-apple-darwin.tar.gz
+maturin-x86_64-pc-windows-msvc.zip
+maturin-x86_64-unknown-linux-musl.tar.gz

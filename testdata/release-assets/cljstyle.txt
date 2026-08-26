@@ -1,0 +1,7 @@
+# repo greglook/cljstyle
+# tag 0.17.642
+cljstyle-0.17.642.jar
+cljstyle_0.17.642_linux_amd64.zip
+cljstyle_0.17.642_linux_amd64_static.zip
+cljstyle_0.17.642_macos_amd64.zip
+cljstyle_0.17.642_macos_arm64.zip

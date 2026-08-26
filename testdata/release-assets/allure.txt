@@ -1,0 +1,6 @@
+# repo allure-framework/allure2
+# tag 2.45.0
+allure-2.45.0.tgz
+allure-2.45.0.zip
+allure_2.45.0-1.noarch.rpm
+allure_2.45.0-1_all.deb

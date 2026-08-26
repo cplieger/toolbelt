@@ -1,0 +1,10 @@
+# repo neurosnap/zmx
+# tag v0.7.0
+zmx-0.7.0-linux-aarch64.tar.gz
+zmx-0.7.0-linux-aarch64.tar.gz.sha256
+zmx-0.7.0-linux-x86_64.tar.gz
+zmx-0.7.0-linux-x86_64.tar.gz.sha256
+zmx-0.7.0-macos-aarch64.tar.gz
+zmx-0.7.0-macos-aarch64.tar.gz.sha256
+zmx-0.7.0-macos-x86_64.tar.gz
+zmx-0.7.0-macos-x86_64.tar.gz.sha256

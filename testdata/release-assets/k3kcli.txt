@@ -1,0 +1,15 @@
+# repo rancher/k3k
+# tag v1.1.0
+k3k-kubelet-linux-amd64
+k3k-kubelet-linux-arm64
+k3k-kubelet-linux-s390x
+k3k-linux-amd64
+k3k-linux-arm64
+k3k-linux-s390x
+k3kcli-darwin-amd64
+k3kcli-darwin-arm64
+k3kcli-linux-amd64
+k3kcli-linux-arm64
+k3kcli-windows-amd64.zip
+k3kcli-windows-arm64.zip
+k3k_1.1.0_checksums.txt

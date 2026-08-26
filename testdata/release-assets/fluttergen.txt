@@ -1,0 +1,6 @@
+# repo FlutterGen/flutter_gen
+# tag v5.15.0
+fluttergen-linux.sha256
+fluttergen-linux.tar.gz
+fluttergen-macos.sha256
+fluttergen-macos.tar.gz

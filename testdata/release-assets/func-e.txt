@@ -1,0 +1,11 @@
+# repo tetratelabs/func-e
+# tag v1.6.0
+func-e_1.6.0_checksums.txt
+func-e_1.6.0_darwin_amd64.tar.gz
+func-e_1.6.0_darwin_arm64.tar.gz
+func-e_1.6.0_linux_aarch64.rpm
+func-e_1.6.0_linux_amd64.deb
+func-e_1.6.0_linux_amd64.tar.gz
+func-e_1.6.0_linux_arm64.deb
+func-e_1.6.0_linux_arm64.tar.gz
+func-e_1.6.0_linux_x86_64.rpm
