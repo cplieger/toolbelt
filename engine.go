@@ -1565,6 +1565,14 @@ func validateSource(source, install string) error {
 		if !strings.Contains(ref, "/") {
 			return errors.New("aqua source must be aqua:owner/repo")
 		}
+	case SourceApt:
+		// The grammar gate, applied at the door. Everything downstream
+		// treats the ref as a literal package name, so this is where a
+		// token that apt would read as an option, a version pin, an
+		// architecture qualifier or a removal is refused.
+		if !aptValidName(ref) {
+			return fmt.Errorf("apt source must be apt:<package> with a valid Debian package name, got %q", ref)
+		}
 	case SourceNpm, SourcePip, SourceCargo, SourceGo:
 	default:
 		return fmt.Errorf("unknown source kind %q", kind)

@@ -36,6 +36,11 @@ type installer struct {
 	// checksum verification. Nil falls back to slog.Default().
 	log      *slog.Logger
 	toolsDir string
+	// aptIdx is the parsed Debian package list, used as the literal-name
+	// oracle before any apt-get install (see installer.aptKnownName).
+	// Nil, or not yet loaded, degrades to the expansion-character
+	// fallback rather than to no check at all.
+	aptIdx *aptIndex
 }
 
 // Checksum outcomes recorded on ToolStatus.Checksum.
@@ -56,6 +61,12 @@ type installOutcome struct {
 	checksum string
 	bins     []string
 	pmBins   []string
+	// apt marks an install whose artifacts this engine does not own: an
+	// apt package lands in /usr, on the container layer, so it produces
+	// no bins to link and nothing to remove on uninstall. Recorded so the
+	// caller can tell "installed and owns nothing" from "installed
+	// nothing", which are otherwise the same empty bin set.
+	apt bool
 }
 
 // logger returns the operator-facing logger (slog.Default when unset).
@@ -226,6 +237,9 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 		out.bins, err = in.installCargo(ctx, ref, t.Version)
 	case SourceGo:
 		out.bins, err = in.installGo(ctx, ref, t.Version)
+	case SourceApt:
+		out.apt = true
+		err = in.installApt(ctx, ref)
 	case SourceManual:
 		out.bins, err = in.installManual(ctx, name, t)
 	default:
@@ -973,6 +987,19 @@ func (in *installer) runShell(ctx context.Context, command, version, optDir stri
 // itself. It never touches files the engine has no record of.
 func (in *installer) uninstall(ctx context.Context, name string, t *Tool, st *ToolStatus) error {
 	kind, ref, _ := strings.Cut(t.Source, ":")
+	if kind == SourceApt {
+		// An apt package is not this engine's to remove, and saying so is
+		// the honest outcome rather than a silent success.
+		//
+		// It produced no bins and no opt dir (its files are in /usr, on the
+		// container layer), so there is nothing recorded to undo. Removing
+		// the package itself would reach outside everything this engine
+		// owns and could take a dependency of the image with it. Dropping
+		// the entry stops it being reinstalled at the next converge, and a
+		// container recreate removes it along with the whole layer.
+		in.logf("dropped the %s entry; the Debian package stays until the container is recreated (apt packages are not on the persistent volume)", name)
+		return nil
+	}
 	switch kind {
 	case SourceNpm:
 		if err := in.runPM(ctx, "npm", "uninstall", "-g", "--prefix", in.npmDir(), ref); err != nil {

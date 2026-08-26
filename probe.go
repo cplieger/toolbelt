@@ -162,6 +162,9 @@ func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 // probeTool is probeInstalled's full verdict (mode + reason), cached per
 // tool and logged once per fingerprint change.
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
+	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceApt {
+		return e.probeApt(ref)
+	}
 	bins := recordedBins(name, t, s)
 	for _, b := range bins {
 		if _, err := os.Stat(filepath.Join(e.binDir(), b)); err != nil {
@@ -185,6 +188,35 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	e.probes.store(name, fingerprint, v)
 	e.logVerdict(name, v)
 	return v
+}
+
+// probeApt asks dpkg, because an apt package cannot be probed the way
+// every other source is.
+//
+// Two reasons, and each alone would be enough. A package may ship no
+// executable at all (libc6-dev), so there is nothing to run. And its
+// files are in /usr rather than the engine's bin dir, so the presence
+// check every other source starts with would look at the wrong place.
+//
+// This verdict is deliberately NOT cached. The other sources' cache is
+// keyed on a fingerprint of a file the engine owns, so it only changes
+// when the engine changes it; an apt package can be removed from under
+// the process by anyone with a shell in the container, and a recreate
+// removes every one of them at once. dpkg-query is a local database read,
+// so re-asking is cheap.
+func (e *Engine) probeApt(pkg string) probeVerdict {
+	if !AptAvailable() {
+		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "apt is unavailable on this host"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	version, installed := e.inst.aptInstalled(ctx, pkg)
+	if !installed {
+		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "dpkg reports " + pkg + " is not installed"}
+	}
+	// The dpkg status IS the version, so this is the one source whose
+	// probe verifies the answer without executing anything.
+	return probeVerdict{OK: true, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + version}
 }
 
 // logVerdict reports a FRESH verdict (cache hits stay quiet, so a stable

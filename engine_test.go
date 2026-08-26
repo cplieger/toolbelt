@@ -50,7 +50,7 @@ func newTestEngineClient(t *testing.T, cat *Catalog, client *http.Client, seed *
 	e := &Engine{
 		store:     st,
 		client:    client,
-		versions:  newVersionResolver(client),
+		versions:  newVersionResolver(client, nil),
 		log:       slog.Default(),
 		configDir: dir,
 		toolsDir:  toolsDir,
