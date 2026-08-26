@@ -69,9 +69,21 @@ type SearchHit struct {
 	Version  string `json:"version,omitempty"`
 	Featured bool   `json:"featured,omitempty"`
 	Lsp      bool   `json:"lsp,omitempty"`
+	// Unavailable marks a hit the catalog knows about and cannot
+	// install, with Reason naming the registry backend that defeated the
+	// compiler. Such a hit is informational: a client must not offer an
+	// install for it, and the engine refuses one anyway.
+	//
+	// Both fields are omitempty, so an installable hit serialises exactly
+	// as it did before this pair existed.
+	Unavailable bool   `json:"unavailable,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
-// SearchResponse is the search route's body.
+// SearchResponse is the search route's body. Installable results come
+// first, then the unavailable ones, each block capped independently by
+// the engine, so a client can render them as separate sections without
+// re-sorting.
 type SearchResponse struct {
 	Results []SearchHit `json:"results"`
 }
@@ -186,19 +198,32 @@ func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 }
 
 func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
-	hits := e.Search(r.URL.Query().Get("q"))
-	res := SearchResponse{Results: make([]SearchHit, 0, len(hits))}
-	for i := range hits {
-		res.Results = append(res.Results, SearchHit{
-			Name:        hits[i].Name,
-			Description: hits[i].Description,
-			Source:      hits[i].Source,
-			Version:     hits[i].Version,
-			Featured:    hits[i].Featured,
-			Lsp:         hits[i].Lsp,
-		})
+	q := r.URL.Query().Get("q")
+	installable := e.Search(q)
+	unavailable := e.SearchUnavailable(q)
+	res := SearchResponse{Results: make([]SearchHit, 0, len(installable)+len(unavailable))}
+	for i := range installable {
+		res.Results = append(res.Results, searchHit(&installable[i], false))
+	}
+	for i := range unavailable {
+		res.Results = append(res.Results, searchHit(&unavailable[i], true))
 	}
 	webhttp.WriteJSON(w, res)
+}
+
+// searchHit projects a catalog entry, dropping the embedded install
+// definition no client needs.
+func searchHit(e *toolbelt.CatalogEntry, unavailable bool) SearchHit {
+	return SearchHit{
+		Name:        e.Name,
+		Description: e.Description,
+		Source:      e.Source,
+		Version:     e.Version,
+		Featured:    e.Featured,
+		Lsp:         e.Lsp,
+		Unavailable: unavailable,
+		Reason:      e.Reason,
+	}
 }
 
 func getJobs(e *toolbelt.Engine, w http.ResponseWriter) {

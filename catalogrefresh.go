@@ -226,6 +226,11 @@ func (e *Engine) overlaidCopy(c *Catalog) (*Catalog, error) {
 		Licenses:  c.Licenses,
 		Generated: c.Generated,
 		Entries:   maps.Clone(c.Entries),
+		// Carried explicitly. This copy enumerates fields rather than
+		// copying the struct, so a map omitted here is silently dropped on
+		// every load AND every refresh, which reads as the compiler never
+		// having emitted it.
+		Unavailable: maps.Clone(c.Unavailable),
 	}
 	for _, path := range e.catalogOverlays {
 		data, err := os.ReadFile(path)
@@ -238,7 +243,14 @@ func (e *Engine) overlaidCopy(c *Catalog) (*Catalog, error) {
 		}
 		for name := range ov.Entries {
 			patch := ov.Entries[name]
-			if _, known := cp.Entries[name]; !known && patch.Source == "" {
+			if patch.Source != "" {
+				continue
+			}
+			// A display patch may target either map: an unavailable entry's
+			// description is what a consumer shows beside its reason.
+			_, installable := cp.Entries[name]
+			_, unavailable := cp.Unavailable[name]
+			if !installable && !unavailable {
 				e.log.Warn("toolbelt: overlay patches unknown tool, skipping",
 					"overlay", path, "tool", name)
 				delete(ov.Entries, name)
@@ -275,10 +287,11 @@ var ErrRefreshNotConfigured = errors.New("catalog refresh not configured")
 func (e *Engine) CatalogInfo() CatalogInfo {
 	c := e.cat()
 	info := CatalogInfo{
-		Refs:      maps.Clone(c.Refs),
-		Generated: c.Generated,
-		Entries:   len(c.Entries),
-		Scheduled: e.refresh != nil && e.refresh.Interval > 0,
+		Refs:        maps.Clone(c.Refs),
+		Generated:   c.Generated,
+		Entries:     len(c.Entries),
+		Unavailable: len(c.Unavailable),
+		Scheduled:   e.refresh != nil && e.refresh.Interval > 0,
 	}
 	if e.refresh != nil {
 		info.URL = e.refresh.URL
