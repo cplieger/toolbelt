@@ -687,7 +687,6 @@ func TestReleaseSpec_DiscoveredChecksumIsNotDeclared(t *testing.T) {
 	}
 }
 
-
 // TestSearchInstallTree covers the fallback that makes a nested release
 // archive installable. A release publishes no manifest of its contents, so
 // the declared path is a guess and upstream's build decides whether it is
@@ -817,7 +816,6 @@ func TestSearchInstallTree(t *testing.T) {
 		})
 	}
 }
-
 
 // TestChooseReleaseAsset_PrefersAnAssetNamingThisOS covers the narrowing
 // that sits between foreign-OS rejection and the tie-break. Rejection
@@ -970,7 +968,6 @@ func TestReleaseArchTokens_UnknownSpellingIsNotNeutral(t *testing.T) {
 		t.Errorf("chooseReleaseAsset(elm, amd64) = %q, %v, want elm-0.19.2-linux-x64.gz", got.Asset, err)
 	}
 }
-
 
 // TestListReleaseAssets_CarriesTheGitHubCredential pins the fix for a
 // defect the live check found. The GitHub anonymous rate limit is 60

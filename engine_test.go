@@ -583,7 +583,7 @@ func TestInventory_ReportsDependents(t *testing.T) {
 	// The refusal and the advisory field must name the same set, or a
 	// consumer's pre-check disagrees with the answer it gets.
 	m, _ := e.store.LoadManifest()
-	if want := enabledDependents(m, "node"); !slices.Equal(got["node"], want) {
+	if want := enabledDependents(m, "node", e.backends()); !slices.Equal(got["node"], want) {
 		t.Errorf("inventory dependents %v disagree with the refusal's %v", got["node"], want)
 	}
 }
@@ -2282,7 +2282,6 @@ func TestReconcileFull_UpdatePassRefusedByAFullQueue(t *testing.T) {
 	}
 }
 
-
 // TestToolInfo_CarriesChecksumOnlyWhileInstalled pins the fact behind the
 // client's "no checksum" badge. The badge must not be derived from the
 // source kind: 252 of the catalog's aqua entries declare no checksum
@@ -2339,4 +2338,122 @@ func inventoryRow(t *testing.T, e *Engine, name string) ToolInfo {
 	}
 	t.Fatalf("Setup: Inventory() has no row named %q: %+v", name, inv.Tools)
 	return ToolInfo{}
+}
+
+// TestRemove_RefusesAnEssentialTool pins the protection a consumer's
+// selection declares. A UI that merely hides its delete button is not a
+// guard — the API is reachable — so the refusal has to live here, and it
+// has to survive the cascade: RemoveWithDependents deletes rows the caller
+// never named, which is exactly how an essential tool would otherwise
+// leave as somebody else's collateral.
+//
+// Disable stays available on purpose. It is the escape hatch for a user
+// who wants the tool gone, and it keeps the row that carries the install
+// knowledge, which is the thing deletion destroys.
+func TestRemove_RefusesAnEssentialTool(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "gh", nil)
+	// dependant requires gh, so the cascade has something to walk.
+	addManual(t, e, "dependant", []string{"gh"})
+	// Declared by the SELECTION, which is the only authority: the engine
+	// reads the live catalog on every removal.
+	e.catalog.Store(&Catalog{Entries: map[string]CatalogEntry{
+		"gh": {Name: "gh", Source: SourceManual, Essential: true},
+	}})
+
+	t.Run("remove is refused", func(t *testing.T) {
+		_, _, err := e.Remove("gh")
+		if !errors.Is(err, ErrEssential) {
+			t.Errorf("Remove(gh) = %v, want ErrEssential", err)
+		}
+		if !strings.Contains(fmt.Sprint(err), "gh") {
+			t.Errorf("Remove(gh) error = %v, want it to name the tool", err)
+		}
+	})
+
+	t.Run("the cascade cannot take it as collateral", func(t *testing.T) {
+		// Removing dependant does not touch gh, so this must SUCCEED —
+		// the guard protects the essential row, not everything near it.
+		if _, _, err := e.Remove("dependant"); err != nil {
+			t.Fatalf("Remove(dependant) = %v, want nil: only gh is essential", err)
+		}
+	})
+
+	t.Run("an essential dependent blocks a cascade", func(t *testing.T) {
+		// base <- gh(essential): removing base with dependents would
+		// delete gh, so the whole call is refused rather than half-done.
+		addManual(t, e, "base", nil)
+		if err := e.store.MutateManifest(func(m *Manifest) error {
+			gh := m.Tools["gh"]
+			gh.Requires = []string{"base"}
+			m.Tools["gh"] = gh
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// Re-store: Add(base) above resolved against the catalog, and the
+		// row for gh must still be the essential one.
+		e.catalog.Store(&Catalog{Entries: map[string]CatalogEntry{
+			"gh": {Name: "gh", Source: SourceManual, Essential: true},
+		}})
+		_, _, err := e.RemoveWithDependents("base")
+		if !errors.Is(err, ErrEssential) {
+			t.Errorf("RemoveWithDependents(base) = %v, want ErrEssential", err)
+		}
+		m, _ := e.store.LoadManifest()
+		if _, ok := m.Tools["base"]; !ok {
+			t.Error("the refused cascade still deleted base: the manifest must be untouched")
+		}
+	})
+
+	t.Run("disable is still allowed", func(t *testing.T) {
+		yes := true
+		if _, err := e.Patch("gh", PatchRequest{Disabled: &yes, Force: true}); err != nil {
+			t.Errorf("Patch(gh, disabled) = %v, want nil: disable is the escape hatch", err)
+		}
+	})
+
+	t.Run("the row reports it to a consumer", func(t *testing.T) {
+		if row := inventoryRow(t, e, "gh"); !row.Essential {
+			t.Errorf("Inventory row for gh = %+v, want Essential set", row)
+		}
+	})
+}
+
+// TestResolve_HydratesEssentialFromTheCatalog covers the other half: the
+// flag is the SELECTION's live answer, so it is re-read on every resolve
+// rather than merged only when unset. A product that stops depending on a
+// tool has to be able to release it, and a manifest row written months ago
+// must not pin the old answer.
+func TestResolve_HydratesEssentialFromTheCatalog(t *testing.T) {
+	cat := &Catalog{Entries: map[string]CatalogEntry{
+		"gh": {
+			Name: "gh", Source: SourceManual, Version: "1",
+			Install: binStub("gh"), Probe: "gh", Essential: true,
+		},
+	}}
+	e := newTestEngine(t, cat)
+	job, err := e.Add(t.Context(), &AddRequest{Name: "gh"})
+	if err != nil {
+		t.Fatalf("Add(gh) = %v", err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install gh = %+v tail=%v", final, final.OutputTail)
+	}
+	if row := inventoryRow(t, e, "gh"); !row.Essential {
+		t.Errorf("Inventory row for gh = %+v, want Essential hydrated from the catalog", row)
+	}
+	if _, _, err := e.Remove("gh"); !errors.Is(err, ErrEssential) {
+		t.Errorf("Remove(gh) = %v, want ErrEssential from a catalog-declared flag", err)
+	}
+
+	// And released again when the selection drops it: the manifest row
+	// still carries true from the install above, so this fails if the
+	// merge is once-only.
+	e.catalog.Store(&Catalog{Entries: map[string]CatalogEntry{
+		"gh": {Name: "gh", Source: SourceManual, Version: "1", Install: binStub("gh"), Probe: "gh"},
+	}})
+	if _, _, err := e.Remove("gh"); err != nil {
+		t.Errorf("Remove(gh) after the selection released it = %v, want nil", err)
+	}
 }

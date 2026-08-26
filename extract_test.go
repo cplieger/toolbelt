@@ -457,7 +457,6 @@ func TestEnforceExecutable_RefusesASymlinkInsteadOfChmodingItsTarget(t *testing.
 	}
 }
 
-
 // TestLinkDeclaredFiles_SearchSkipsAbsentNames covers the best-effort half
 // of the release path. The registry's binary list and the release move
 // independently, so a list that has outrun upstream must still install
