@@ -643,32 +643,43 @@ func newServerWithCatalog(t *testing.T, doc string) (*toolbelt.Engine, *httptest
 	return e, srv
 }
 
-// TestRoutes_SearchCarriesUnavailableEntriesLast pins the wire contract a
-// client renders two sections from. Before this, SearchHit was a
-// six-field projection with nowhere for the reason to go, so a tool the
-// catalog knows about and cannot install reached no client at all and the
-// whole unavailable map stopped at the library boundary.
-func TestRoutes_SearchCarriesUnavailableEntriesLast(t *testing.T) {
+// TestRoutes_SearchHidesUnavailableUnlessAsked covers both sides of the
+// toggle. Hidden is the default because a dialog offering installs has no
+// use for a row it cannot act on; the opt-in exists because an agent
+// reading this API would rather be told a tool is known and why it cannot
+// be installed than get an empty result and conclude it does not exist.
+func TestRoutes_SearchHidesUnavailableUnlessAsked(t *testing.T) {
 	const doc = `{"entries":{"pyright":{"name":"pyright","source":"npm:pyright","description":"Python LSP"}},` +
 		`"unavailable":{"python":{"name":"python","description":"python language","reason":"core:python"}}}`
 	_, srv := newServerWithCatalog(t, doc)
 
-	var sr SearchResponse
-	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=python", "", &sr); code != http.StatusOK {
+	// Default: installable only.
+	var hidden SearchResponse
+	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=python", "", &hidden); code != http.StatusOK {
 		t.Fatalf("search status = %d, want 200", code)
 	}
-	if len(sr.Results) != 2 {
-		t.Fatalf("search returned %d results, want 2: %+v", len(sr.Results), sr.Results)
+	if len(hidden.Results) != 1 {
+		t.Fatalf("default search returned %d results, want 1: %+v", len(hidden.Results), hidden.Results)
 	}
-	// Installable first, unavailable last, so a client can split the list
-	// without re-sorting it.
-	if sr.Results[0].Name != "pyright" || sr.Results[0].Unavailable {
-		t.Errorf("first result = %+v, want the installable pyright", sr.Results[0])
+	if hidden.Results[0].Name != "pyright" {
+		t.Errorf("default search returned %q, want the installable pyright", hidden.Results[0].Name)
 	}
-	if sr.Results[0].Reason != "" {
-		t.Errorf("an installable hit carries a reason: %q", sr.Results[0].Reason)
+
+	// Opt in: the uninstallable block is appended after the installable one.
+	var shown SearchResponse
+	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=python&unavailable=1", "", &shown); code != http.StatusOK {
+		t.Fatalf("opt-in search status = %d, want 200", code)
 	}
-	got := sr.Results[1]
+	if len(shown.Results) != 2 {
+		t.Fatalf("opt-in search returned %d results, want 2: %+v", len(shown.Results), shown.Results)
+	}
+	if shown.Results[0].Name != "pyright" || shown.Results[0].Unavailable {
+		t.Errorf("first result = %+v, want the installable pyright", shown.Results[0])
+	}
+	if shown.Results[0].Reason != "" {
+		t.Errorf("an installable hit carries a reason: %q", shown.Results[0].Reason)
+	}
+	got := shown.Results[1]
 	if got.Name != "python" || !got.Unavailable {
 		t.Fatalf("second result = %+v, want the unavailable python", got)
 	}
@@ -677,6 +688,36 @@ func TestRoutes_SearchCarriesUnavailableEntriesLast(t *testing.T) {
 	}
 	if got.Source != "" {
 		t.Errorf("an unavailable hit carries a source %q, which a client would try to install", got.Source)
+	}
+}
+
+// TestSearchWantsUnavailable covers the parameter's spellings. A bare
+// `?unavailable` is a yes: a caller who writes it plainly means it, and
+// answering with silence would be the unhelpful reading.
+func TestSearchWantsUnavailable(t *testing.T) {
+	cases := map[string]bool{
+		"":                   false,
+		"?q=x":               false,
+		"?q=x&unavailable":   true,
+		"?q=x&unavailable=":  true,
+		"?unavailable=1":     true,
+		"?unavailable=true":  true,
+		"?unavailable=yes":   true,
+		"?unavailable=on":    true,
+		"?unavailable=0":     false,
+		"?unavailable=false": false,
+		"?unavailable=no":    false,
+	}
+	for query, want := range cases {
+		t.Run(query, func(t *testing.T) {
+			r, err := http.NewRequest(http.MethodGet, "/api/tools/search"+query, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := searchWantsUnavailable(r); got != want {
+				t.Errorf("searchWantsUnavailable(%q) = %v, want %v", query, got, want)
+			}
+		})
 	}
 }
 
