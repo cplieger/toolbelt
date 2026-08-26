@@ -2,7 +2,9 @@ package toolbelt
 
 import (
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -384,4 +386,73 @@ func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
 	if hits[0].Candidate == "" {
 		t.Errorf("bash carries no candidate version; a row would show nothing to compare against the catalog")
 	}
+}
+
+// TestAptSetHold covers the call that makes a pinned apt row real.
+//
+// Manifest-level pinning already stops this engine bumping the row, but apt
+// upgrades a package as a DEPENDENCY of some other install, so without a
+// dpkg hold a pinned package can move underneath a pin that reported it
+// frozen. The name still goes through the install grammar gate: a name this
+// engine would refuse to install is one it must not mark either.
+func TestAptSetHold(t *testing.T) {
+	t.Run("hold and unhold are distinct actions", func(t *testing.T) {
+		for _, tc := range []struct {
+			hold bool
+			want string
+		}{{true, "hold"}, {false, "unhold"}} {
+			bin := t.TempDir()
+			log := filepath.Join(bin, "args")
+			// Redirects only: aptEnv gives the child a PATH of its own, so a
+			// stub calling `touch` or `printf` would fail for want of the
+			// binary and its FAILURE would be mistaken for the behaviour under
+			// test. Measured: that is what made the grammar-gate case vacuous.
+			script := "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> " + log + "; done\n"
+			if err := os.WriteFile(filepath.Join(bin, "apt-mark"), []byte(script), 0o755); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			t.Setenv("PATH", bin)
+
+			in := &installer{output: func(string) {}}
+			if err := in.aptSetHold(t.Context(), "jq", tc.hold); err != nil {
+				t.Fatalf("aptSetHold(jq, %v) = %v, want nil", tc.hold, err)
+			}
+			got, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatalf("Setup: read args: %v", err)
+			}
+			// The -- guard travels too: a package name is untrusted input and
+			// apt-mark would otherwise read a leading dash as a flag.
+			if want := tc.want + "\n--\njq\n"; string(got) != want {
+				t.Errorf("aptSetHold(jq, %v) ran apt-mark %q, want %q", tc.hold, got, want)
+			}
+		}
+	})
+
+	// The gate runs BEFORE the subprocess: a refused name must not reach
+	// apt-mark at all, so the check cannot be "apt-mark rejected it".
+	t.Run("an invalid package name is refused without running apt-mark", func(t *testing.T) {
+		bin := t.TempDir()
+		sentinel := filepath.Join(bin, "ran")
+		script := "#!/bin/sh\n: > " + sentinel + "\n"
+		if err := os.WriteFile(filepath.Join(bin, "apt-mark"), []byte(script), 0o755); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		t.Setenv("PATH", bin)
+
+		in := &installer{output: func(string) {}}
+		// Grammar-invalid only. A dotted name like "jq." is grammar-LEGAL by
+		// design and is caught by the index oracle at install time instead; the
+		// hold path runs the grammar gate alone, which is sufficient because
+		// holding a name no package matches fails harmlessly at apt-mark rather
+		// than installing something the caller never asked for.
+		for _, bad := range []string{"pkg-", "jq;rm -rf /", "-jq", "", "JQ", "jq amd64"} {
+			if err := in.aptSetHold(t.Context(), bad, true); err == nil {
+				t.Errorf("aptSetHold(%q) = nil, want a refusal", bad)
+			}
+		}
+		if _, err := os.Stat(sentinel); err == nil {
+			t.Error("apt-mark ran for a name the grammar gate refused")
+		}
+	})
 }
