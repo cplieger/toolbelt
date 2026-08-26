@@ -503,9 +503,16 @@ type PatchRequest struct {
 type patchOutcome struct {
 	prevVersion     string
 	cascaded        []string
+	source          string
 	versionChanged  bool
 	disabledChanged bool
 	nowDisabled     bool
+	// pinChanged and nowPinned carry a pin transition out to Patch, which
+	// is where the dpkg-level hold is applied. The mutation itself cannot
+	// do it: patchManifest runs inside the manifest lock and holding a
+	// package is a subprocess.
+	pinChanged bool
+	nowPinned  bool
 }
 
 // Patch merges fields into an existing tool and enqueues the follow-up
@@ -523,7 +530,33 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	e.applyAptHold(name, &out)
 	return e.patchJob(name, &out)
+}
+
+// applyAptHold makes a pin REAL for an apt package by asking dpkg to hold
+// it, and releases the hold when the pin comes off.
+//
+// Without it a pin is bookkeeping only. Manifest-level pinning already
+// stops this engine bumping the row (updateOne skips a pinned tool), but
+// apt upgrades a package as a DEPENDENCY of some other install, so a
+// pinned package could move underneath a pin that reported it frozen and
+// nothing would record the change. `apt-mark hold` is the only mechanism
+// apt itself respects.
+//
+// Best-effort on purpose, and it fires only on a transition. The pin is
+// already persisted by the time this runs, so a failure must not undo the
+// user's stated intent — it warns and leaves the manifest-level pin in
+// force, which is strictly what the pin meant before this existed.
+func (e *Engine) applyAptHold(name string, out *patchOutcome) {
+	pkg, ok := strings.CutPrefix(out.source, SourceApt+":")
+	if !ok || !out.pinChanged || !AptAvailable() {
+		return
+	}
+	if err := e.inst.aptSetHold(context.Background(), pkg, out.nowPinned); err != nil {
+		e.log.Warn("toolbelt: apt hold not applied; the pin holds in the manifest only",
+			"tool", name, "package", pkg, "hold", out.nowPinned, "error", err)
+	}
 }
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
@@ -572,8 +605,13 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	}
 	out.nowDisabled = t.Disabled
 	if req.Pin != nil {
+		out.pinChanged = *req.Pin != t.Pin
 		t.Pin = *req.Pin
 	}
+	out.nowPinned = t.Pin
+	// Carried so Patch can tell an apt row from any other kind without
+	// re-reading the manifest outside its lock.
+	out.source = t.Source
 	if req.Description != nil {
 		t.Description = *req.Description
 	}

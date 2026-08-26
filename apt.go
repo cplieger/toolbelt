@@ -67,6 +67,40 @@ func aptValidName(s string) bool {
 	return !strings.HasSuffix(s, "-")
 }
 
+// aptSetHold marks an apt package held (or releases the hold), which is
+// what makes a pinned row survive apt's own dependency resolution: a held
+// package is one apt refuses to upgrade or remove as a side effect of some
+// other install.
+//
+// dpkg's own marking, not a preferences file. A pin is per-package state
+// with exactly this meaning, and /etc/apt/preferences.d would put this
+// engine's opinion in a file an operator also edits by hand.
+func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) error {
+	// The name goes to apt-mark as an argv element, so no shell parses it,
+	// but the grammar gate still runs: a name this engine would refuse to
+	// install is a name it must not mark either.
+	if !aptValidName(pkg) {
+		return fmt.Errorf("refusing to hold %q: not a valid package name", pkg)
+	}
+	action := "unhold"
+	if hold {
+		action = "hold"
+	}
+	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "apt-mark", action, "--", pkg)
+	cmd.Env = aptEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("apt-mark %s %s: %w: %s", action, pkg, err, strings.TrimSpace(string(out)))
+	}
+	in.logf("apt-mark %s %s", action, pkg)
+	return nil
+}
+
+// aptHoldTimeout bounds an apt-mark call. It writes one dpkg selection and
+// touches no network, so this is a wedge guard rather than a work budget.
+const aptHoldTimeout = 30 * time.Second
+
 // AptAvailable reports whether this process can install apt packages:
 // euid 0 and apt-get on PATH. Consumers surface it rather than offering
 // an install that always fails, and the engine's own converge skips apt
