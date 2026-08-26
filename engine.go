@@ -258,6 +258,19 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		return t, nil
 	}
 	if t.Source == "" {
+		// The catalog may KNOW this tool and have no way to install it
+		// (mise core:/vfox:/conda: backends). Saying "unknown tool" there
+		// is false and sends the user looking for a typo, so name the
+		// reason instead. A caller who supplies its own source is
+		// unaffected: this branch is only reached when the catalog was the
+		// only available knowledge, which is what keeps a hand-authored
+		// manual entry for one of these names working.
+		if u, ok := e.cat().Unavailable[name]; ok {
+			if u.Reason != "" {
+				return t, fmt.Errorf("%q has no install source in the catalog (%s): install it in a shell, or add it with an explicit source", name, u.Reason)
+			}
+			return t, fmt.Errorf("%q has no install source in the catalog: install it in a shell, or add it with an explicit source", name)
+		}
 		return t, fmt.Errorf("unknown tool %q: pick a source (npm:/pip:/cargo:/go:/aqua:/manual)", name)
 	}
 	if err := validateSource(t.Source, t.Install); err != nil {
