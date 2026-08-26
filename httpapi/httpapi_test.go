@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -608,5 +610,86 @@ func TestCachePolicy_WrapperValueWins(t *testing.T) {
 			rec, atCommit := serve(t, wrapped, http.MethodGet, "/api/tools", "")
 			assertCachePolicy(t, rec, atCommit, outer)
 		})
+	}
+}
+
+// newServerWithCatalog is newServer plus a compiled catalog on disk,
+// which is what makes a search return anything at all: the bare fixture
+// has no CatalogPath, so both corpora are empty and a search test would
+// pass against an unwired route.
+func newServerWithCatalog(t *testing.T, doc string) (*toolbelt.Engine, *httptest.Server) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tool-catalog.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, err := toolbelt.New(&toolbelt.Config{
+		ConfigDir:   dir,
+		ToolsDir:    filepath.Join(dir, "tools"),
+		CatalogPath: path,
+		Logger:      slog.Default(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	h := Handler(e, "/api/tools")
+	mux := http.NewServeMux()
+	mux.Handle("/api/tools", h)
+	mux.Handle("/api/tools/", h)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return e, srv
+}
+
+// TestRoutes_SearchCarriesUnavailableEntriesLast pins the wire contract a
+// client renders two sections from. Before this, SearchHit was a
+// six-field projection with nowhere for the reason to go, so a tool the
+// catalog knows about and cannot install reached no client at all and the
+// whole unavailable map stopped at the library boundary.
+func TestRoutes_SearchCarriesUnavailableEntriesLast(t *testing.T) {
+	const doc = `{"entries":{"pyright":{"name":"pyright","source":"npm:pyright","description":"Python LSP"}},` +
+		`"unavailable":{"python":{"name":"python","description":"python language","reason":"core:python"}}}`
+	_, srv := newServerWithCatalog(t, doc)
+
+	var sr SearchResponse
+	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=python", "", &sr); code != http.StatusOK {
+		t.Fatalf("search status = %d, want 200", code)
+	}
+	if len(sr.Results) != 2 {
+		t.Fatalf("search returned %d results, want 2: %+v", len(sr.Results), sr.Results)
+	}
+	// Installable first, unavailable last, so a client can split the list
+	// without re-sorting it.
+	if sr.Results[0].Name != "pyright" || sr.Results[0].Unavailable {
+		t.Errorf("first result = %+v, want the installable pyright", sr.Results[0])
+	}
+	if sr.Results[0].Reason != "" {
+		t.Errorf("an installable hit carries a reason: %q", sr.Results[0].Reason)
+	}
+	got := sr.Results[1]
+	if got.Name != "python" || !got.Unavailable {
+		t.Fatalf("second result = %+v, want the unavailable python", got)
+	}
+	if got.Reason != "core:python" {
+		t.Errorf("reason = %q, want %q", got.Reason, "core:python")
+	}
+	if got.Source != "" {
+		t.Errorf("an unavailable hit carries a source %q, which a client would try to install", got.Source)
+	}
+}
+
+// TestSearchHit_OmitsTheNewFieldsForAnInstallableEntry keeps the wire
+// backward-compatible: a client predating the pair must see the same
+// bytes it always did, which is what `omitempty` buys and what a future
+// edit changing either tag would silently break.
+func TestSearchHit_OmitsTheNewFieldsForAnInstallableEntry(t *testing.T) {
+	b, err := json.Marshal(SearchHit{Name: "ripgrep", Source: "aqua:BurntSushi/ripgrep"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); strings.Contains(got, "unavailable") || strings.Contains(got, "reason") {
+		t.Errorf("installable hit serialised the new fields: %s", got)
 	}
 }

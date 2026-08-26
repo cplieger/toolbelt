@@ -163,6 +163,12 @@ type CatalogInfo struct {
 	// successful refresh).
 	LastError string `json:"last_error,omitempty"`
 	Entries   int    `json:"entries"`
+	// Unavailable counts the entries the catalog knows about and cannot
+	// install. Beside Entries it is the operator's read on whether a
+	// registry bump changed what is reachable: a jump in this number with
+	// Entries falling is upstream moving tools onto a backend the
+	// compiler does not support.
+	Unavailable int `json:"unavailable"`
 	// FetchedAt is the last successful refresh (Unix milliseconds; 0
 	// before the first).
 	FetchedAt int64 `json:"fetched_at,omitempty"`

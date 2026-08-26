@@ -140,7 +140,30 @@ func (e *Engine) systemTools() []SystemTool {
 // The returned entries alias the catalog: do not mutate their slice fields
 // (see [CatalogEntry]).
 func (e *Engine) Search(query string) []CatalogEntry {
-	hits := e.cat().Search(query)
+	return e.filterInstalled(e.cat().Search(query))
+}
+
+// SearchUnavailable ranks the catalog entries no install source exists
+// for (see [Catalog.Unavailable]), filtered like Search so a name the
+// user already has by some other route is not offered as uninstallable.
+//
+// The returned entries alias the catalog: do not mutate their slice fields
+// (see [CatalogEntry]).
+func (e *Engine) SearchUnavailable(query string) []CatalogEntry {
+	return e.filterInstalled(e.cat().SearchUnavailable(query))
+}
+
+// filterInstalled drops hits already present in the manifest. An
+// unreadable manifest returns the hits unfiltered rather than nothing: a
+// search that silently goes empty is worse than one that offers a tool
+// the user already has, and the Add path refuses a duplicate anyway.
+//
+// It filters in place over the caller's slice, which aliases nothing the
+// catalog owns because Search allocated it.
+func (e *Engine) filterInstalled(hits []CatalogEntry) []CatalogEntry {
+	if len(hits) == 0 {
+		return hits
+	}
 	m, err := e.store.LoadManifest()
 	if err != nil {
 		e.log.Warn("toolbelt: search: manifest unreadable, results unfiltered", "error", err)
