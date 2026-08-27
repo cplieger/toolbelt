@@ -52,6 +52,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -354,8 +355,8 @@ const (
 // outcome pairs the decision with the backend that produced it. reason
 // is set only for outcomeUnavailable and is the string a consumer shows.
 type outcome struct {
-	kind   outcomeKind
 	reason string
+	kind   outcomeKind
 }
 
 // linuxCapable reports whether a mise entry's `os` list admits linux.
@@ -402,28 +403,15 @@ func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome
 	// registry's own preference, so it is the answer to "why can this not
 	// be installed" that matches what a user reads upstream.
 	var firstReason string
-	noteReason := func(r string) {
-		if firstReason == "" {
-			firstReason = r
-		}
-	}
 	for _, raw := range mt.Backends {
 		backend := backendString(raw)
 		if backend == "" {
-			noteReason("no linux platform")
+			firstReason = cmp.Or(firstReason, "no linux platform")
 			continue
 		}
 		source, aq, err := resolveBackend(aquaDir, backend)
-		opts := backendOptions(raw)
-		if errors.Is(err, errUnsupported) {
-			noteReason(backend) // deliberately unsupported backend kind/type
-			continue
-		}
-		if errors.Is(err, fs.ErrNotExist) {
-			// The mise entry references an aqua package the pinned
-			// aqua-registry ref doesn't have (the two registries move
-			// independently). Skip this backend, try the next.
-			noteReason(backend + " (not in the pinned aqua registry)")
+		if skip, reason := backendSkip(backend, err); skip {
+			firstReason = cmp.Or(firstReason, reason)
 			continue
 		}
 		if err != nil {
@@ -435,17 +423,36 @@ func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome
 		entry.Source = source
 		entry.Aqua = aq
 		if strings.HasPrefix(source, toolbelt.SourceRelease+":") {
-			entry.Release = releaseHints(name, mt.Bins, opts)
+			entry.Release = releaseHints(name, mt.Bins, backendOptions(raw))
 		}
 		if entry.Description == "" && aq != nil {
 			entry.Description = firstLine(aq.Description)
 		}
 		return entry, outcome{kind: outcomeCompiled}, nil
 	}
-	if firstReason == "" {
-		firstReason = "no backends declared"
+	return entry, outcome{
+		kind:   outcomeUnavailable,
+		reason: cmp.Or(firstReason, "no backends declared"),
+	}, nil
+}
+
+// backendSkip separates the two resolve failures that mean "try the next
+// backend" from the one that means the registry's format has drifted.
+// The reason it returns is what a consumer reads as the explanation for
+// an unavailable tool, so it names the backend rather than the error.
+func backendSkip(backend string, err error) (skip bool, reason string) {
+	switch {
+	case errors.Is(err, errUnsupported):
+		// A deliberately unsupported backend kind or type.
+		return true, backend
+	case errors.Is(err, fs.ErrNotExist):
+		// The mise entry references an aqua package the pinned
+		// aqua-registry ref doesn't have (the two registries move
+		// independently).
+		return true, backend + " (not in the pinned aqua registry)"
+	default:
+		return false, ""
 	}
-	return entry, outcome{kind: outcomeUnavailable, reason: firstReason}, nil
 }
 
 // backendOptions returns a table-form backend's options map, or nil for

@@ -85,8 +85,8 @@ var aptBasePriorities = map[string]bool{
 // stale list right after an install — the one moment a reader is looking —
 // or re-enumerate for nothing the rest of the time.
 type aptDiscovery struct {
-	mu     sync.Mutex
 	cached []AptPackage
+	mu     sync.Mutex
 	loaded bool
 }
 

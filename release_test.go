@@ -2,6 +2,7 @@ package toolbelt
 
 import (
 	"bufio"
+	"cmp"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -828,6 +829,9 @@ func TestChooseReleaseAsset_PrefersAnAssetNamingThisOS(t *testing.T) {
 		assets []string
 		tool   string
 		hints  *ReleaseHints
+		// goarch is the host architecture the choice is made for. Empty
+		// means amd64, so only a case that is ABOUT the other arch says so.
+		goarch string
 		want   string
 	}{
 		// ethereum/solidity publishes the compiler beside a source
@@ -863,16 +867,29 @@ func TestChooseReleaseAsset_PrefersAnAssetNamingThisOS(t *testing.T) {
 			assets: []string{"dotslash-linux-musl.x86_64.tar.gz", "dotslash-ubuntu-22.04.x86_64.tar.gz"},
 			tool:   "dotslash", want: "dotslash-ubuntu-22.04.x86_64.tar.gz",
 		},
+		// The same entry point on the OTHER host architecture, because the
+		// hints path reaches foreign-arch rejection before any preference
+		// runs and BurntSushi/ripgrep ships one build per arch. Without a
+		// case here the whole hints table asserted amd64 only.
+		"foreign-arch rejection decides on arm64": {
+			assets: []string{
+				"ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz",
+				"ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz",
+			},
+			tool: "ripgrep", goarch: "arm64",
+			want: "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := chooseReleaseAssetWithHints(tc.assets, tc.tool, "amd64", tc.hints)
+			goarch := cmp.Or(tc.goarch, "amd64")
+			got, err := chooseReleaseAssetWithHints(tc.assets, tc.tool, goarch, tc.hints)
 			if err != nil {
-				t.Fatalf("chooseReleaseAssetWithHints(%v, %q) = %v", tc.assets, tc.tool, err)
+				t.Fatalf("chooseReleaseAssetWithHints(%v, %q, %q) = %v", tc.assets, tc.tool, goarch, err)
 			}
 			if got.Asset != tc.want {
-				t.Errorf("chooseReleaseAssetWithHints(%v, %q) chose %q, want %q",
-					tc.assets, tc.tool, got.Asset, tc.want)
+				t.Errorf("chooseReleaseAssetWithHints(%v, %q, %q) chose %q, want %q",
+					tc.assets, tc.tool, goarch, got.Asset, tc.want)
 			}
 		})
 	}
@@ -888,6 +905,9 @@ func TestChooseReleaseAsset_ScoresThePublishedBinaryNames(t *testing.T) {
 		assets []string
 		tool   string
 		hints  *ReleaseHints
+		// goarch is the host architecture the choice is made for. Empty
+		// means amd64, so only a case that is ABOUT the other arch says so.
+		goarch string
 		want   string
 	}{
 		// rancher/k3k publishes the CLI beside the server. Both score 3,
@@ -914,13 +934,14 @@ func TestChooseReleaseAsset_ScoresThePublishedBinaryNames(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := chooseReleaseAssetWithHints(tc.assets, tc.tool, "amd64", tc.hints)
+			goarch := cmp.Or(tc.goarch, "amd64")
+			got, err := chooseReleaseAssetWithHints(tc.assets, tc.tool, goarch, tc.hints)
 			if err != nil {
-				t.Fatalf("chooseReleaseAssetWithHints(%v, %q) = %v", tc.assets, tc.tool, err)
+				t.Fatalf("chooseReleaseAssetWithHints(%v, %q, %q) = %v", tc.assets, tc.tool, goarch, err)
 			}
 			if got.Asset != tc.want {
-				t.Errorf("chooseReleaseAssetWithHints(%v, %q) chose %q, want %q",
-					tc.assets, tc.tool, got.Asset, tc.want)
+				t.Errorf("chooseReleaseAssetWithHints(%v, %q, %q) chose %q, want %q",
+					tc.assets, tc.tool, goarch, got.Asset, tc.want)
 			}
 		})
 	}

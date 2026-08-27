@@ -77,7 +77,10 @@ type SearchHit struct {
 	Source      string `json:"source"`
 	// Version is the catalog's default pinned version, set only for
 	// entries without an upstream version source (manual installs).
-	Version  string `json:"version,omitempty"`
+	Version string `json:"version,omitempty"`
+	// Reason names the registry backend that defeated the compiler, and
+	// is set only alongside Unavailable.
+	Reason   string `json:"reason,omitempty"`
 	Featured bool   `json:"featured,omitempty"`
 	Lsp      bool   `json:"lsp,omitempty"`
 	// Unavailable marks a hit the catalog knows about and cannot
@@ -87,8 +90,7 @@ type SearchHit struct {
 	//
 	// Both fields are omitempty, so an installable hit serialises exactly
 	// as it did before this pair existed.
-	Unavailable bool   `json:"unavailable,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	Unavailable bool `json:"unavailable,omitempty"`
 	// Apt marks a Debian package rather than a catalog entry. Version
 	// then carries the distro's candidate, which routinely differs from
 	// the catalog's version for the same tool, and the row's install lands

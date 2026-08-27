@@ -37,8 +37,7 @@ type installer struct {
 	// log carries operator-facing lines that must outlive the job's
 	// output ring: a refused install, an artifact installed without
 	// checksum verification. Nil falls back to slog.Default().
-	log      *slog.Logger
-	toolsDir string
+	log *slog.Logger
 	// aptIdx is the parsed Debian package list, used as the literal-name
 	// oracle before any apt-get install (see installer.aptKnownName).
 	// Nil, or not yet loaded, degrades to the expansion-character
@@ -47,7 +46,8 @@ type installer struct {
 	// tokens authenticates the release source's asset listing against the
 	// GitHub API, the same credential the version resolver uses. Nil means
 	// anonymous, which works until the 60/hour ceiling.
-	tokens *githubTokenCache
+	tokens   *githubTokenCache
+	toolsDir string
 }
 
 // Checksum outcomes recorded on ToolStatus.Checksum.
@@ -59,6 +59,21 @@ const (
 	// so the artifact was installed on the transport's word alone.
 	checksumUnverified = "unverified"
 )
+
+// The two architectures this engine installs for, spelled as GOARCH
+// spells them. Named because they are a ROLE — the host architecture an
+// asset must match — read by the asset matcher, the catalog's
+// resolvability check and the manual-install ARCH_* environment. The
+// same characters appearing inside an asset-token list are a different
+// thing (a token upstream puts in a filename) and stay literal there.
+const (
+	goarchAMD64 = "amd64"
+	goarchARM64 = "arm64"
+)
+
+// algSHA256 names the checksum algorithm a definition declares and a
+// release's own checksum file tags its digests with.
+const algSHA256 = "sha256"
 
 // installOutcome is what one install produced: the bins the tool now
 // owns in the bin dir, the package-manager-owned bins, and how the
@@ -447,10 +462,7 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 	installRoot := pathinside.Root(versDir)
 	var bins []string
 	for _, f := range files {
-		src := f.Src
-		if src == "" {
-			src = f.Name
-		}
+		src := cmp.Or(f.Src, f.Name)
 		target, err := safeJoin(installRoot, src)
 		if err != nil {
 			return nil, err
@@ -468,39 +480,8 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 			}
 			target = found
 		}
-		// Resolve symlinks BEFORE stat/chmod/link: tar and unzip
-		// sanitize .. and absolute member paths (fail-closed on the
-		// consumer images, verified), but they faithfully recreate
-		// symlink members — a malicious archive could point the
-		// declared file at a path outside the install tree, and a
-		// follow-symlink chmod + a published bin/ link would escape
-		// the sandbox.
-		resolved, err := filepath.EvalSymlinks(target)
+		resolved, err := resolveInsideInstall(installRoot, target, src)
 		if err != nil {
-			return nil, fmt.Errorf("declared file %s missing after extract: %w", src, err)
-		}
-		if !insideStrictly(installRoot, resolved) {
-			return nil, fmt.Errorf("declared file %s escapes the install dir via symlink", src)
-		}
-		// enforceExecutable acts on a DESCRIPTOR, which NARROWS the
-		// check-then-act above without closing it. The containment
-		// verdict is still a statement about a NAME: it was proven of
-		// the path EvalSymlinks resolved, and the open re-resolves that
-		// same path. O_NOFOLLOW removes the worst arm — a symlink
-		// swapped in at the final component is refused by the kernel
-		// rather than followed into a chmod of somebody else's file —
-		// and the fchmod+fstat pair rides one descriptor, so the mode
-		// that gets certified is the mode of the inode that got
-		// chmod'ed. What remains: O_NOFOLLOW binds only the LAST
-		// component, so an ancestor swapped for a symlink still
-		// redirects the open; a regular file substituted at the name
-		// passes it; and no inode identity is carried from the
-		// containment check to the open. Closing it needs
-		// openat(2)-relative traversal from a retained handle on
-		// versDir (os.Root) for the resolution as well as the mode, at
-		// which point linkBin below — which still publishes by pathname
-		// — becomes the remaining window.
-		if err := enforceExecutable(resolved); err != nil {
 			return nil, err
 		}
 		if err := in.linkBin(f.Name, resolved); err != nil {
@@ -516,6 +497,46 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 		return nil, fmt.Errorf("the artifact contains none of the %d declared executables", len(files))
 	}
 	return bins, nil
+}
+
+// resolveInsideInstall resolves one declared file to a real path proven
+// to sit inside the install dir, and leaves it executable.
+//
+// Symlinks are resolved BEFORE stat/chmod/link: tar and unzip sanitize
+// .. and absolute member paths (fail-closed on the consumer images,
+// verified), but they faithfully recreate symlink members — a malicious
+// archive could point the declared file at a path outside the install
+// tree, and a follow-symlink chmod plus a published bin/ link would
+// escape the sandbox.
+//
+// enforceExecutable acts on a DESCRIPTOR, which NARROWS the
+// check-then-act above without closing it. The containment verdict is
+// still a statement about a NAME: it was proven of the path EvalSymlinks
+// resolved, and the open re-resolves that same path. O_NOFOLLOW removes
+// the worst arm — a symlink swapped in at the final component is refused
+// by the kernel rather than followed into a chmod of somebody else's
+// file — and the fchmod+fstat pair rides one descriptor, so the mode that
+// gets certified is the mode of the inode that got chmod'ed. What
+// remains: O_NOFOLLOW binds only the LAST component, so an ancestor
+// swapped for a symlink still redirects the open; a regular file
+// substituted at the name passes it; and no inode identity is carried
+// from the containment check to the open. Closing it needs
+// openat(2)-relative traversal from a retained handle on versDir
+// (os.Root) for the resolution as well as the mode, at which point
+// linkBin — which still publishes by pathname — becomes the remaining
+// window.
+func resolveInsideInstall(installRoot pathinside.Root, target, src string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", fmt.Errorf("declared file %s missing after extract: %w", src, err)
+	}
+	if !insideStrictly(installRoot, resolved) {
+		return "", fmt.Errorf("declared file %s escapes the install dir via symlink", src)
+	}
+	if err := enforceExecutable(resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
 }
 
 // searchInstallTree resolves a GUESSED path: it returns guess unchanged
@@ -698,7 +719,7 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 
 	var h hash.Hash
 	switch spec.ChecksumAlg {
-	case "sha256":
+	case algSHA256:
 		h = sha256.New()
 	case "sha512":
 		h = sha512.New()
@@ -731,7 +752,7 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 // on the borgcube migration; the mismatch failed closed, as designed,
 // but with a misleading "want" value).
 func findChecksum(body, asset, alg string) string {
-	wantLen := map[string]int{"sha256": 64, "sha512": 128}[alg]
+	wantLen := map[string]int{algSHA256: 64, "sha512": 128}[alg]
 	if wantLen == 0 {
 		return ""
 	}
@@ -885,7 +906,7 @@ func (in *installer) linkBin(name, target string) error {
 // engine's bin dir leads PATH so freshly installed runtimes resolve.
 func (in *installer) pmEnv() []string {
 	env := os.Environ()
-	path := in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH")
+	pathValue := in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH")
 	out := env[:0]
 	for _, e := range env {
 		if strings.HasPrefix(e, "PATH=") {
@@ -894,7 +915,7 @@ func (in *installer) pmEnv() []string {
 		out = append(out, e)
 	}
 	return append(out,
-		"PATH="+path,
+		"PATH="+pathValue,
 		"GOBIN="+in.binDir(),
 		"GOPATH="+filepath.Join(in.toolsDir, "go"),
 		"NPM_CONFIG_PREFIX="+in.npmDir(),
@@ -1123,7 +1144,7 @@ func (in *installer) installManual(ctx context.Context, name string, t *Tool) ([
 // right side on arm64).
 func (in *installer) runShell(ctx context.Context, command, version, optDir string) error {
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
-	arm := runtime.GOARCH == "arm64"
+	arm := runtime.GOARCH == goarchARM64
 	pick := func(amd, a64 string) string {
 		if arm {
 			return a64
@@ -1136,11 +1157,11 @@ func (in *installer) runShell(ctx context.Context, command, version, optDir stri
 		"BIN="+in.binDir(),
 		"TOOLS="+in.toolsDir,
 		"OPT="+optDir,
-		"ARCH_AMD64_OR_ARM64="+pick("amd64", "arm64"),
-		"ARCH_X64_OR_ARM64="+pick("x64", "arm64"),
+		"ARCH_AMD64_OR_ARM64="+pick(goarchAMD64, goarchARM64),
+		"ARCH_X64_OR_ARM64="+pick("x64", goarchARM64),
 		"ARCH_X86_64_OR_AARCH64="+pick("x86_64", "aarch64"),
 		"ARCH_X64_OR_AARCH64="+pick("x64", "aarch64"),
-		"ARCH_X86_64_OR_ARM64="+pick("x86_64", "arm64"),
+		"ARCH_X86_64_OR_ARM64="+pick("x86_64", goarchARM64),
 	)
 	return in.streamCmd(cmd, "install command")
 }

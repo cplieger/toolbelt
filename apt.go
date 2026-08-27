@@ -221,12 +221,11 @@ func (in *installer) aptKnownName(ctx context.Context, pkg string) error {
 // fails immediately on /var/cache/apt/archives/lock, which is why
 // installApt retries that specific failure.
 func aptGetArgs(extra ...string) []string {
-	args := []string{
+	return append([]string{
 		"-o", "DPkg::Lock::Timeout=60",
 		"-y",
 		"--no-install-recommends",
-	}
-	return append(args, extra...)
+	}, extra...)
 }
 
 // aptArchivesLockRetries bounds the retry for the one lock the timeout
