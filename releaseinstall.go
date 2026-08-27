@@ -96,7 +96,7 @@ func (in *installer) releaseSpec(rr releaseRef, name, version string, assets []s
 	}
 	if choice.ChecksumAsset != "" {
 		spec.ChecksumURL = releaseDownloadURL(rr, version, choice.ChecksumAsset)
-		spec.ChecksumAlg = "sha256"
+		spec.ChecksumAlg = algSHA256
 		// NOT ChecksumDeclared. That flag means "upstream promises a
 		// checksum", and its contract is that failing to obtain one must
 		// refuse the install rather than proceed unverified. Here nobody
@@ -248,11 +248,10 @@ func (in *installer) listGitLabAssets(ctx context.Context, rr releaseRef, versio
 // anonymous ceiling is 60 requests an hour for the whole process and a
 // release install spends two of them.
 func (in *installer) getJSON(ctx context.Context, rawURL string, out any) error {
-	opts := []httpx.GetOption{
+	opts := append([]httpx.GetOption{
 		httpx.WithMaxAttempts(3),
 		httpx.WithMaxBodyBytes(releaseListingCap),
-	}
-	opts = append(opts, githubAuth(rawURL, in.tokens)...)
+	}, githubAuth(rawURL, in.tokens)...)
 	body, err := httpx.GetBytes(ctx, in.client, rawURL, opts...)
 	if err != nil {
 		return err

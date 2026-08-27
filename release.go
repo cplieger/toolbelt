@@ -1,7 +1,9 @@
 package toolbelt
 
 import (
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -83,8 +85,8 @@ var releaseForeignOS = []string{
 // the shorter of two equally correct names. Left unlisted it stays
 // NEUTRAL, so it remains eligible for a release that ships nothing else.
 var releaseArchTokens = map[string][]string{
-	"amd64": {"x86_64", "amd64", "x64", "64bit", "linux64"},
-	"arm64": {"aarch64", "aarch_64", "arm64", "armv8"},
+	goarchAMD64: {"x86_64", "amd64", "x64", "64bit", "linux64"},
+	goarchARM64: {"aarch64", "aarch_64", "arm64", "armv8"},
 }
 
 // releaseForeignArch are architecture tokens that rule an asset out for
@@ -98,14 +100,14 @@ var releaseArchTokens = map[string][]string{
 // spelling, an arm64 host matched neither, fell through to neutral, and
 // selected the 32-bit x86 build.
 var releaseForeignArch = map[string][]string{
-	"amd64": {
+	goarchAMD64: {
 		"aarch64", "aarch_64", "arm64", "armv8", "arm8", "armv7", "armv7a", "armv7hl", "armv6",
 		"armv5", "arm7", "arm6", "arm5", "armeabi", "armhf", "arm",
 		"i386", "i686", "386", "x86_32",
 		"riscv64", "riscv64gc", "ppc64le", "ppcle_64", "s390x", "s390_64",
 		"mips", "mips64", "mips64le", "mipsle", "loong64", "loongarch64",
 	},
-	"arm64": {
+	goarchARM64: {
 		"x86_64", "amd64", "x64", "x86_32",
 		"armv7", "armv7a", "armv7hl", "armv6", "armv5", "arm7", "arm6", "arm5", "armeabi", "armhf", "arm",
 		"i386", "i686", "386",
@@ -155,7 +157,7 @@ func chooseReleaseAsset(assets []string, tool, goarch string) (assetChoice, erro
 // chooseReleaseAssetNamed is chooseReleaseAsset with the full name set.
 func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice, error) {
 	if len(assets) == 0 {
-		return assetChoice{}, fmt.Errorf("the release publishes no assets")
+		return assetChoice{}, errors.New("the release publishes no assets")
 	}
 
 	// 1. Installable shapes only, and nothing whose bytes move under a
@@ -249,7 +251,7 @@ func releaseTrailingExt(lower string) string {
 		return ""
 	}
 	seg := lower[i+1:]
-	for j := 0; j < len(seg); j++ {
+	for j := range len(seg) {
 		c := seg[j]
 		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
 			return ""
@@ -467,19 +469,16 @@ func releaseStem(name string) string {
 // hidden (see ToolStatus.Checksum).
 func releaseChecksumFor(assets []string, chosen string) (name string, isManifest bool) {
 	for _, suffix := range []string{".sha256", ".sha256sum", ".sha256.txt"} {
-		want := strings.ToLower(chosen + suffix)
+		want := chosen + suffix
 		for _, a := range assets {
-			if strings.ToLower(a) == want {
+			if strings.EqualFold(a, want) {
 				return a, false
 			}
 		}
 	}
 	for _, a := range assets {
-		lower := strings.ToLower(a)
-		for _, cn := range releaseChecksumNames {
-			if lower == cn {
-				return a, true
-			}
+		if slices.Contains(releaseChecksumNames, strings.ToLower(a)) {
+			return a, true
 		}
 	}
 	// A goreleaser-style manifest carrying the version in its name
@@ -570,6 +569,12 @@ type ReleaseHints struct {
 	// these are three separate tools whose assets no file-name heuristic
 	// can attribute.
 	Matching string `json:"matching,omitempty"`
+	// Bin and BinPath name the executable INSIDE the artifact: Bin a file
+	// name that differs from the published one, BinPath a directory to
+	// look in. helm-diff is the case both exist for — the archive holds
+	// `diff/bin/diff` and the tool is published as `helm-diff`.
+	Bin     string `json:"bin,omitempty"`
+	BinPath string `json:"bin_path,omitempty"`
 	// Bins are the names this tool publishes on PATH, carried only when
 	// they are not just the tool's own name — 40 of the 158 release-backed
 	// entries, and the single biggest correctness item in this struct. A
@@ -583,12 +588,6 @@ type ReleaseHints struct {
 	// than fatal: the registry and the release move independently, so a
 	// list that has gone stale must still install what IS there.
 	Bins []string `json:"bins,omitempty"`
-	// Bin and BinPath name the executable INSIDE the artifact: Bin a file
-	// name that differs from the published one, BinPath a directory to
-	// look in. helm-diff is the case both exist for — the archive holds
-	// `diff/bin/diff` and the tool is published as `helm-diff`.
-	Bin     string `json:"bin,omitempty"`
-	BinPath string `json:"bin_path,omitempty"`
 }
 
 // The registry's `rename_exe` is deliberately NOT among these, on the same

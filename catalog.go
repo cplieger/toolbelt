@@ -23,10 +23,18 @@ import (
 // catalog for every other caller. Copy what you intend to change — see
 // mergeCatalogDefaults, which clones before hydrating a mutable manifest row.
 type CatalogEntry struct {
-	Aqua        *AquaPackage `json:"aqua,omitempty"`
-	Name        string       `json:"name"`
-	Description string       `json:"description,omitempty"`
-	Source      string       `json:"source"`
+	Aqua *AquaPackage `json:"aqua,omitempty"`
+	// Release carries the registry's install hints for a release-backed
+	// entry (see ReleaseHints). Absent for every other source.
+	Release *ReleaseHints `json:"release,omitempty"`
+	// Reason is set only on Catalog.Unavailable entries: the registry
+	// backend the compiler could not use, e.g. "core:python" or
+	// "vfox:mise-plugins/vfox-postgres". It is the whole explanation a
+	// consumer can show for a tool it knows about and cannot install.
+	Reason      string `json:"reason,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Source      string `json:"source"`
 	// Version is the default pinned version for entries without an
 	// upstream version source (manual installs).
 	Version   string   `json:"version,omitempty"`
@@ -34,12 +42,12 @@ type CatalogEntry struct {
 	Uninstall string   `json:"uninstall,omitempty"` // manual-source entries
 	Probe     string   `json:"probe,omitempty"`     // manual-source entries
 	Aliases   []string `json:"aliases,omitempty"`
-	Requires  []string `json:"requires,omitempty"`
 	// VersionArgs declares the tool's version-reporting shape, e.g.
 	// ["--version"] or ["version"]. Hydrated onto manifest entries, it
 	// upgrades the install probe from "the binary runs" to "the binary
 	// reports the recorded version" (see Tool.VersionArgs).
 	VersionArgs []string `json:"version_args,omitempty"`
+	Requires    []string `json:"requires,omitempty"`
 	Featured    bool     `json:"featured,omitempty"`
 	// Lsp marks language-server entries; drives the consumers'
 	// no-LSP-enabled warning and UI badges.
@@ -66,14 +74,6 @@ type CatalogEntry struct {
 	// recover from silently — the row carrying the install knowledge is
 	// what disappears.
 	Essential bool `json:"essential,omitempty"`
-	// Reason is set only on Catalog.Unavailable entries: the registry
-	// backend the compiler could not use, e.g. "core:python" or
-	// "vfox:mise-plugins/vfox-postgres". It is the whole explanation a
-	// consumer can show for a tool it knows about and cannot install.
-	Reason string `json:"reason,omitempty"`
-	// Release carries the registry's install hints for a release-backed
-	// entry (see ReleaseHints). Absent for every other source.
-	Release *ReleaseHints `json:"release,omitempty"`
 }
 
 // Catalog is the compiled tool-catalog.json document.
@@ -367,19 +367,7 @@ func VerifyCatalog(c *Catalog, require []string) []error {
 func verifyEntry(c *Catalog, name string) error {
 	e, ok := c.Lookup(name)
 	if !ok {
-		// A required name that compiled into Unavailable is a REQUIREMENT
-		// failure, not a missing name, and saying so is the difference
-		// between "the registry renamed it" and "the registry stopped
-		// giving us a way to install it". Without this branch the floor
-		// gate weakens silently the moment a required tool's backend
-		// changes upstream.
-		if u, uok := c.Unavailable[name]; uok {
-			if u.Reason != "" {
-				return fmt.Errorf("no install source (%s)", u.Reason)
-			}
-			return errors.New("no install source")
-		}
-		return errors.New("not in the catalog")
+		return missingEntryReason(c, name)
 	}
 	if e.Source == "" {
 		return errors.New("catalog entry has no source")
@@ -387,23 +375,47 @@ func verifyEntry(c *Catalog, name string) error {
 	kind, _, _ := strings.Cut(e.Source, ":")
 	switch kind {
 	case "aqua":
-		if e.Aqua == nil {
-			return errors.New("aqua source without an embedded definition")
-		}
-		for _, arch := range []string{"amd64", "arm64"} {
-			if !e.Aqua.SupportsLinux(arch) {
-				return fmt.Errorf("definition does not support linux/%s", arch)
-			}
-		}
-		if err := e.Aqua.CheckTemplates(); err != nil {
-			return err
-		}
+		return verifyAquaEntry(&e)
 	case "manual":
 		if strings.TrimSpace(e.Install) == "" {
 			return errors.New("manual source without an install command")
 		}
 	}
 	return nil
+}
+
+// missingEntryReason explains a name Lookup did not answer for.
+//
+// A required name that compiled into Unavailable is a REQUIREMENT
+// failure, not a missing name, and saying so is the difference between
+// "the registry renamed it" and "the registry stopped giving us a way to
+// install it". Without that distinction the floor gate weakens silently
+// the moment a required tool's backend changes upstream.
+func missingEntryReason(c *Catalog, name string) error {
+	u, ok := c.Unavailable[name]
+	switch {
+	case !ok:
+		return errors.New("not in the catalog")
+	case u.Reason != "":
+		return fmt.Errorf("no install source (%s)", u.Reason)
+	default:
+		return errors.New("no install source")
+	}
+}
+
+// verifyAquaEntry checks the half of an entry only an aqua source has:
+// an embedded definition that resolves on both architectures and whose
+// templates parse.
+func verifyAquaEntry(e *CatalogEntry) error {
+	if e.Aqua == nil {
+		return errors.New("aqua source without an embedded definition")
+	}
+	for _, arch := range []string{goarchAMD64, goarchARM64} {
+		if !e.Aqua.SupportsLinux(arch) {
+			return fmt.Errorf("definition does not support linux/%s", arch)
+		}
+	}
+	return e.Aqua.CheckTemplates()
 }
 
 // overlayDoc is an overlay document: entries keyed by tool name. An

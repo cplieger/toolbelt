@@ -410,20 +410,7 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		return t, nil
 	}
 	if t.Source == "" {
-		// The catalog may KNOW this tool and have no way to install it
-		// (mise core:/vfox:/conda: backends). Saying "unknown tool" there
-		// is false and sends the user looking for a typo, so name the
-		// reason instead. A caller who supplies its own source is
-		// unaffected: this branch is only reached when the catalog was the
-		// only available knowledge, which is what keeps a hand-authored
-		// manual entry for one of these names working.
-		if u, ok := e.cat().Unavailable[name]; ok {
-			if u.Reason != "" {
-				return t, fmt.Errorf("%q has no install source in the catalog (%s): install it in a shell, or add it with an explicit source", name, u.Reason)
-			}
-			return t, fmt.Errorf("%q has no install source in the catalog: install it in a shell, or add it with an explicit source", name)
-		}
-		return t, fmt.Errorf("unknown tool %q: pick a source (npm:/pip:/cargo:/go:/aqua:/manual)", name)
+		return t, e.noSourceError(name)
 	}
 	if err := validateSource(t.Source, t.Install); err != nil {
 		return t, err
@@ -439,6 +426,27 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		return t, errors.New("invalid version string")
 	}
 	return t, nil
+}
+
+// noSourceError explains an add for which neither the caller nor the
+// catalog supplied a source.
+//
+// The catalog may KNOW this tool and have no way to install it (mise
+// core:/vfox:/conda: backends). Saying "unknown tool" there is false and
+// sends the user looking for a typo, so name the reason instead. A caller
+// who supplies its own source never reaches this: it is only asked when
+// the catalog was the only available knowledge, which is what keeps a
+// hand-authored manual entry for one of these names working.
+func (e *Engine) noSourceError(name string) error {
+	u, ok := e.cat().Unavailable[name]
+	switch {
+	case !ok:
+		return fmt.Errorf("unknown tool %q: pick a source (npm:/pip:/cargo:/go:/aqua:/manual)", name)
+	case u.Reason != "":
+		return fmt.Errorf("%q has no install source in the catalog (%s): install it in a shell, or add it with an explicit source", name, u.Reason)
+	default:
+		return fmt.Errorf("%q has no install source in the catalog: install it in a shell, or add it with an explicit source", name)
+	}
 }
 
 // mergeCatalogDefaults fills unset fields of t from the catalog entry.
@@ -507,8 +515,8 @@ type PatchRequest struct {
 // and rollback).
 type patchOutcome struct {
 	prevVersion     string
-	cascaded        []string
 	source          string
+	cascaded        []string
 	versionChanged  bool
 	disabledChanged bool
 	nowDisabled     bool
@@ -1552,17 +1560,11 @@ func (e *Engine) runUpdate(ctx context.Context, j *job, output func(string)) err
 // tools have no upstream source.
 func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit bool, output func(string)) (bool, error) {
 	t, ok := m.Tools[n]
-	if !ok {
-		return false, nil
-	}
-	if t.Disabled {
+	if !ok || t.Disabled || t.Source == SourceManual || t.Source == "" {
 		return false, nil
 	}
 	if t.Pin && !explicit {
 		output(fmt.Sprintf("%s pinned at %s, skipping", n, t.Version))
-		return false, nil
-	}
-	if t.Source == SourceManual || t.Source == "" {
 		return false, nil
 	}
 	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
@@ -1573,30 +1575,9 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 	if latest == t.Version {
 		return false, nil
 	}
-	// Validate the frozen definition can actually resolve the candidate
-	// BEFORE persisting the bump: registry drift between the upstream
-	// tag list and the baked aqua definition would otherwise pin the
-	// manifest to an uninstallable version (a persistent failed job
-	// until an image rebuild or a hand edit). Skipping keeps the old
-	// version working.
-	if aq := e.aquaDef(t.Source); aq != nil {
-		if _, rerr := aq.ResolveSpec(latest); rerr != nil {
-			output(fmt.Sprintf("%s: %s not resolvable by the baked definition, keeping %s: %v",
-				n, latest, t.Version, rerr))
-			return false, nil
-		}
-	}
-	// The same guard for a release-backed tool, and it is not optional
-	// there either: an upstream that renames its assets between releases
-	// would otherwise have the new tag written into the manifest and then
-	// fail to install on every run afterwards, with the working version
-	// already overwritten. The check costs one asset listing.
-	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceRelease {
-		if rerr := e.releaseTagResolvable(ctx, n, ref, latest, t.Release); rerr != nil {
-			output(fmt.Sprintf("%s: %s has no installable asset, keeping %s: %v",
-				n, latest, t.Version, rerr))
-			return false, nil
-		}
+	if reason := e.candidateUninstallable(ctx, n, &t, latest); reason != "" {
+		output(reason)
+		return false, nil
 	}
 	output(fmt.Sprintf("%s: %s -> %s", n, t.Version, latest))
 	if err := e.store.MutateManifest(func(mm *Manifest) error {
@@ -1611,6 +1592,33 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 		return false, err
 	}
 	return true, nil
+}
+
+// candidateUninstallable reports why a newer version must not be written
+// into the manifest, or "" when it may be. Both checks run BEFORE the
+// bump is persisted, because a manifest pinned to an uninstallable
+// version is a persistent failed job until an image rebuild or a hand
+// edit, while skipping keeps the working version installed.
+//
+// The aqua half covers registry drift between the upstream tag list and
+// the baked definition. The release half covers an upstream that renames
+// its assets between releases, and it is not optional either: the new tag
+// would be written and then fail to install on every run afterwards, with
+// the working version already overwritten. It costs one asset listing.
+func (e *Engine) candidateUninstallable(ctx context.Context, n string, t *Tool, latest string) string {
+	if aq := e.aquaDef(t.Source); aq != nil {
+		if _, err := aq.ResolveSpec(latest); err != nil {
+			return fmt.Sprintf("%s: %s not resolvable by the baked definition, keeping %s: %v",
+				n, latest, t.Version, err)
+		}
+	}
+	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceRelease {
+		if err := e.releaseTagResolvable(ctx, n, ref, latest, t.Release); err != nil {
+			return fmt.Sprintf("%s: %s has no installable asset, keeping %s: %v",
+				n, latest, t.Version, err)
+		}
+	}
+	return ""
 }
 
 // runReconcile converges disk state to manifest intent, both ways:

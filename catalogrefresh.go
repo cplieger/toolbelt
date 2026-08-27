@@ -233,35 +233,52 @@ func (e *Engine) overlaidCopy(c *Catalog) (*Catalog, error) {
 		Unavailable: maps.Clone(c.Unavailable),
 	}
 	for _, path := range e.catalogOverlays {
-		data, err := os.ReadFile(path)
+		ov, err := readOverlayDoc(path)
 		if err != nil {
-			return nil, fmt.Errorf("overlay %s: %w", path, err)
+			return nil, err
 		}
-		var ov overlayDoc
-		if err := json.Unmarshal(data, &ov); err != nil {
-			return nil, fmt.Errorf("overlay %s: %w", path, err)
-		}
-		for name := range ov.Entries {
-			patch := ov.Entries[name]
-			if patch.Source != "" {
-				continue
-			}
-			// A display patch may target either map: an unavailable entry's
-			// description is what a consumer shows beside its reason.
-			_, installable := cp.Entries[name]
-			_, unavailable := cp.Unavailable[name]
-			if !installable && !unavailable {
-				e.log.Warn("toolbelt: overlay patches unknown tool, skipping",
-					"overlay", path, "tool", name)
-				delete(ov.Entries, name)
-			}
-		}
+		e.dropUnknownPatches(cp, ov, path)
 		if err := applyOverlayDoc(cp, ov, nil); err != nil {
 			return nil, fmt.Errorf("overlay %s: %w", path, err)
 		}
 	}
 	cp.aliases = buildAliasIndex(cp.Entries)
 	return cp, nil
+}
+
+// readOverlayDoc loads one overlay file, naming the file in every error
+// so a malformed consumer overlay is attributable.
+func readOverlayDoc(path string) (overlayDoc, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return overlayDoc{}, fmt.Errorf("overlay %s: %w", path, err)
+	}
+	var ov overlayDoc
+	if err := json.Unmarshal(data, &ov); err != nil {
+		return overlayDoc{}, fmt.Errorf("overlay %s: %w", path, err)
+	}
+	return ov, nil
+}
+
+// dropUnknownPatches removes the display patches naming a tool this
+// catalog does not carry, warning once per drop. A patch WITH a source
+// defines its own entry and is never unknown.
+//
+// A display patch may target either map: an unavailable entry's
+// description is what a consumer shows beside its reason.
+func (e *Engine) dropUnknownPatches(cp *Catalog, ov overlayDoc, path string) {
+	for name := range ov.Entries {
+		if ov.Entries[name].Source != "" {
+			continue
+		}
+		_, installable := cp.Entries[name]
+		_, unavailable := cp.Unavailable[name]
+		if !installable && !unavailable {
+			e.log.Warn("toolbelt: overlay patches unknown tool, skipping",
+				"overlay", path, "tool", name)
+			delete(ov.Entries, name)
+		}
+	}
 }
 
 // RefreshCatalog enqueues a catalog-refresh job: fetch the published

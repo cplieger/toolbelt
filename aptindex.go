@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,19 +44,19 @@ import (
 // and rust packages. Ranking plus a result cap is what keeps the list
 // usable; see rankAptNames.
 type aptIndex struct {
-	log *slog.Logger
+	log   *slog.Logger
+	names map[string]string // package name -> short description
+	err   error
+	// updateErr is the outcome of the one refresh updateOnce guards.
+	updateErr error
 
-	mu      sync.RWMutex
-	names   map[string]string // package name -> short description
 	fetched time.Time
-	err     error
-	loading bool
-
+	mu      sync.RWMutex
 	// updateOnce guards the one `apt-get update` this process runs. Both
 	// the search corpus and the install path need an index on disk, and
 	// both images ship without one.
 	updateOnce sync.Once
-	updateErr  error
+	loading    bool
 }
 
 // aptIndexTTL is how long a parsed index is considered current. It
@@ -391,7 +392,7 @@ func (a *aptIndex) load(ctx context.Context) (map[string]string, error) {
 		return nil, fmt.Errorf("apt-cache dumpavail: %w", err)
 	}
 	if len(names) == 0 {
-		return nil, fmt.Errorf("apt-cache dumpavail produced no packages")
+		return nil, errors.New("apt-cache dumpavail produced no packages")
 	}
 	return names, nil
 }

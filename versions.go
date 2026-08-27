@@ -30,13 +30,14 @@ type versionResolver struct {
 	cache  map[string]string // source -> latest version
 	// tokens is the shared GitHub API credential (see githubTokenCache).
 	tokens *githubTokenCache
-	mu     sync.Mutex
 	// aptIdx guarantees a package index exists before apt-cache is asked
 	// anything. Both consumer images ship with /var/lib/apt/lists empty,
 	// and apt-cache answers "no Candidate line" rather than erroring on a
 	// missing index, so without this a first-ever apt add fails while
 	// looking like a broken package name.
 	aptIdx *aptIndex
+
+	mu sync.Mutex
 }
 
 func newVersionResolver(client *http.Client, aptIdx *aptIndex, tokens *githubTokenCache) *versionResolver {
@@ -363,11 +364,10 @@ func (v *versionResolver) latestGoModule(ctx context.Context, modPath string) (s
 func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
 	defer cancel()
-	opts := []httpx.GetOption{
+	opts := append([]httpx.GetOption{
 		httpx.WithMaxAttempts(3),
 		httpx.WithMaxBodyBytes(4 << 20),
-	}
-	opts = append(opts, githubAuth(rawURL, v.tokens)...)
+	}, githubAuth(rawURL, v.tokens)...)
 	body, err := httpx.GetBytes(ctx, v.client, rawURL, opts...)
 	if err != nil {
 		return err
