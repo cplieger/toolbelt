@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -732,5 +733,87 @@ func TestSearchHit_OmitsTheNewFieldsForAnInstallableEntry(t *testing.T) {
 	}
 	if got := string(b); strings.Contains(got, "unavailable") || strings.Contains(got, "reason") {
 		t.Errorf("installable hit serialised the new fields: %s", got)
+	}
+}
+
+// TestMergeSearchHits_RanksNameHitsAboveDescriptionHits pins the fix for
+// the defect that made the best answer unreachable: the two installable
+// corpora were CONCATENATED, so every catalog hit preceded every Debian
+// one whatever it scored. Searching "python" answered with sixteen
+// catalog tools that merely mention Python in their descriptions, and
+// `python3` — a name-prefix hit, and the thing the reader wanted — sat
+// seventeenth.
+//
+// A unit test rather than a route test because apt needs root: driving
+// the route can only exercise a cross-corpus merge on a privileged host,
+// and would skip on every CI runner.
+func TestMergeSearchHits_RanksNameHitsAboveDescriptionHits(t *testing.T) {
+	catalog := []toolbelt.CatalogEntry{
+		{Name: "jc", Source: "aqua:kellyjonbrazil/jc", Description: "CLI tool and python library"},
+		{Name: "ruff", Source: "aqua:astral-sh/ruff", Description: "An extremely fast Python linter"},
+		{Name: "rg", Source: "aqua:BurntSushi/ripgrep", Aliases: []string{"pythonish"}},
+	}
+	apt := []toolbelt.AptHit{
+		{Name: "python3-gi", Description: "Python 3 bindings", Candidate: "3.50.0-4"},
+		{Name: "python3", Description: "interactive high-level language", Candidate: "3.13.5-1"},
+	}
+
+	got := mergeSearchHits(catalog, apt, "python")
+	names := make([]string, 0, len(got))
+	for i := range got {
+		names = append(names, got[i].Name)
+	}
+	// python3 (name exact-prefix, shortest) then python3-gi (same tier,
+	// longer name), then the alias hit, then the two description hits by
+	// the same length tie-break.
+	want := []string{"python3", "python3-gi", "rg", "jc", "ruff"}
+	if !slices.Equal(names, want) {
+		t.Errorf("merged order = %v, want %v", names, want)
+	}
+}
+
+// TestMergeSearchHits_StatesWhichFieldMatched covers the one ranking fact
+// a client cannot re-derive: aliases are not projected onto the wire, so
+// without this a hit on an alias is indistinguishable from a description
+// match.
+func TestMergeSearchHits_StatesWhichFieldMatched(t *testing.T) {
+	catalog := []toolbelt.CatalogEntry{
+		{Name: "ripgrep", Source: "aqua:BurntSushi/ripgrep", Aliases: []string{"rg"}},
+		{Name: "jc", Source: "aqua:kellyjonbrazil/jc", Description: "converts rg output"},
+	}
+	got := mergeSearchHits(catalog, nil, "rg")
+	kinds := map[string]string{}
+	for i := range got {
+		kinds[got[i].Name] = got[i].Match
+	}
+	if kinds["ripgrep"] != string(toolbelt.MatchAlias) {
+		t.Errorf("ripgrep matched %q, want %q", kinds["ripgrep"], toolbelt.MatchAlias)
+	}
+	if kinds["jc"] != string(toolbelt.MatchDescription) {
+		t.Errorf("jc matched %q, want %q", kinds["jc"], toolbelt.MatchDescription)
+	}
+}
+
+// TestMergeSearchHits_KeepsTheFeaturedOrderForAnEmptyQuery guards the one
+// case the sort must not touch. An empty query selects the featured set,
+// which Catalog.Featured sorts by name; scoring it yields 0 for every
+// entry, so sorting would re-order it by the length tie-break instead.
+func TestMergeSearchHits_KeepsTheFeaturedOrderForAnEmptyQuery(t *testing.T) {
+	catalog := []toolbelt.CatalogEntry{
+		{Name: "golangci-lint", Source: "aqua:golangci/golangci-lint"},
+		{Name: "node", Source: "aqua:nodejs/node"},
+		{Name: "uv", Source: "aqua:astral-sh/uv"},
+	}
+	got := mergeSearchHits(catalog, nil, "")
+	names := make([]string, 0, len(got))
+	for i := range got {
+		names = append(names, got[i].Name)
+	}
+	want := []string{"golangci-lint", "node", "uv"}
+	if !slices.Equal(names, want) {
+		t.Errorf("featured order = %v, want %v (the by-name order Featured produced)", names, want)
+	}
+	if got[0].Match != "" {
+		t.Errorf("an empty query stamped a match kind %q; nothing was matched", got[0].Match)
 	}
 }

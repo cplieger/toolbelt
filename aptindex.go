@@ -2,7 +2,6 @@ package toolbelt
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -193,15 +192,11 @@ type AptHit struct {
 	Candidate string
 }
 
-// rankAptNames scores the package corpus with the same tiers the catalog
-// uses (exact, prefix, substring, description) and the same
-// length-before-name tie-break.
-//
-// The tie-break is what makes this corpus usable at all: every prefix
-// match scores alike, so ordering by name alone put python3 909th of
-// 6,607 hits for "python" behind 908 alphabetically-earlier python-*
-// packages, and nodejs 1,701st for "node". See rankEntries for the
-// measurement.
+// rankAptNames scores the package corpus with [Match] and orders it with
+// [CompareRank] — the catalog's own scoring, which is what lets a
+// consumer merge the two corpora into one relevance-ordered list. A
+// package has no aliases, which is the only difference between the two
+// corpora and the reason this once carried a near-copy of the tier table.
 func rankAptNames(names map[string]string, q string) []AptHit {
 	type scored struct {
 		hit   AptHit
@@ -209,17 +204,16 @@ func rankAptNames(names map[string]string, q string) []AptHit {
 	}
 	var hits []scored
 	for name, desc := range names {
-		score := aptMatchScore(name, desc, q)
+		_, score := Match(name, nil, desc, q)
 		if score == 0 {
 			continue
 		}
 		hits = append(hits, scored{AptHit{Name: name, Description: desc}, score})
 	}
 	slices.SortStableFunc(hits, func(a, b scored) int {
-		return cmp.Or(
-			cmp.Compare(b.score, a.score),
-			cmp.Compare(len(a.hit.Name), len(b.hit.Name)),
-			cmp.Compare(a.hit.Name, b.hit.Name),
+		return CompareRank(
+			Rank{Name: a.hit.Name, Score: a.score},
+			Rank{Name: b.hit.Name, Score: b.score},
 		)
 	})
 	lim := min(len(hits), aptSearchLimit)
@@ -228,21 +222,6 @@ func rankAptNames(names map[string]string, q string) []AptHit {
 		out = append(out, hits[i].hit)
 	}
 	return out
-}
-
-func aptMatchScore(name, desc, q string) int {
-	ln := strings.ToLower(name)
-	switch {
-	case ln == q:
-		return 100
-	case strings.HasPrefix(ln, q):
-		return 80
-	case strings.Contains(ln, q):
-		return 50
-	case strings.Contains(strings.ToLower(desc), q):
-		return 20
-	}
-	return 0
 }
 
 // ensure makes the index usable as an oracle, synchronously: the lists
