@@ -243,17 +243,8 @@ func (c *Catalog) SearchUnavailable(query string) []CatalogEntry {
 }
 
 // rankEntries scores one entry map against a lowercased query and
-// returns the best searchLimit matches.
-//
-// Ties break on NAME LENGTH before name, and that is load-bearing rather
-// than cosmetic. Every prefix match scores the same, so with a
-// name-ascending tie-break alone a short exact-ish name loses to every
-// alphabetically-earlier longer one that shares its prefix. Measured
-// over Debian trixie's 68,799 package names, `python3` ranked 909th of
-// 6,607 hits for the query "python" (behind python-acme-doc and 907
-// siblings) and `nodejs` ranked 1,701st for "node"; with the length
-// tie-break they rank 1st and 3rd. The catalog's own corpus benefits the
-// same way, so the fix belongs here and not in a per-corpus wrapper.
+// returns the best searchLimit matches. Scoring and ordering are
+// [Match] and [CompareRank], shared with the Debian package corpus.
 func rankEntries(entries map[string]CatalogEntry, q string) []CatalogEntry {
 	type scored struct {
 		e     CatalogEntry
@@ -262,19 +253,14 @@ func rankEntries(entries map[string]CatalogEntry, q string) []CatalogEntry {
 	var hits []scored
 	for name := range entries {
 		e := entries[name]
-		score := matchScore(name, &e, q)
+		_, score := Match(name, e.Aliases, e.Description, q)
 		if score == 0 {
 			continue
 		}
 		hits = append(hits, scored{e, score})
 	}
 	slices.SortStableFunc(hits, func(a, b scored) int {
-		// score descending, then name length ascending, then name ascending.
-		return cmp.Or(
-			cmp.Compare(b.score, a.score),
-			cmp.Compare(len(a.e.Name), len(b.e.Name)),
-			cmp.Compare(a.e.Name, b.e.Name),
-		)
+		return CompareRank(Rank{Name: a.e.Name, Score: a.score}, Rank{Name: b.e.Name, Score: b.score})
 	})
 	lim := min(len(hits), searchLimit)
 	out := make([]CatalogEntry, 0, lim)
@@ -284,30 +270,102 @@ func rankEntries(entries map[string]CatalogEntry, q string) []CatalogEntry {
 	return out
 }
 
-func matchScore(name string, e *CatalogEntry, q string) int {
+// MatchKind names WHICH field a search query hit. It is the one ranking
+// fact a client cannot re-derive: aliases do not travel on the wire, so
+// from the outside a hit on `rg` is indistinguishable from a description
+// match on ripgrep's summary.
+//
+// It exists because a description hit is both the weakest kind and by far
+// the most numerous — "python" appears in the description of every tool
+// written in Python — so a consumer that groups, labels or filters results
+// needs to tell it from the rest.
+type MatchKind string
+
+// The kinds, ordered by how strongly they answer the query.
+const (
+	// MatchNone is the zero value: the query hit nothing, or there was
+	// no query to hit anything with.
+	MatchNone MatchKind = ""
+	// MatchName is a hit on the entry's own name.
+	MatchName MatchKind = "name"
+	// MatchAlias is a hit on one of the entry's aliases.
+	MatchAlias MatchKind = "alias"
+	// MatchDescription is a hit on the description only.
+	MatchDescription MatchKind = "description"
+)
+
+// Match reports how query hits an entry, and how strongly, on one scale
+// every corpus this package searches shares.
+//
+// ONE function rather than one per corpus. The catalog and the Debian
+// package list carried byte-identical tier tables that differed only in
+// that a package has no aliases, and two copies of a ranking rule is how
+// a merged response ends up ordered by neither of them. Pass a nil alias
+// slice for a corpus that has none.
+//
+// Score 0 means no match and pairs with MatchNone; every other score is
+// strictly ordered, so a caller merging two corpora sorts on it directly
+// (see [CompareRank]). An empty query scores 0: it selects the featured
+// set rather than matching anything, and that set carries its own order.
+func Match(name string, aliases []string, description, query string) (kind MatchKind, score int) {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return MatchNone, 0
+	}
 	ln := strings.ToLower(name)
 	switch {
 	case ln == q:
-		return 100
+		return MatchName, 100
 	case strings.HasPrefix(ln, q):
-		return 80
+		return MatchName, 80
 	}
-	for _, a := range e.Aliases {
+	for _, a := range aliases {
 		la := strings.ToLower(a)
 		if la == q {
-			return 90
+			return MatchAlias, 90
 		}
 		if strings.HasPrefix(la, q) {
-			return 70
+			return MatchAlias, 70
 		}
 	}
 	if strings.Contains(ln, q) {
-		return 50
+		return MatchName, 50
 	}
-	if strings.Contains(strings.ToLower(e.Description), q) {
-		return 20
+	if strings.Contains(strings.ToLower(description), q) {
+		return MatchDescription, 20
 	}
-	return 0
+	return MatchNone, 0
+}
+
+// Rank is a scored hit's ordering key: what [CompareRank] needs and
+// nothing else, so the same comparison serves corpora with different hit
+// types.
+type Rank struct {
+	Name  string
+	Score int
+}
+
+// CompareRank orders two scored hits: score descending, then name length
+// ascending, then name ascending.
+//
+// Exported because THREE corpora order by it — the catalog, the Debian
+// package list, and the merged response a consumer renders — and a merged
+// list sorted by a different rule than the two lists feeding it is sorted
+// by neither.
+//
+// The length tie-break is load-bearing rather than cosmetic. Every prefix
+// match scores alike, so with a name-ascending tie-break alone a short
+// near-exact name loses to every alphabetically-earlier longer one that
+// shares its prefix. Measured over Debian trixie's 68,799 package names,
+// `python3` ranked 909th of 6,607 hits for "python" (behind
+// python-acme-doc and 907 siblings) and `nodejs` ranked 1,701st for
+// "node"; with the length tie-break they rank 1st and 3rd.
+func CompareRank(a, b Rank) int {
+	return cmp.Or(
+		cmp.Compare(b.Score, a.Score),
+		cmp.Compare(len(a.Name), len(b.Name)),
+		cmp.Compare(a.Name, b.Name),
+	)
 }
 
 // Featured returns the curated starter set (empty-state content),
