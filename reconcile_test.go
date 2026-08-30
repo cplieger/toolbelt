@@ -219,15 +219,25 @@ func TestReconcileFull_EnqueuesUpdatePass(t *testing.T) {
 		t.Fatalf("reconcile full: job=%v enqueued=%v err=%v", jv, enqueued, err)
 	}
 	waitJob(t, e, jv.ID)
-	// The follow-up update job ran too (manual tools skip updates, so
-	// it completes as an up-to-date no-op).
-	_, recent := e.Jobs()
-	kinds := map[string]bool{}
-	for _, r := range recent {
-		kinds[r.Kind] = true
-	}
-	if !kinds[JobKindReconcile] || !kinds[JobKindUpdate] {
-		t.Fatalf("recent kinds = %v, want reconcile + update", kinds)
+	// The follow-up update job completes as an up-to-date no-op (manual
+	// tools skip updates), but Reconcile hands back only the reconcile
+	// job, so there is no ID to wait on: poll until the update job
+	// reaches recent history instead of reading it once, which raced the
+	// worker on a loaded runner.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		_, recent := e.Jobs()
+		kinds := map[string]bool{}
+		for _, r := range recent {
+			kinds[r.Kind] = true
+		}
+		if kinds[JobKindReconcile] && kinds[JobKindUpdate] {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("recent kinds = %v, want reconcile + update", kinds)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
