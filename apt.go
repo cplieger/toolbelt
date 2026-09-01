@@ -126,20 +126,11 @@ func AptAvailable() bool {
 }
 
 // aptInstalled reports whether a package is installed AND its version.
-//
-// The status word is load-bearing. `dpkg-query -W -f='${Version}'`
-// alone reports a version for a package that has been REMOVED with its
-// config files left behind: measured on apt 3.0.3, after
-// `apt-get remove nano`, that query prints 8.4-1+deb13u1 and exits 0
-// with no binary on disk. Only ${db:Status-Status} == "installed"
-// distinguishes the two, and a non-zero exit means dpkg has never heard
-// of the package at all.
+// See aptStatusFrom for why the status word, not just the version, decides.
 func (in *installer) aptInstalled(ctx context.Context, pkg string) (version string, installed bool) {
 	cmd := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", pkg)
 	out, err := cmd.Output()
 	if err != nil {
-		// dpkg exits non-zero for a package it has no record of at all,
-		// which is absence rather than an error worth reporting.
 		return "", false
 	}
 	return aptStatusFrom(string(out))

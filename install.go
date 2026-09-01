@@ -109,68 +109,13 @@ func (in *installer) pythonDir() string { return filepath.Join(in.toolsDir, "pyt
 // tree, writable only by the uid the engine runs as.
 const managedDirMode os.FileMode = 0o755
 
-// ensureManagedDir creates dir and, when THIS call created it, PROVES the
-// filesystem stored managedDirMode rather than assuming it did.
-//
-// The MkdirAll this replaces asked and never looked. A mode argument is a
-// REQUEST, not a result: mkdir(2) takes it through the umask, and a
-// filesystem carrying an inheritable group-write ACE overrides the
-// outcome regardless of what was asked — measured on a ZFS nfs4acl
-// dataset, a 0o700 mkdir comes back 0770. A setgid parent reaches the
-// same place by a different route, since Linux propagates S_ISGID to a
-// new subdirectory, so "the stored mode differs from the requested one"
-// needs no exotic filesystem at all.
-//
-// For this package the widened outcome is specific and bad, and bin/ is
-// the case that sets the bar. It is the SINGLE directory the engine puts
-// on PATH (pmEnv), its entries are symlinks into opt/, npm/bin/ and
-// python/bin/, and the probe EXECUTES what resolves through them
-// (probeTool -> runProbe -> exec.CommandContext). A 0775 bin/ is write
-// access to that namespace: any member of the directory's group can add
-// an entry, or unlink one and re-create it pointing somewhere else, and
-// in a consumer like web-terminal-kiro the process that later resolves
-// PATH runs as root. enforceExecutable already pins the mode of the
-// binary a link points AT, which is worth nothing if the link itself can
-// be repointed at a file that was never inspected — the directory mode is
-// the same class of finding as the file mode, not a tidiness question.
-// verifyRootIntegrity refuses to start on exactly this shape
-// (perm&0o022 on a managed root); this is that rule applied at the moment
-// of creation, while the directory is still this library's own and not yet
-// a fact about the operator's volume.
-//
-// It fails the install rather than warning. The error travels the ordinary
-// install path (linkBin -> linkDeclaredFiles/linkPMBins -> installAqua ->
-// executeJob), so the job reports failure and the tool is not published —
-// which is strictly weaker than the precedent already in this package,
-// where the same mode predicate refuses Engine construction outright. A
-// warn-only posture would turn an integrity boundary into a log line and
-// still publish the PATH entry; and because the check only fires where the
-// filesystem actively refused to store a mode on a directory this call
-// just made, it cannot brick an install on any filesystem that honours
-// mode requests.
-//
-// Only a directory THIS call created is certified, which is why the leaf
-// mkdir is separated from the ancestors: os.MkdirAll cannot report which
-// levels it made (it stats the path, FOLLOWS a symlink, finds a directory
-// and returns nil), and the created/pre-existing distinction is what keeps
-// the chmod honest — atomicfile.EnsurePrivateDir turns on the same
-// distinction for the same reason. A directory we just made is one no
-// other writer has ever held a name to, so repairing it cannot be
-// tightening, or WIDENING, somebody else's. A pre-existing one belongs to
-// whoever made it: chmod'ing an operator's deliberately-0700 bin/ up to
-// 0755 would be this library undoing their hardening, and refusing it
-// outright would fail installs that work today. That case is
-// verifyRootIntegrity's, deliberately and opt-in (see its REPORT-ONLY
-// contract), and the residual gap is stated rather than papered over — a
-// directory widened by an earlier run's creation is reported there, not
-// repaired here.
-//
-// The one behavior change to know about: a level created under a setgid
-// parent loses the inherited S_ISGID, because the enforcing chmod sets
-// exactly managedDirMode. That is intended. Group-inheritance on a
-// directory the engine publishes PATH entries from is the shared-write
-// shape verifyRootIntegrity refuses, and these are directories the engine
-// made, not the operator's.
+// ensureManagedDir creates dir and, when THIS call created it, verifies
+// the filesystem stored managedDirMode rather than assuming it did:
+// mkdir(2) takes the mode through the umask, and a group-write ACE or a
+// setgid parent can both store a wider mode than requested. bin/ is why
+// this matters — a group-writable bin/ lets any group member repoint a
+// published PATH entry. Only a directory THIS call created is
+// chmod'ed; a pre-existing one is left alone.
 func ensureManagedDir(dir string) error {
 	if err := os.MkdirAll(filepath.Dir(dir), managedDirMode); err != nil {
 		return err
@@ -179,10 +124,8 @@ func ensureManagedDir(dir string) error {
 		if !errors.Is(mkErr, os.ErrExist) {
 			return mkErr
 		}
-		// Somebody else's directory: a previous run's, or the operator's.
-		// Reproduce os.MkdirAll's own acceptance test so that a name
-		// occupied by a regular file still fails here, exactly as it did
-		// before, instead of being read as "already established".
+		// Mirror os.MkdirAll's acceptance test: a name occupied by a
+		// regular file still fails rather than reading as established.
 		fi, statErr := os.Stat(dir)
 		if statErr != nil {
 			return statErr
@@ -195,16 +138,10 @@ func ensureManagedDir(dir string) error {
 	return enforceDirMode(dir, managedDirMode)
 }
 
-// ensureManagedDirs establishes several levels, OUTERMOST FIRST, so each
-// one gets its own verdict.
-//
-// The loop is the caller's job and not ensureManagedDir's because only the
-// caller knows where the engine's ownership starts: ToolsDir is the
-// operator's directory and stays MkdirAll'd without a mode verdict, while
-// every level beneath it — opt/, opt/<tool>/, npm/, npm/bin/ — is one the
-// engine created and must certify. atomicfile.EnsurePrivateDir draws the
-// line in the same place and for the same reason ("one level,
-// deliberately").
+// ensureManagedDirs establishes several levels, outermost first, so each
+// gets its own verdict. The caller decides where engine ownership starts
+// (ToolsDir stays a plain MkdirAll; opt/, opt/<tool>/, npm/, npm/bin/ are
+// certified).
 func ensureManagedDirs(dirs ...string) error {
 	for _, dir := range dirs {
 		if err := ensureManagedDir(dir); err != nil {
@@ -277,20 +214,11 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 
 // --- aqua / http artifacts ---
 
-// installAqua downloads and places a binary artifact per the resolved
-// aqua spec: download, checksum verify (mandatory when the definition
-// declares a source), extract into a versioned opt dir, symlink the
-// declared files into bin. It returns the linked bins and the
-// verification outcome; pruning superseded versions is the caller's,
-// deliberately deferred until the new version's state record is durable.
 // installFromSpec runs the download, verify, extract and link sequence
-// over a resolved spec.
-//
-// Extracted from installAqua so the release source runs the same code
-// rather than a copy of it: everything a release install does after
-// choosing an asset is what already installs the aqua-backed majority,
-// and a second implementation of the verify-then-swap ordering is exactly
-// the kind of divergence that ends with one path skipping a check.
+// over a resolved spec: download, checksum verify (mandatory when the
+// definition declares a source), extract into a versioned opt dir,
+// symlink declared files into bin. Shared by the aqua and release
+// sources so the verify-then-swap ordering is not duplicated.
 func (in *installer) installFromSpec(ctx context.Context, name, version string, spec *InstallSpec) (bins []string, checksum string, err error) {
 	in.logf("downloading %s", spec.URL)
 
@@ -332,23 +260,12 @@ func (in *installer) installAqua(ctx context.Context, name, version string, aq *
 	return in.installFromSpec(ctx, name, version, spec)
 }
 
-// verifyArtifact enforces the checksum invariant before a byte of the
-// download is extracted or published, and reports how integrity was
-// established.
-//
-// A definition that DECLARES a checksum source must produce a matching
-// digest: a source that resolved to nothing, a checksum file that cannot
-// be fetched or parsed, and a mismatched digest all REFUSE the install,
-// loudly, at the engine logger as well as in the job output. There is no
-// path from a declared checksum to an installed artifact that was not
-// verified against it.
-//
-// A definition that declares none (or whose upstream explicitly disabled
-// checksums) still installs, unchanged — but the unverified path is now
-// explicit: a Warn on the engine logger names the tool, version and URL,
-// and installTool records "unverified" in tools-state.json, so "this
-// tool was installed unverified" is observable rather than inferred from
-// a definition an operator would have to go read.
+// verifyArtifact enforces the checksum invariant before the download is
+// extracted or published, and reports how integrity was established. A
+// declared checksum source that fails to resolve, fetch, parse or match
+// REFUSES the install; a definition declaring none still installs, but
+// logs the tool/version/URL at Warn so the gap is observable rather than
+// inferred.
 func (in *installer) verifyArtifact(ctx context.Context, name, version, artifact string, spec *InstallSpec) (string, error) {
 	switch {
 	case spec.ChecksumURL != "":
@@ -381,28 +298,21 @@ func (in *installer) refuseUnverified(name, version, url string, cause error) er
 }
 
 // extractAndSwap extracts the artifact into a fresh staging dir and
-// atomically swaps it into the versioned opt dir. The backup rename
-// means a same-version reinstall never has a window where the tool is
-// deleted but the replacement rename hasn't happened.
-//
-// Durability protocol (a published tree must survive a power loss, or
-// the state file that names it would reference contents that never
-// reached disk): every extracted file's contents and every staged
-// directory's entry list are flushed BEFORE the publishing rename, and
-// the parent directory's entry list is flushed AFTER it. A barrier
-// failure — ENOSPC included — fails the install and restores the
-// previous version, rather than leaving a tree the engine would go on to
-// record and prune around.
+// atomically swaps it into the versioned opt dir. The backup rename means
+// a same-version reinstall has no window where the tool is deleted but
+// not yet replaced. Durability: every extracted file and the staged
+// directory's entry list are flushed before the publishing rename, and
+// the parent directory's entry list is flushed after it; a barrier
+// failure restores the previous version rather than leaving a tree the
+// engine would prune around.
 func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, error) {
 	versDir := filepath.Join(in.optDir(), name, version)
 	staging := versDir + stagingSuffix
 	if err := os.RemoveAll(staging); err != nil {
 		return "", err
 	}
-	// opt/ and opt/<tool>/ are levels the engine owns as much as the
-	// staging dir itself, and the mode certified here is the mode the
-	// PUBLISHED version tree ends up with: the publish below is a rename
-	// of this same inode, which carries its mode across unchanged.
+	// The mode certified on staging carries across: the publish below is
+	// a rename of this same inode.
 	if err := ensureManagedDirs(in.optDir(), filepath.Join(in.optDir(), name), staging); err != nil {
 		return "", err
 	}
@@ -500,31 +410,11 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 }
 
 // resolveInsideInstall resolves one declared file to a real path proven
-// to sit inside the install dir, and leaves it executable.
-//
-// Symlinks are resolved BEFORE stat/chmod/link: tar and unzip sanitize
-// .. and absolute member paths (fail-closed on the consumer images,
-// verified), but they faithfully recreate symlink members — a malicious
-// archive could point the declared file at a path outside the install
-// tree, and a follow-symlink chmod plus a published bin/ link would
-// escape the sandbox.
-//
-// enforceExecutable acts on a DESCRIPTOR, which NARROWS the
-// check-then-act above without closing it. The containment verdict is
-// still a statement about a NAME: it was proven of the path EvalSymlinks
-// resolved, and the open re-resolves that same path. O_NOFOLLOW removes
-// the worst arm — a symlink swapped in at the final component is refused
-// by the kernel rather than followed into a chmod of somebody else's
-// file — and the fchmod+fstat pair rides one descriptor, so the mode that
-// gets certified is the mode of the inode that got chmod'ed. What
-// remains: O_NOFOLLOW binds only the LAST component, so an ancestor
-// swapped for a symlink still redirects the open; a regular file
-// substituted at the name passes it; and no inode identity is carried
-// from the containment check to the open. Closing it needs
-// openat(2)-relative traversal from a retained handle on versDir
-// (os.Root) for the resolution as well as the mode, at which point
-// linkBin — which still publishes by pathname — becomes the remaining
-// window.
+// to sit inside the install dir, and leaves it executable. Symlinks are
+// resolved BEFORE stat/chmod/link, because tar/unzip faithfully recreate
+// symlink members even though they sanitize .. and absolute paths.
+// Residual gap: containment is a name-based TOCTOU, since no inode
+// identity carries into enforceExecutable's open or linkBin's publish.
 func resolveInsideInstall(installRoot pathinside.Root, target, src string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
@@ -539,30 +429,16 @@ func resolveInsideInstall(installRoot pathinside.Root, target, src string) (stri
 	return resolved, nil
 }
 
-// searchInstallTree resolves a GUESSED path: it returns guess unchanged
-// when a file is there, and otherwise finds the executable named base
-// inside root — or, failing that, the artifact's only executable.
-//
-// A release publishes no manifest, so the guess is the tool's own name at
-// the archive root and upstream's build decides whether that is true.
-// Searching is what makes a nested layout installable at all
-// (pandoc-3.10.2/bin/pandoc) and it stays a FALLBACK, so a layout that
-// matches the guess is never re-litigated by a walk.
-//
-// The ranking is a total order, because an install that picks a different
-// file on a re-run is worse than one that fails: shallowest first (the
-// binary sits above its resources, never below them), then a bin/ parent,
-// then lexicographic. Foreign-OS paths are dropped first, and only when
-// that leaves something — an archive carrying both a darwin/ and a linux/
-// subtree must not resolve to the darwin build, but a path that merely
-// reads like one must not lose the only candidate either.
+// searchInstallTree resolves a GUESSED path: returns guess unchanged when
+// a regular file is there, else finds the executable named base inside
+// root, else falls back to the artifact's only executable — a FALLBACK
+// so a matching guess is never re-litigated. Ranking is a total order
+// (shallowest first, then a bin/ parent, then lexicographic) so a
+// re-run cannot pick a different file; foreign-OS paths are dropped
+// first, only when something is left to fall back to.
 func searchInstallTree(root, guess, base string) (string, error) {
-	// A regular file, not merely something at the name: pandoc's archive
-	// carries a share/pandoc DATA directory, and a tool whose resource
-	// tree is named after it would otherwise resolve to the directory and
-	// fail later as a mode error with no hint of what happened. Stat
-	// rather than Lstat so a symlink to a real binary takes the fast path;
-	// the caller's containment check is what judges where it points.
+	// Regular file, not a directory: pandoc's archive carries a
+	// share/pandoc data dir a name-only check would resolve to.
 	if fi, err := os.Stat(guess); err == nil && fi.Mode().IsRegular() {
 		return guess, nil
 	}
@@ -742,15 +618,11 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 }
 
 // findChecksum extracts asset's digest for the given algorithm from a
-// checksum file body. Real-world formats covered: a bare digest, the
-// coreutils "digest  name" table (binary mode prefixes the name with
-// *), and BSD style "SHA512 (name) = digest". The algorithm is part of
-// the match: BSD files often list SEVERAL algorithms per asset
-// (mikefarah/yq's checksums-bsd), and coreutils-style multi-hash
-// tables put the name first — digest-length and tag filtering keep a
-// CRC32/MD5 line from being returned as a sha512 (found the hard way
-// on the borgcube migration; the mismatch failed closed, as designed,
-// but with a misleading "want" value).
+// checksum file body: a bare digest, the coreutils "digest  name" table
+// (binary mode prefixes name with *), or BSD "SHA512 (name) = digest".
+// The algorithm is part of the match, since BSD files often list
+// several per asset (mikefarah/yq's checksums-bsd) and digest-length
+// filtering keeps a CRC32/MD5 line from being read as a sha512.
 func findChecksum(body, asset, alg string) string {
 	wantLen := map[string]int{algSHA256: 64, "sha512": 128}[alg]
 	if wantLen == 0 {
@@ -803,11 +675,10 @@ func isHexDigest(s string, n int) bool {
 	return true
 }
 
-// pruneOldVersions removes superseded versioned install dirs, keeping
-// the current version plus the `keep` most recent previous ones so a bad
-// update has something to fall back to (see retained for how keep is
-// normalized). Transient staging/backup residue is never retained.
-// Best-effort: a prune failure is logged and leaves disk as it is.
+// pruneOldVersions removes superseded versioned install dirs, keeping the
+// current version plus the `keep` most recent previous ones (see
+// retained) so a bad update has a fallback. Best-effort: a failure is
+// logged and disk is left as-is.
 func (in *installer) pruneOldVersions(name, current string, keep int) {
 	root := filepath.Join(in.optDir(), name)
 	entries, err := os.ReadDir(root)
@@ -823,11 +694,10 @@ func (in *installer) pruneOldVersions(name, current string, keep int) {
 	}
 }
 
-// prunable selects the entries under a tool's opt root that go: the
-// current version never does, transient .staging/.old residue always
-// does, and the remaining superseded versions are ordered newest-first
-// (mtime, name as the deterministic tiebreak) with the first `retained`
-// of them kept.
+// prunable selects entries under a tool's opt root that go: never the
+// current version, always transient .staging/.old residue, and the
+// remaining superseded versions newest-first (mtime, name tiebreak)
+// past the first `retained`.
 func prunable(entries []os.DirEntry, current string, keep int) []string {
 	type candidate struct {
 		modTime time.Time
@@ -1020,14 +890,11 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 	return in.linkPMBins(pmBin, added, prev, pkg)
 }
 
-// installPip installs one PyPI CLI tool via `uv tool install` — the
-// pipx-equivalent primitive: uv provisions a managed CPython when none
-// exists on PATH, each tool gets an isolated venv under UV_TOOL_DIR,
-// and the launchers uv drops in UV_TOOL_BIN_DIR are self-contained
-// (venv-backed shebangs). A bare `uv pip install --prefix` was tried
-// first and REJECTED: its launchers point at the managed interpreter
-// without the prefix's site-packages, so every entry point dies with
-// ModuleNotFoundError.
+// installPip installs one PyPI CLI tool via `uv tool install` (the
+// pipx-equivalent primitive: isolated per-tool venv, self-contained
+// launcher). `uv pip install --prefix` was tried first and rejected —
+// its launcher points at the managed interpreter without the prefix's
+// site-packages, so every entry point dies with ModuleNotFoundError.
 func (in *installer) installPip(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
 	if err := ensureManagedDirs(in.pythonDir(), filepath.Join(in.pythonDir(), "bin")); err != nil {
 		return nil, err
@@ -1043,14 +910,12 @@ func (in *installer) installPip(ctx context.Context, pkg, version string, prev [
 }
 
 // linkPMBins symlinks package-manager bin entries into the engine bin
-// dir and returns the tool's owned bin set. The set is the union of
-// the previously recorded bins that still exist in the pm dir and the
-// diff's newly created names — a reinstall/update creates NO new
-// entries (the launchers already exist), so trusting the diff alone
-// would clobber ownership of multi-bin packages (typescript: tsc +
-// tsserver) and make them read as uninstalled. Falls back to the
-// package's conventional bin name for a first install that created
-// nothing new.
+// dir and returns the tool's owned bin set: the union of previously
+// recorded bins still present in the pm dir and the diff's new names —
+// a reinstall creates no new entries, so trusting the diff alone would
+// clobber ownership of multi-bin packages (tsc + tsserver). Falls back
+// to the package's conventional bin name for a first install that
+// created nothing new.
 func (in *installer) linkPMBins(pmBin string, added, prev []string, pkg string) ([]string, error) {
 	owned := map[string]bool{}
 	for _, b := range prev {
@@ -1174,15 +1039,10 @@ func (in *installer) runShell(ctx context.Context, command, version, optDir stri
 func (in *installer) uninstall(ctx context.Context, name string, t *Tool, st *ToolStatus) error {
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	if kind == SourceApt {
-		// An apt package is not this engine's to remove, and saying so is
-		// the honest outcome rather than a silent success.
-		//
-		// It produced no bins and no opt dir (its files are in /usr, on the
-		// container layer), so there is nothing recorded to undo. Removing
-		// the package itself would reach outside everything this engine
-		// owns and could take a dependency of the image with it. Dropping
-		// the entry stops it being reinstalled at the next converge, and a
-		// container recreate removes it along with the whole layer.
+		// Nothing recorded to undo (its files are in /usr, not this
+		// engine's bin/opt), and removing the package could take an
+		// image dependency with it. Dropping the entry stops it being
+		// reinstalled; a container recreate removes the rest.
 		in.logf("dropped the %s entry; the Debian package stays until the container is recreated (apt packages are not on the persistent volume)", name)
 		return nil
 	}

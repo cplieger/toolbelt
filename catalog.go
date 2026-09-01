@@ -53,26 +53,12 @@ type CatalogEntry struct {
 	// no-LSP-enabled warning and UI badges.
 	Lsp bool `json:"lsp,omitempty"`
 	// Essential marks a tool the PRODUCT depends on: removing it breaks a
-	// feature the user did not ask to lose. The engine refuses to remove
-	// such a row (ErrEssential) and a consumer groups it apart from the
-	// tools a user chose, with no delete control.
-	//
-	// It is declared by a consumer's BUNDLED TOOLS file, never by registry
-	// data, because "vibekit cannot do forge auth without gh" is a fact
-	// about vibekit and not about gh. The reference carries none of these.
-	//
-	// The companion flag is Featured, and together they are the two
-	// reasons a product bundles a tool at all: Essential means NECESSARY
-	// (a feature breaks without it) and Featured means RECOMMENDED
-	// (surfaced first, removable like anything else).
-	//
-	// It is not a lock on the version (Pin) and not a lock on the
-	// installed state: an essential tool can still be updated, and it can
-	// still be DISABLED, which is the escape hatch for a user who wants it
-	// gone without breaking the manifest's shape. Only deletion is
-	// refused, because deletion is the operation the product cannot
-	// recover from silently — the row carrying the install knowledge is
-	// what disappears.
+	// feature the user did not ask to lose, so the engine refuses (
+	// ErrEssential). Declared by a consumer's BUNDLED TOOLS file, never
+	// by registry data — "vibekit needs gh" is a fact about vibekit, not
+	// gh. Not a lock on version or install state: an essential tool can
+	// still be updated or DISABLED, only deletion is refused. Companion
+	// to Featured: Essential is NECESSARY, Featured is RECOMMENDED.
 	Essential bool `json:"essential,omitempty"`
 }
 
@@ -88,37 +74,22 @@ type Catalog struct {
 	// makes every copy (baked, cached, fetched) self-contained.
 	Licenses map[string]string       `json:"licenses,omitempty"`
 	Entries  map[string]CatalogEntry `json:"entries"`
-	// Unavailable holds registry entries for which no install source
-	// exists at all: tools this catalog knows about and cannot install
-	// (mise core:, vfox:, conda:, gem:, spm: backends, and aqua package
-	// types the runtime evaluator does not cover). Each carries a Reason.
-	//
-	// Deliberately a SEPARATE map rather than a state field on Entries.
-	// The compiled catalog is published to a stable URL and fetched at
-	// runtime by engines of any age, so a sourceless row inside Entries
-	// would reach an older engine's Search, hydrate an empty Source
-	// through mergeCatalogDefaults, and fail Add on a row its UI had
-	// offered. An unknown top-level key is ignored wholesale instead, so
-	// an old engine behaves exactly as it does today. It also keeps the
-	// Entries floor in cmd/toolcatalog meaningful: a registry that
-	// compiles nothing cannot pad the count with skipped rows.
-	//
-	// The two key sets are disjoint (asserted at compile time), and
-	// membership is architecture-INDEPENDENT: "no source exists" is a
-	// fact about the registry, whereas "this release has no asset for
-	// your arch" is a runtime answer belonging to the install job.
+	// Unavailable holds registry entries with no install source at all
+	// (mise core:/vfox:/conda:/gem:/spm: backends, uncovered aqua types),
+	// each carrying a Reason. A SEPARATE map, not a state field on
+	// Entries: a sourceless row inside Entries would reach an older
+	// engine's Search and fail Add on a row its UI had offered, where an
+	// unknown top-level key is instead ignored wholesale by old engines.
+	// The two key sets are disjoint (compile-time asserted); membership
+	// is architecture-INDEPENDENT — "no source exists" is a registry
+	// fact, "no asset for your arch" is the install job's own answer.
 	Unavailable map[string]CatalogEntry `json:"unavailable,omitempty"`
-	// Backends names the tool each source kind needs installed before it
-	// can install anything: npm needs node, pip needs uv, and so on. The
-	// engine adopts the named tool as a dependency (see backendFor).
-	//
-	// It is DATA rather than a map in the engine because it is a fact
-	// about the catalog, not about the mechanism. The engine knows how to
-	// run npm; which catalog entry provides npm is the catalog's answer,
-	// and a consumer that bundles a different provider says so
-	// here instead of patching a Go map it cannot reach. An absent or
-	// partial map falls back to defaultBackends, so a catalog compiled
-	// before this field existed keeps working.
+	// Backends names the tool each source kind needs installed first:
+	// npm needs node, pip needs uv (see backendFor). DATA rather than an
+	// engine map, because which catalog entry provides npm is a fact
+	// about the catalog, not the mechanism — a consumer bundling a
+	// different provider says so here. Absent/partial falls back to
+	// defaultBackends, so an older compiled catalog keeps working.
 	Backends map[string]string `json:"backends,omitempty"`
 	// aliases indexes alias -> entry name, built once at load so
 	// Lookup doesn't scan ~700 entries per aliased miss on hot
@@ -531,13 +502,9 @@ func applyOverlayDoc(c *Catalog, ov overlayDoc, resolveAqua func(ref string) (*A
 			return err
 		}
 		c.Entries[name] = patch
-		// An overlay supplying a source is exactly how a tool the compiler
-		// skipped becomes installable (node, go, java, rust and glab are all
-		// mise core:/gitlab: drops that overlays.json revives). Without this
-		// delete, all five sit in BOTH maps: the invariants pass for each row
-		// on its own, Search offers the installable one, SearchUnavailable
-		// simultaneously reports it as having no installer, and the two
-		// answers disagree with no way for a consumer to tell which is true.
+		// An overlay-supplied source (node, go, java, rust, glab revived
+		// from mise core:/gitlab: drops) must not leave the name in BOTH
+		// maps, or Search and SearchUnavailable disagree about it.
 		delete(c.Unavailable, name)
 	}
 	// Overlay entries may add names and aliases; rebuild the index.

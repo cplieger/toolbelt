@@ -1,54 +1,18 @@
 // Command toolcatalog compiles a toolbelt tool catalog from registry
-// data, and verifies a compiled catalog against a consumer's required
-// tool set.
-//
-// compile (the default) joins the mise registry (name -> preferred
-// install backends, descriptions, aliases; MIT, github.com/jdx/mise
-// /registry) with the aqua registry (per-package binary install
-// definitions; MIT, github.com/aquaproj/aqua-registry /pkgs), emitting
-// one tool-catalog.json an Engine loads read-only.
-//
-// What it emits is a REFERENCE: everything the registries can express,
-// translated, with no opinion about which tools matter. It carries no
-// curated entry set of its own — an earlier version embedded one, which
-// put a product's tool list, its featured flags and its UI copy inside a
-// shared artifact.
-//
-// A product's own BUNDLED TOOLS — the ones it needs to function and the
-// ones it recommends, including any the registries do not carry — are
-// its file to own, not a layer over this one. It reaches the engine
-// through Config.CatalogOverlays at runtime, or through -overlay here for
-// a consumer that compiles its own catalog.
-//
-// Runs at image build time (the Dockerfile downloads both registry
-// tarballs at Renovate-pinned refs):
+// data (the mise + aqua-registry projects, both MIT) into one
+// tool-catalog.json an Engine loads read-only, and verifies a compiled
+// catalog against a consumer's required tool set. It is a REFERENCE
+// with no curated entry set of its own; a consumer's bundled tools
+// reach the engine via Config.CatalogOverlays, or -overlay here.
 //
 //	go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@<tag> \
-//	    -mise <mise-repo>/registry \
-//	    -aqua <aqua-registry-repo>/pkgs \
-//	    [-overlay bundled-tools.json] \
-//	    -refs mise=<ref>,aqua=<ref> \
+//	    -mise <mise-repo>/registry -aqua <aqua-registry-repo>/pkgs \
+//	    [-overlay bundled-tools.json] -refs mise=<ref>,aqua=<ref> \
 //	    -out tool-catalog.json
-//
-// verify asserts every name in a requirements file (one per line, #
-// comments) resolves in the compiled catalog to actionable install
-// knowledge (offline checks: source present; aqua definitions embedded,
-// template-parseable, linux amd64+arm64 support; manual entries carry
-// an install command). A gap exits non-zero so the image build fails
-// instead of a boot job:
 //
 //	go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@<tag> \
 //	    verify -catalog tool-catalog.json -require required-tools.txt \
 //	        [-overlay bundled-tools.json]
-//
-// A consumer passes its own bundled-tools file to verify, so the gate
-// judges the catalog its engine will actually hold rather than the
-// reference alone.
-//
-// An ordinary command in the root module: it shares the engine's
-// catalog and aqua schema types by construction (one version stream, no
-// compiler/engine skew), and Go's module graph pruning keeps its
-// registry-parsing dependencies (TOML, YAML) out of consumer builds.
 package main
 
 import (
@@ -122,13 +86,10 @@ func runCompile(args []string) {
 	writeCatalog(catalog, *outPath, stats)
 }
 
-// loadRegistryLicenses reads both registries' LICENSE files (at the
-// checkout root, one level above the -mise registry dir / -aqua pkgs
-// dir). The compiled catalog embeds data derived from both registries
-// (MIT), and MIT requires the copyright + permission notice to travel
-// with copies — embedding the texts makes every downstream copy of the
-// catalog self-contained. Missing license files fail the compile: a
-// silent omission would ship a non-compliant artifact.
+// loadRegistryLicenses reads both registries' LICENSE files, one level
+// above their pkgs/registry dirs. MIT requires the notice to travel
+// with copies, so a missing file fails the compile rather than shipping
+// a non-compliant artifact.
 func loadRegistryLicenses(miseDir, aquaDir string) map[string]string {
 	out := map[string]string{}
 	for name, dir := range map[string]string{"mise": miseDir, "aqua-registry": aquaDir} {
@@ -152,15 +113,9 @@ func runVerify(args []string) {
 		log.Fatal("toolcatalog verify: -require is required")
 	}
 	catalog := readCatalog(*catalogPath)
-	// Applied with a NIL aqua resolver, which is exactly what the engine
-	// does at runtime: this gate has to judge the catalog the engine will
-	// actually hold, and a bundled tool carrying a bare aqua: source fails
-	// HERE rather than at a consumer's boot.
-	//
-	// Without this, a consumer whose required set includes one of its own
-	// bundled tools had to either drop it from the gate or move it into the
-	// shared artifact. The first loses the check; the second is how a
-	// product's tool list ends up in a general catalog.
+	// A nil aqua resolver: this gate judges the catalog the engine will
+	// actually hold at runtime, so a bundled tool with a bare aqua:
+	// source must fail HERE rather than at a consumer's boot.
 	for _, ov := range overlays {
 		data, err := os.ReadFile(ov)
 		if err != nil {
@@ -380,12 +335,10 @@ func linuxCapable(list []string) bool {
 
 // compileEntry builds one catalog entry from a mise registry file,
 // resolving the first backend the engine supports. The outcome says
-// whether it compiled, is linux-capable with no usable backend (the
-// caller records it as unavailable, carrying the returned reason), or is
-// not for linux at all.
-//
-// The returned entry is populated in every case except a hard error, so
-// an unavailable tool still carries its description and aliases.
+// whether it compiled, is unavailable (linux-capable, no usable
+// backend), or is not for linux at all. The entry is populated in every
+// case except a hard error, so an unavailable tool still carries its
+// description and aliases.
 func compileEntry(miseDir, aquaDir, name string) (toolbelt.CatalogEntry, outcome, error) {
 	var mt miseTool
 	if _, err := toml.DecodeFile(filepath.Join(miseDir, name+".toml"), &mt); err != nil {
@@ -467,16 +420,10 @@ func backendOptions(raw any) map[string]any {
 }
 
 // releaseHints reads the install hints a registry entry carries for a
-// release-backed tool.
-//
-// Two sources, because the registry keeps them apart: the binary SET is a
-// top-level `bins` field describing the tool, and the file-location hints
-// are options on the github/gitlab backend. Only the four the engine acts
-// on (see toolbelt.ReleaseHints): what this tool puts on PATH, which of
-// several binaries in one repository it is, and where the executable sits
-// inside the artifact. The registry's asset_pattern and rename_exe are
-// deliberately not read; both decisions and their evidence are documented
-// on the ReleaseHints type.
+// release-backed tool: the top-level `bins` field plus the file-location
+// options on the github/gitlab backend. Only the four fields
+// toolbelt.ReleaseHints acts on; asset_pattern and rename_exe are
+// deliberately not read (see that type for why).
 func releaseHints(name string, bins []string, opts map[string]any) *toolbelt.ReleaseHints {
 	str := func(k string) string {
 		if opts == nil {
@@ -497,12 +444,9 @@ func releaseHints(name string, bins []string, opts map[string]any) *toolbelt.Rel
 	return h
 }
 
-// releaseBins normalizes the registry's binary list, returning nil when it
-// says nothing the installer does not already assume.
-//
-// The default IS the tool's own name, so carrying `bins = ["jq"]` for jq
-// would put 112 redundant lists in the catalog. What survives is the 40
-// entries where the published names genuinely differ.
+// releaseBins normalizes the registry's binary list, returning nil when
+// it only repeats the tool's own name (the installer's default), which
+// would otherwise put ~112 redundant lists in the catalog.
 func releaseBins(name string, bins []string) []string {
 	out := make([]string, 0, len(bins))
 	for _, b := range bins {
@@ -565,39 +509,20 @@ func platformListAllowsLinux(raw any) bool {
 // drift and must FAIL the build, not silently shrink the catalog.
 var errUnsupported = errors.New("unsupported")
 
-// coreBackendAqua translates mise's `core:` backends — its own built-in
-// installers, which this compiler does not implement — onto the aqua
-// package that installs THE SAME TOOL.
-//
-// This is registry TRANSLATION, not curation, and it belongs here for the
-// same reason the `github:` and `gitlab:` arms do: the registry states
-// which tool an entry is, and the compiler's whole job is to express that
-// in a source this engine can install from. An earlier design discarded
-// every `core:` backend and had a hand-written overlay revive the four
-// that mattered, which put a product's tool list inside a general
-// artifact and left the reason in a code comment.
-//
-// Measured against the pinned registries, mise declares 13 `core:` tools
-// and only these 5 have an aqua package for the same thing. The other 8
-// stay unavailable with their backend as the reason, which is what a
-// consumer needs to read to know it must supply them itself.
+// coreBackendAqua translates mise's `core:` backends (its own built-in
+// installers, unimplemented here) onto the aqua package that installs
+// THE SAME TOOL. Registry translation, not curation.
 //
 // Two near-misses are deliberately absent, because "aqua has a package
 // whose name matches" is not the test:
 //
 //   - python. mise means CPython; aqua's `astral-sh/uv` is a different
-//     tool that merely happens to be this engine's pip backend, and it
-//     already reaches the catalog as its own registry entry. Translating
-//     would hand somebody who asked for python an entry that installs uv.
-//   - rust. aqua's `rust-lang/rustup` installs the `rustup-init` binary,
-//     not a toolchain, so the entry would land with no `cargo` on PATH —
-//     and `cargo:` sources adopt `rust` expecting exactly that. A wrong
-//     translation is worse here than an honest gap: the tool would read
-//     as installed and the backend would still be missing.
-//
-// So of the four backends this engine's source kinds adopt, node and go
-// arrive by translation, uv arrives as its own registry entry, and rust
-// is a gap a consumer bundles itself.
+//     tool that happens to be this engine's pip backend and already has
+//     its own catalog entry. Translating would hand a python request an
+//     entry that installs uv.
+//   - rust. aqua's `rust-lang/rustup` installs `rustup-init`, not a
+//     toolchain, so the entry would land with no `cargo` on PATH — and
+//     `cargo:` sources adopt `rust` expecting exactly that.
 var coreBackendAqua = map[string]string{
 	"bun":  "oven-sh/bun",
 	"deno": "denoland/deno",

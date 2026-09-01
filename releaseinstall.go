@@ -12,15 +12,14 @@ import (
 	"github.com/cplieger/httpx/v5"
 )
 
-// The release source's install path. Selection is release.go's job; this
-// file turns a chosen asset into the same InstallSpec the aqua path
-// consumes, so the download, checksum verification, extraction and bin
-// linking are the code that already installs 648 tools rather than a
-// second implementation of it.
+// The release source's install path. Selection is release.go's job;
+// this file turns a chosen asset into the same InstallSpec the aqua
+// path consumes, so download/verify/extract/link is the code that
+// already installs 648 tools rather than a second implementation.
 //
-// Source form: "release:<host>/<owner>/<repo>", host being github or
-// gitlab. The host is part of the source rather than inferred, so a
-// source string says where it points without a lookup table.
+// Source form: "release:<host>/<owner>/<repo>". The host is part of the
+// source rather than inferred, so a source string says where it points
+// without a lookup table.
 
 // releaseHostGitHub and releaseHostGitLab are the forges a release source
 // can name.
@@ -59,10 +58,9 @@ func parseReleaseRef(ref string) (releaseRef, error) {
 
 // installRelease installs one tool from a forge release.
 //
-// It lists the release's assets, asks the matcher which one to take, then
-// hands the result to the aqua path's own machinery as an InstallSpec.
-// Nothing about downloading, verifying, extracting or linking is
-// reimplemented here.
+// Lists the release's assets, asks the matcher which one to take, then
+// hands the result to the aqua path's machinery as an InstallSpec —
+// nothing about downloading, verifying or extracting is reimplemented.
 func (in *installer) installRelease(ctx context.Context, name, ref, version string, hints *ReleaseHints) (bins []string, checksum string, err error) {
 	rr, err := parseReleaseRef(ref)
 	if err != nil {
@@ -97,15 +95,12 @@ func (in *installer) releaseSpec(rr releaseRef, name, version string, assets []s
 	if choice.ChecksumAsset != "" {
 		spec.ChecksumURL = releaseDownloadURL(rr, version, choice.ChecksumAsset)
 		spec.ChecksumAlg = algSHA256
-		// NOT ChecksumDeclared. That flag means "upstream promises a
-		// checksum", and its contract is that failing to obtain one must
-		// refuse the install rather than proceed unverified. Here nobody
-		// promised anything: the digest source was DISCOVERED by looking at
-		// the asset list, so a release that stops publishing one is an
-		// ordinary unverified install and not a broken promise.
-		//
-		// Setting it would turn every upstream that drops its checksums
-		// file into a hard install failure for a tool that worked yesterday.
+		// NOT ChecksumDeclared: that flag means "upstream promises a
+		// checksum" and its contract is to refuse the install if one
+		// cannot be obtained. Here nobody promised anything — the digest
+		// was DISCOVERED from the asset list — so setting it would turn
+		// every upstream that drops its checksums file into a hard
+		// failure for a tool that worked yesterday.
 	}
 	return spec, nil
 }
@@ -150,20 +145,17 @@ func releaseFormat(asset string) string {
 
 // releaseFiles decides which files to link into bin.
 //
-// A release ships no manifest of its contents, so unlike an aqua
-// definition there is nothing declaring where the binary lives. The
-// default is the tool's own name, which is right for 112 of the 158
-// release-backed entries: a bare binary is renamed to it, and an archive
-// is searched for it. The registry's own hints override both where a
-// repository is known to differ (see ReleaseHints).
+// A release ships no manifest of its contents, so the default is the
+// tool's own name (right for 112 of 158 entries): a bare binary is
+// renamed to it, an archive searched for it. ReleaseHints override both
+// where a repository is known to differ.
 func releaseFiles(name string, hints *ReleaseHints) []AquaFile {
 	if hints == nil {
 		return []AquaFile{{Name: name}}
 	}
 	// What lands in bin/ is upstream's binary set when the registry states
-	// one, because that is what the user's shell will call: `qdns` is a
-	// registry label for a binary named `q`, and publishing `qdns` would
-	// put a name on PATH that no documentation for the tool mentions.
+	// one — the shell calls what the binary is actually named: `qdns` is
+	// a registry label for a binary named `q`.
 	publish := hints.Bins
 	if len(publish) == 0 {
 		publish = []string{name}
@@ -171,10 +163,9 @@ func releaseFiles(name string, hints *ReleaseHints) []AquaFile {
 	out := make([]AquaFile, 0, len(publish))
 	for _, b := range publish {
 		f := AquaFile{Name: b}
-		// Src is where to find it inside the artifact: Bin names the file
-		// and BinPath the directory. Both describe the TOOL's own
-		// executable, so they apply to the entry carrying the tool's name
-		// and never to a sibling binary that happens to travel with it.
+		// Src is where to find it inside the artifact (Bin the file,
+		// BinPath the directory), and both describe the TOOL's own
+		// executable, never a sibling binary that travels with it.
 		inner := b
 		if b == name && hints.Bin != "" {
 			inner = hints.Bin

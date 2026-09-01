@@ -42,17 +42,13 @@ func fixtureAssets(t *testing.T, path string) (repo string, assets []string) {
 	return repo, assets
 }
 
-// TestChooseReleaseAsset_OverTheRealCorpus is the ship requirement for the
-// matcher: every repository the release source has to serve, with the
-// asset list its latest release actually publishes, on both
-// architectures.
-//
-// It exists because the selection ORDER cannot be reasoned about from
-// examples. Ordering architecture before the single-candidate rule looked
-// obviously right and lost 19 repositories on amd64, which only a run over
-// the whole population showed. The corpus is a snapshot, so a repository
-// that stops resolving is a finding to read rather than a failure to
-// silence: raise it here with its asset list.
+// TestChooseReleaseAsset_OverTheRealCorpus is the ship requirement:
+// every repository the release source serves, with its real asset
+// list, on both architectures. Exists because selection ORDER cannot be
+// reasoned about from examples — ordering architecture before the
+// single-candidate rule looked obviously right and lost 19 repositories
+// on amd64, found only by running the whole population. A repository
+// that stops resolving is a finding to read, not a failure to silence.
 func TestChooseReleaseAsset_OverTheRealCorpus(t *testing.T) {
 	dir := filepath.Join("testdata", "release-assets")
 	entries, err := os.ReadDir(dir)
@@ -110,25 +106,19 @@ func TestChooseReleaseAsset_OverTheRealCorpus(t *testing.T) {
 	}
 }
 
-// TestChooseReleaseAsset_UntaggedBinaryStaysEligible is the regression
-// test for the ordering. A release can ship one bare linux binary with no
-// OS or architecture token in its name, so the OS and architecture rules
-// have nothing to match on it: they must let an untagged name THROUGH
-// rather than requiring a positive match, or the only thing the release
-// ships is rejected.
+// TestChooseReleaseAsset_UntaggedBinaryStaysEligible pins the ordering
+// regression: an untagged name must pass THROUGH the OS/architecture
+// rules rather than requiring a positive match, or a release shipping
+// one bare linux binary is rejected outright.
 //
-// The first draft protected this case by short-circuiting on a single
-// remaining candidate instead. That is the wrong instrument, and the
-// corpus said so: a lone candidate skipped the architecture test, so
-// certstrap, hledger and janet, which publish amd64 only, installed their
-// amd64 asset on arm64.
+// A prior draft short-circuited on a single remaining candidate instead;
+// the corpus showed that skips the architecture test, so certstrap,
+// hledger and janet (amd64-only) installed their amd64 asset on arm64.
 //
-// The fixture deliberately holds no linux-TAGGED sibling. An earlier
-// version listed `yt-dlp_linux.zip` beside the bare binary while claiming
-// to test a release that ships only the latter, and the OS preference in
-// releasePreferNativeOS then decided the case — correctly, but for a
-// reason that left this property unmeasured. That preference has its own
-// test; this one isolates eligibility.
+// The fixture deliberately holds no linux-TAGGED sibling — a prior
+// version's `yt-dlp_linux.zip` let releasePreferNativeOS decide the case
+// instead, leaving this property unmeasured. That preference has its
+// own test.
 func TestChooseReleaseAsset_UntaggedBinaryStaysEligible(t *testing.T) {
 	assets := []string{
 		"SHA2-256SUMS", "SHA2-256SUMS.sig", "SHA2-512SUMS",

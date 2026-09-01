@@ -18,30 +18,20 @@ import (
 // aptIndex is the searchable Debian package list, and it is also the
 // name oracle the install gate consults (see installer.aptKnownName).
 //
-// It is apt's OWN index rather than a shipped artifact. Measured on
-// Debian trixie: a cold `apt-get update` costs 1.2s and 20.5 MB on
-// disk, `apt-cache dumpavail` yields 68,799 packages, and names plus
-// descriptions parse to 4.6 MB in memory. Against that, a baked list
-// would need a build step, a refresh pipeline and a staleness story to
-// end up with the same data apt already maintains.
+// Built from apt's OWN index (apt-cache dumpavail, 68,799 packages on
+// Debian trixie, 4.6 MB parsed) rather than a shipped artifact, since a
+// baked list would still need a build+refresh+staleness story to match
+// what apt already maintains. Per-keystroke apt-cache search measured
+// 0.48-0.53s, so the list is parsed once and searched in memory instead.
 //
-// Querying through `apt-cache search` per keystroke was measured at
-// 0.48-0.53s, far too slow for type-ahead, so the list is parsed once
-// and searched in memory.
+// The refresh is LAZY: nothing fetches until something asks for apt
+// results, since the headless consumer may never search at all. The
+// install path is unaffected — apt-get runs its own update regardless.
 //
-// The refresh is LAZY: nothing fetches until something actually asks for
-// apt results. One consumer has a human searching and earns the cost
-// immediately; the other is headless and may never search at all, so
-// paying 20.5 MB and a network round trip at every boot for it would be
-// waste. The install path is unaffected either way, because apt-get runs
-// its own update.
-//
-// There is deliberately NO Section-based filtering. An earlier design
-// filtered to "tool-shaped" sections and it dropped python3,
-// python3-pip and python3-venv, which are all Section: python, along
-// with libc6-dev (libdevel) and most of the database, php, ruby, java
-// and rust packages. Ranking plus a result cap is what keeps the list
-// usable; see rankAptNames.
+// Deliberately NO Section-based filtering: an earlier design filtering to
+// "tool-shaped" sections dropped python3 and libc6-dev along with most of
+// the database/php/ruby/java/rust packages. Ranking plus a result cap
+// keeps the list usable instead; see rankAptNames.
 type aptIndex struct {
 	log   *slog.Logger
 	names map[string]string // package name -> short description
@@ -72,20 +62,13 @@ const aptUpdateBudget = 3 * time.Minute
 // aptListsDir is where apt stores the package indexes it downloads.
 const aptListsDir = "/var/lib/apt/lists"
 
-// ensureLists runs `apt-get update` at most once per process, and only
-// when no index is on disk.
-//
-// This is required rather than an optimisation: BOTH consumer images
-// delete /var/lib/apt/lists at build time to keep the image small, and
-// `apt-get install` does NOT refresh the index itself, so the first
-// install in a fresh container fails with "Unable to locate package" for
-// a package that plainly exists. The search corpus needs the same
-// indexes, so one mechanism serves both and neither pays for the other.
-//
-// It deliberately does not re-run on a stale index. An index Debian has
-// moved past yields a version apt cannot fetch, which surfaces as a
-// clear install failure; re-updating on every install would put a network
-// round trip in front of every converge instead.
+// ensureLists runs `apt-get update` at most once per process, only when
+// no index is on disk. Required, not an optimisation: both consumer
+// images delete /var/lib/apt/lists at build time, and `apt-get install`
+// does not refresh it itself, so the first install in a fresh container
+// would fail "Unable to locate package" for one that plainly exists.
+// Does not re-run on a merely stale index — that fails as a clear
+// install error instead of costing a network round trip per converge.
 func (a *aptIndex) ensureLists(ctx context.Context) error {
 	if a == nil {
 		return nil
@@ -256,26 +239,15 @@ func (a *aptIndex) ensure(ctx context.Context) error {
 }
 
 // knownName reports whether pkg is a literal package name apt knows,
-// ensuring the index first.
-//
-// This is the gate that stops an unbounded install, and it must run
-// BEFORE anything else asks apt about the name. A token containing an
-// expansion character that matches no literal package is retried by apt
-// as an UNANCHORED REGEX: measured on apt 3.0.3, `apt-get install -s --
-// 'jq.'` plans 1366 packages from 126 matched names, and apt has no flag
-// to disable the fallback.
-//
-// `apt-cache policy` expands the same way, which is the subtle half:
-// asked about `jq.` it answers with a version belonging to whichever
-// package the pattern matched, so a resolver that runs first would record
-// a version from a package the user never named. Measured live, that
-// produced a `jq.` entry pinned at jq's own 2.1.2-3.
-//
-// The oracle is the parsed index, so this costs a map lookup. When no
-// index can be loaded the fallback refuses any name containing an
-// expansion character, which yields false NEGATIVES only: a real
-// docker.io waits for an index and self-heals, while a plain typo needs
-// no filter because apt matches it literally, finds nothing, and says so.
+// ensuring the index first. Must run BEFORE anything else asks apt about
+// the name: a token matching no literal package is retried by apt as an
+// UNANCHORED REGEX (measured, apt 3.0.3: `apt-get install -s -- 'jq.'`
+// plans 1366 packages from 126 matched names, no flag disables it).
+// `apt-cache policy` expands the same way — asked about `jq.` it answers
+// with whichever matched package's version, which measured live pinned a
+// `jq.` entry at jq's own 2.1.2-3 — so a version resolver needs this gate
+// too. When no index can be loaded, the fallback refuses any name
+// containing an expansion character: false NEGATIVES only.
 func (a *aptIndex) knownName(ctx context.Context, pkg string) error {
 	if !aptValidName(pkg) {
 		return fmt.Errorf("invalid package name %q", pkg)
@@ -294,14 +266,9 @@ func (a *aptIndex) knownName(ctx context.Context, pkg string) error {
 	return nil
 }
 
-// aptFallbackAllows is the name check used when no package index can be
-// loaded at all.
-//
-// It refuses any name containing an apt expansion character and admits
-// everything else, which yields false NEGATIVES only. A real docker.io
-// waits for an index and self-heals on the next attempt; a plain typo
-// needs no filter here because apt matches it literally, finds nothing,
-// and reports that itself.
+// aptFallbackAllows is the fallback knownName uses when no index can be
+// loaded: refuses a name containing an apt expansion character, admits
+// everything else.
 func aptFallbackAllows(pkg string) error {
 	if strings.ContainsAny(pkg, aptExpansionChars) {
 		return fmt.Errorf("cannot verify %q against the package index, and the name contains one of %q which apt would expand as a regex", pkg, aptExpansionChars)
@@ -351,11 +318,8 @@ func (a *aptIndex) load(ctx context.Context) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, aptUpdateBudget)
 	defer cancel()
 	if err := a.ensureLists(ctx); err != nil {
-		// A failed update is not fatal to the parse: an index from a
-		// previous run may still be on disk, and a partial index yields
-		// false NEGATIVES only (a real package waits for the next refresh),
-		// never a false positive, because its names come from real
-		// repository metadata.
+		// Not fatal to the parse: an index from a previous run may still
+		// be on disk, and a stale one yields false negatives only.
 		a.log.Warn("toolbelt: apt-get update failed, parsing whatever index is on disk", "error", err)
 	}
 	cmd := exec.CommandContext(ctx, "apt-cache", "dumpavail")

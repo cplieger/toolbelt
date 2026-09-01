@@ -13,34 +13,14 @@ import (
 	"github.com/cplieger/pathinside/v2"
 )
 
-// Root integrity: an opt-in prerequisite check on the directories the
-// engine treats as its own (Config.VerifyRootIntegrity).
+// Root integrity: an opt-in prerequisite check (Config.VerifyRootIntegrity).
+// The install probe EXECUTES what it finds in the tool tree, and that
+// bin dir goes first on PATH, so a symlinked or group/other-writable
+// managed root is a root-code-execution surface for a root process.
 //
-// Why it exists: the install probe EXECUTES what it finds in the tool
-// tree (probeTool -> runProbe -> exec.CommandContext on
-// <ToolsDir>/bin/<tool>), and the package-manager environment puts that
-// same bin dir first on PATH, so even a shebang resolves inside the
-// tree. On a consumer that runs as root over an operator-controlled
-// persistent volume, a managed root that is a symlink into somewhere
-// else, or one any group or other principal can write, is therefore a
-// root-code-execution surface rather than a tidiness question.
-//
-// The check is REPORT-ONLY: it never chmods, creates, repairs or deletes
-// anything. Tightening an operator's volume from inside a library would
-// be a behavior change no consumer asked for, and repair belongs to the
-// consumer's entrypoint, which knows whether the tree is disposable, and
-// runs before the process it has to protect.
-//
-// Absence is not a finding. On a fresh volume most of these directories
-// do not exist yet — New creates bin/ moments later, and npm/ and
-// python/ only ever come into being when an ecosystem install runs — so
-// a missing path is skipped rather than reported.
-//
-// A root that fails its own inspection can cascade findings onto the
-// paths beneath it (a ToolsDir that is a regular file makes every child
-// unreadable, a symlinked npm parent makes npm/bin resolve out of the
-// tree). That is deliberate: every path is judged and reported, so the
-// operator sees the whole surface rather than one line at a time.
+// REPORT-ONLY (repair belongs to the consumer's entrypoint); absence is
+// not a finding (a fresh volume has almost none of these yet); a
+// failing root deliberately cascades findings onto paths beneath it.
 
 // RootIntegrityFinding is one managed root that failed the integrity
 // check, and why.
@@ -98,30 +78,20 @@ func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string) error {
 	return &RootIntegrityError{Findings: findings}
 }
 
-// inspectRoots judges every managed root: ConfigDir, then ToolsDir, then
-// the directories beneath ToolsDir — the launcher dirs the probe and
-// PATH reach into (bin, opt), and the ecosystem trees (npm, python) with
-// their own bin dirs. The npm and python PARENTS are judged as well as
-// their leaves: either parent can redirect the launcher directory
-// beneath it, so checking only the leaves would miss the redirect.
-//
-// ConfigDir is exempt from the containment leg alone — it is
-// legitimately outside ToolsDir — not from the symlink, type or mode
-// legs.
+// inspectRoots judges every managed root: ConfigDir, ToolsDir, and the
+// launcher/ecosystem dirs beneath it (bin, opt, npm, python). The npm
+// and python PARENTS are judged too, since either can redirect the
+// launcher directory beneath it. ConfigDir is exempt from the
+// containment leg alone (it is legitimately outside ToolsDir), not from
+// the symlink, type or mode legs.
 func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 	out, _ := inspectRootDir(configDir)
 	toolsFindings, toolsIsDir := inspectRootDir(toolsDir)
 	out = append(out, toolsFindings...)
 
-	// Containment is judged against the RESOLVED ToolsDir, not the
-	// configured string: an operator's volume legitimately sits behind a
-	// symlinked ancestor (/config -> /mnt/config), and comparing the
-	// resolved children against the unresolved root would report every
-	// one of them as escaping. ToolsDir itself has already been refused
-	// if IT is the symlink, so this resolves the ancestors only.
-	//
-	// This is the boundary the containment leg confines to, so it is
-	// where the pathinside.Root is constructed.
+	// Judged against the RESOLVED ToolsDir: a volume may sit behind a
+	// symlinked ancestor (/config -> /mnt/config), and comparing against
+	// the unresolved root would report every child as escaping.
 	toolsRoot, contained := pathinside.Root(""), false
 	if toolsIsDir {
 		resolved, err := filepath.EvalSymlinks(toolsDir)

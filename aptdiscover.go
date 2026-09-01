@@ -14,23 +14,16 @@ import (
 
 // Discovery of apt packages this engine did not install.
 //
-// The inventory's Tools rows come from the manifest — intent — so a package
-// somebody installed in the shell has no row and is invisible. That is the
-// right shape for MANAGED tools and the wrong shape for answering "what is
-// on this box", which is a question a consumer's tools table should not have
-// to lie about.
+// The manifest is intent, so a package installed outside it has no row and
+// is invisible — right for MANAGED tools, wrong for "what is on this box".
+// Discovery is therefore a THIRD read-only group beside Tools and System,
+// and it never writes to the manifest: that would make intent
+// indistinguishable from fact.
 //
-// So discovery is a THIRD read-only group beside Tools and System, and it
-// deliberately does not touch the manifest. Writing observations there would
-// make intent indistinguishable from fact and hand the reconciler rows to
-// converge that nobody asked for.
-//
-// Nothing here guesses at provenance, and that is what makes it cheap. An
-// earlier design snapshotted the package set at first boot so a later diff
-// could name what the user added; it needed a baseline file, a policy for a
-// missing one, and it was still only a guess. The manifest already answers
-// the same question exactly: a row means this engine owns the package, no row
-// means somebody else does.
+// Provenance is never guessed. An earlier design snapshotted the package set
+// at boot to diff against later, needing a baseline file and a policy for a
+// missing one — still only a guess. The manifest already answers exactly:
+// a row means this engine owns the package, no row means it does not.
 
 // aptExtendedStatesPath is apt's own record of which packages arrived as
 // dependencies rather than being asked for.
@@ -47,43 +40,28 @@ const aptExtendedStatesPath = "/var/lib/apt/extended_states"
 const aptDiscoverTimeout = 20 * time.Second
 
 // aptBasePriorities are the Debian priority levels that mean "part of the
-// base system", which is the line between a package the IMAGE chose and a
-// package the OS came with.
+// base system" — the line between a package the IMAGE chose and one the OS
+// came with. Neither exclusion alone suffices: apt's auto-installed record
+// removes dependencies (measured, 438 of 536 packages here), and this
+// removes the rest of the base system, debootstrap-marked manual.
 //
-// Two exclusions do the work together, and neither is sufficient alone.
-// apt's auto-installed record removes dependencies — measured, 438 of 536
-// packages here — and this removes what is left of the base system, which is
-// manually-marked because debootstrap marks it so. What survives is what a
-// Dockerfile asked for and what a user or an agent installed later.
+// Priority, not a timestamp: apt state lives in the container layer and
+// survives a restart while PID 1 does not, and BuildKit can normalise a
+// binary's mtime to epoch — every timestamp anchor is wrong here, while
+// priority is a fact about the package no build or restart moves.
 //
-// Priority rather than a timestamp, and that was measured rather than
-// preferred. Per-package install-record mtimes DO cluster by image layer, but
-// every anchor for the boundary is wrong: apt state lives in the container
-// layer, so it survives a restart while PID 1 does not, and packages
-// installed during an earlier run of the same container predate the current
-// process — a container-start anchor hides exactly the runtime installs this
-// exists to surface. BuildKit can also normalise a binary's mtime to epoch,
-// which would make an executable-mtime anchor show everything. A priority is
-// a fact about the package that no build or restart moves.
-//
-// `standard` is deliberately NOT here. Debian calls it part of a normal
-// install, but in a slim image it is what a Dockerfile pulled in
-// (ca-certificates, openssh-client and xz-utils on the measured image, all
-// three named in that Dockerfile's own apt line), so excluding it would hide
-// installs the reader asked for.
+// `standard` is deliberately excluded: in a slim image it is what a
+// Dockerfile pulled in (ca-certificates, openssh-client, xz-utils, measured),
+// so including it would hide installs the reader asked for.
 var aptBasePriorities = map[string]bool{
 	"required":  true,
 	"important": true,
 }
 
-// aptDiscovery caches the installed-package list.
-//
-// Cached because the enumeration parses 536 rows and a 26 KB file, which is
-// work the UI's poll should not repeat, and INVALIDATED rather than timed
-// out: the only thing that changes the answer is a package install or
-// removal, and this engine knows when it ran one. A TTL would either serve a
-// stale list right after an install — the one moment a reader is looking —
-// or re-enumerate for nothing the rest of the time.
+// aptDiscovery caches the installed-package list. INVALIDATED, not
+// TTL'd: a package install/removal is the only thing that changes the
+// answer, and this engine knows when it ran one — a TTL would either
+// serve a stale list right after an install or re-enumerate for nothing.
 type aptDiscovery struct {
 	cached []AptPackage
 	mu     sync.Mutex
@@ -164,9 +142,7 @@ func parseDpkgPackages(dump []byte, auto map[string]bool) []AptPackage {
 		}
 		switch {
 		case name == "":
-		// `installed` is the only status meaning the files are present:
-		// config-files, half-configured and deinstall all report a version.
-		case status != aptStatusInstalled:
+		case status != aptStatusInstalled: // see aptStatusInstalled
 		case auto[name]:
 		case essential == "yes", aptBasePriorities[priority]:
 		default:

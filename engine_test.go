@@ -916,7 +916,6 @@ func TestInstallAqua_ChecksumMismatch(t *testing.T) {
 
 func TestJobs_CancelQueued(t *testing.T) {
 	e := newTestEngine(t, nil)
-	// Occupy the worker with a slow manual install.
 	slow, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
 		Install: `sleep 5 && ` + binStub("slow"),
@@ -1326,7 +1325,6 @@ func TestChecksumConfigured_FailsClosed(t *testing.T) {
 // must not leave a phantom manifest row.
 func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
 	e := newTestEngine(t, nil)
-	// Occupy the worker, then fill the queue to its cap.
 	slow, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
 		Install: `sleep 3 && ` + binStub("slow"),

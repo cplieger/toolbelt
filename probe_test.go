@@ -19,18 +19,11 @@ func writeStub(t *testing.T, e *Engine, name, body string) string {
 }
 
 // TestProbeInstalled_ExecutesTheTool pins install detection: presence of
-// bin/<name> is not proof. The probe executes the tool, and when the
-// definition declares its version-reporting shape the answer must carry
-// the recorded version — so a file that only exists, a corrupt or
-// wrong-architecture binary, a dangling link into a pruned version tree,
-// and a binary left at the wrong version all read as NOT installed
-// (routing them to a reinstall). A recorded bin that cannot be executed
-// at all falls back to presence and says so at Warn.
-//
-// It also pins the CannotExec split, which is what an install's own
-// verification acts on: the binary was never entered (ENOEXEC, or the
-// loader's exit 127) versus every other verdict, where the tool ran and
-// this engine merely could not grade the answer.
+// bin/<name> is not proof, so a corrupt/wrong-arch binary, a dangling
+// link, or the wrong version all read as NOT installed. It also pins
+// the CannotExec split: the binary was never entered (exit 127) versus
+// every other verdict, where the tool ran and this engine merely could
+// not grade the answer.
 func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 	cases := []struct {
 		name           string

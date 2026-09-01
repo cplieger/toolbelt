@@ -104,18 +104,12 @@ type InstallSpec struct {
 	ChecksumURL string // empty = nothing to fetch; see ChecksumDeclared
 	ChecksumAlg string
 	Files       []AquaFile
-	// SearchFiles marks the Files paths as GUESSES rather than
-	// declarations: when one is not where it says, the install dir is
-	// searched for a regular file of that name instead of failing.
-	//
-	// Only the release source sets it, and the asymmetry is the point. An
-	// aqua definition is authored and reviewed against the artifact, so a
-	// declared path that is missing is a registry bug, and searching
-	// would bury it — or worse, link a same-named file from somewhere
-	// else in the tree. A release publishes no manifest of its contents
-	// at all, so there is nothing to author against and the layout is
-	// whatever upstream's build produced (pandoc ships its binary at
-	// pandoc-<version>/bin/pandoc, not at the root).
+	// SearchFiles marks the Files paths as GUESSES: when one is missing,
+	// the install dir is searched for a same-named file instead of
+	// failing. Only the release source sets it — an aqua definition is
+	// authored against the artifact, so a missing declared path there is
+	// a registry bug that searching would bury; a release publishes no
+	// content manifest at all, so nothing was authored to search against.
 	SearchFiles bool
 	// ChecksumDeclared records that the definition DECLARES checksum
 	// verification for this version (a checksum block that upstream did
