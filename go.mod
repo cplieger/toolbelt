@@ -8,7 +8,7 @@ require (
 	github.com/cplieger/httpx/v5 v5.0.2
 	github.com/cplieger/keyenc v1.0.6
 	github.com/cplieger/pathinside/v2 v2.0.0
-	github.com/cplieger/scheduler/v4 v4.0.1
+	github.com/cplieger/scheduler/v4 v4.0.2
 	github.com/cplieger/ssrf/v4 v4.1.0
 	github.com/cplieger/webhttp/v2 v2.0.2
 	github.com/expr-lang/expr v1.17.8
