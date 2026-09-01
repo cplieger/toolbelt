@@ -736,17 +736,10 @@ func TestSearchHit_OmitsTheNewFieldsForAnInstallableEntry(t *testing.T) {
 	}
 }
 
-// TestMergeSearchHits_RanksNameHitsAboveDescriptionHits pins the fix for
-// the defect that made the best answer unreachable: the two installable
-// corpora were CONCATENATED, so every catalog hit preceded every Debian
-// one whatever it scored. Searching "python" answered with sixteen
-// catalog tools that merely mention Python in their descriptions, and
-// `python3` — a name-prefix hit, and the thing the reader wanted — sat
-// seventeenth.
-//
-// A unit test rather than a route test because apt needs root: driving
-// the route can only exercise a cross-corpus merge on a privileged host,
-// and would skip on every CI runner.
+// TestMergeSearchHits_RanksNameHitsAboveDescriptionHits pins mergeSearchHits'
+// score-based ordering across both corpora (see its doc comment for the
+// concatenation defect this guards). A unit test rather than a route
+// test because apt needs root, which would skip on every CI runner.
 func TestMergeSearchHits_RanksNameHitsAboveDescriptionHits(t *testing.T) {
 	catalog := []toolbelt.CatalogEntry{
 		{Name: "jc", Source: "aqua:kellyjonbrazil/jc", Description: "CLI tool and python library"},

@@ -7,68 +7,44 @@ import (
 	"strings"
 )
 
-// The release source installs a binary from a forge release, for the
-// tools the mise registry knows about and the aqua registry has no
-// package for. Source form: "release:<host>/<owner>/<repo>", where host
-// is github or gitlab.
+// The release source installs a binary from a forge release, for tools
+// mise knows about that aqua has no package for. Source form:
+// "release:<host>/<owner>/<repo>", host github or gitlab.
 //
-// The asset a release ships is not described anywhere machine-readable,
-// so which file to download is a JUDGEMENT over the release's file
-// names. That judgement is best effort and it says so: it either picks
-// one asset or fails naming every candidate it saw, and nothing is
-// recorded as installed until the binary runs and answers.
-//
-// This is deliberately a smaller heuristic than mise's scored
-// five-factor selection or ubi's, and it makes no claim to parity. What
-// keeps it honest is the fixture corpus: every one of the 147 affected
-// repositories has its real release file list in
-// testdata/release-assets, and the matcher's choice for each is
-// asserted on both architectures. A repository it cannot resolve is a
-// recorded expectation rather than a surprise in production.
+// Which asset to download is a JUDGEMENT over file names (no
+// machine-readable description exists) — best effort, picking one asset
+// or failing naming every candidate seen. Kept honest by the fixture
+// corpus (testdata/release-assets, all 147 affected repositories).
 
 // releaseAssetExts is an allow-list of archive and bare-binary shapes.
-//
-// An allow-list rather than a deny-list, because a deny-list provably
-// misses what it has not seen. Measured over the corpus, releases ship
-// .sbom.json, .provenance.json, .sigstore.json, .intoto.jsonl, .spdx.json,
-// .minisig, .pem, .asc, .sig, .deb, .rpm, .apk, .msi, .dmg, .pkg, .snap,
-// .AppImage and .sha256 siblings, and that list grows with the supply-chain
-// tooling of the day. Naming what IS installable does not.
+// An allow-list rather than a deny-list: a deny-list provably misses
+// what it has not seen (the corpus ships .sbom.json, .provenance.json,
+// .sigstore.json, .minisig, .deb, .rpm, .pkg, .AppImage, .sha256
+// siblings and more, growing with supply-chain tooling). Naming what IS
+// installable does not.
 var releaseAssetExts = []string{
 	".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst", ".zip",
-	// Single-file compression, i.e. one gzipped or xz'd binary rather than
-	// an archive. extract.go already handles both (its "gz" and "xz"
-	// cases decompress to the bin name), so omitting them here made the
-	// allow-list narrower than the engine: measured on the corpus, that
-	// alone refused elm and workerd, which publish exactly this shape.
+	// Single-file compression (one gzipped/xz'd binary, not an archive):
+	// extract.go already handles both, so omitting them made the
+	// allow-list narrower than the engine and refused elm and workerd.
 	".gz", ".xz", ".bz2", ".zst",
 }
 
-// releaseMovingNames are name fragments that mark an asset whose content
-// changes under a fixed name.
-//
-// Such an asset cannot be pinned: the manifest would record a version
-// while the bytes moved underneath it, so an update would be invisible
-// and a reinstall would silently fetch something else. Measured in the
-// corpus on rustfs, which publishes rustfs-linux-x86_64-latest.zip.
-// "-dev-" is deliberately NOT here. It reads like a moving name and is
-// not: odin publishes odin-linux-amd64-dev-2026-08.tar.gz, a dated build
-// whose bytes never change, and refusing it cost that repository on both
-// architectures for no gain.
+// releaseMovingNames are name fragments marking an asset whose content
+// changes under a fixed name — unpinnable, since a reinstall would
+// silently fetch something else (rustfs-linux-x86_64-latest.zip).
+// "-dev-" is deliberately NOT here: odin's dated
+// odin-linux-amd64-dev-2026-08.tar.gz never changes, and refusing it
+// cost that repository on both architectures for no gain.
 var releaseMovingNames = []string{"-latest", "_latest", "-nightly", "_nightly", "-edge", "-canary"}
 
-// releaseForeignOS names an OS that is not linux. These exist to REJECT
-// rather than to select, which matters because a release naming no OS at
-// all is common and must stay eligible.
-//
-// The list carries CONCATENATED spellings (osx64, winx64, macosx) as well
-// as plain ones, and that is not redundancy. Token matching needs a
-// separator or a string edge on both sides, so in "codeql-osx64.zip" the
-// token "osx" is followed by a digit and does not match, while the
-// architecture token "x64" sits inside "osx64" and does not match either:
-// both filters miss the asset and a macOS build becomes eligible for a
-// linux host. Derived from the corpus rather than guessed, these are the
-// spellings that actually occur across the 147 releases.
+// releaseForeignOS names an OS that is not linux, to REJECT rather than
+// select (a release naming no OS at all is common and must stay
+// eligible). Carries CONCATENATED spellings (osx64, winx64, macosx)
+// alongside plain ones — not redundancy: token matching needs a
+// separator on both sides, so in "codeql-osx64.zip" neither "osx"
+// (followed by a digit) nor "x64" (inside "osx64") matches, and a macOS
+// build becomes eligible for a linux host without the concatenated form.
 var releaseForeignOS = []string{
 	"darwin", "macos", "macosx", "macosarm", "apple", "osx", "osx64", "osx86", "mac",
 	"windows", "win", "win32", "win64", "winx64", "winx86", "msvc", "pc-windows",
@@ -76,29 +52,23 @@ var releaseForeignOS = []string{
 }
 
 // releaseArchTokens are the spellings of each architecture, widest
-// first. aqua's own replacement table is the source for these, plus the
-// underscore form protobuf's release tooling emits (`aarch_64`).
-//
-// `arm8` is deliberately NOT here even though it means ARMv8: zhanhb's
-// cidr-merger publishes arm5, arm6, arm7, arm8 AND arm64 for linux, and
-// admitting the rarer spelling as a match only moves the tie-break onto
-// the shorter of two equally correct names. Left unlisted it stays
-// NEUTRAL, so it remains eligible for a release that ships nothing else.
+// first (aqua's replacement table, plus protobuf's underscore form
+// `aarch_64`). `arm8` is deliberately NOT here even though it means
+// ARMv8: zhanhb's cidr-merger publishes arm5-arm8 AND arm64 for linux,
+// and admitting the rarer spelling only moves the tie-break onto the
+// shorter of two equally correct names; left unlisted it stays NEUTRAL.
 var releaseArchTokens = map[string][]string{
 	goarchAMD64: {"x86_64", "amd64", "x64", "64bit", "linux64"},
 	goarchARM64: {"aarch64", "aarch_64", "arm64", "armv8"},
 }
 
 // releaseForeignArch are architecture tokens that rule an asset out for
-// the host, keyed by the host's own GOARCH.
-//
-// The long tail is derived from the corpus, not guessed, and it is
-// load-bearing for a reason worth stating: an unrecognised spelling makes
-// an asset NEUTRAL rather than rejected, and a neutral asset wins whenever
-// nothing matches the host outright. protobuf-javascript publishes
-// `linux-aarch_64` and `linux-x86_32`; before `aarch_64` was a known arm64
-// spelling, an arm64 host matched neither, fell through to neutral, and
-// selected the 32-bit x86 build.
+// the host, keyed by GOARCH. The long tail is derived from the corpus:
+// an unrecognised spelling makes an asset NEUTRAL rather than rejected,
+// and a neutral asset wins when nothing matches outright — before
+// `aarch_64` was listed, protobuf-javascript's arm64 host matched
+// neither `linux-aarch_64` nor `linux-x86_32`, fell through to neutral,
+// and selected the 32-bit build.
 var releaseForeignArch = map[string][]string{
 	goarchAMD64: {
 		"aarch64", "aarch_64", "arm64", "armv8", "arm8", "armv7", "armv7a", "armv7hl", "armv6",
@@ -143,13 +113,11 @@ type assetChoice struct {
 // names, matching against every name the tool is known by: its registry
 // name first, then the executables it publishes (see releasePickBest).
 //
-// The ORDER is the part that was measured wrong twice, so it is spelled
-// out. Architecture must NOT come first: testing it before the
-// single-candidate rule forecloses the escape for a release that ships
-// one untagged linux binary, and measured over the corpus that lost 19
-// repositories on amd64 and 23 on arm64, yt-dlp and solidity among them.
-// ubi orders it extension, then single candidate, then OS, then
-// architecture, and that recovers them.
+// The ORDER matters and was measured wrong twice: architecture must NOT
+// come before the single-candidate rule, or a release shipping one
+// untagged linux binary has no escape — lost 19 repositories on amd64
+// and 23 on arm64 (yt-dlp, solidity among them). ubi's order (extension,
+// single candidate, OS, architecture) recovers them.
 func chooseReleaseAsset(assets []string, tool, goarch string) (assetChoice, error) {
 	return chooseReleaseAssetNamed(assets, []string{tool}, goarch)
 }
@@ -174,18 +142,8 @@ func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice
 	}
 
 	// 2. Reject what names another OS or another architecture. An asset
-	//    naming NEITHER survives both steps, and that is what makes the
-	//    order work: a release shipping one untagged linux binary (yt-dlp
-	//    ships exactly `yt-dlp`) has nothing for these rules to match, so
-	//    testing them cannot reject it.
-	//
-	//    An earlier draft short-circuited on a single remaining candidate
-	//    instead, to protect that case. Measured over the corpus it let an
-	//    explicitly-amd64 asset install on arm64 for three repositories
-	//    that publish amd64 only (certstrap, hledger, janet), because a
-	//    lone candidate skipped the architecture test that would have
-	//    refused it. Keeping the rules and letting untagged names through
-	//    protects the same releases without that hole.
+	//    naming NEITHER survives both steps — see chooseReleaseAsset's
+	//    doc comment for why architecture cannot short-circuit instead.
 	if os := releaseRejectForeignOS(cands); len(os) > 0 {
 		cands = os
 	} else {
@@ -197,12 +155,9 @@ func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice
 		return assetChoice{}, fmt.Errorf("no asset for linux/%s among %s", goarch, strings.Join(cands, ", "))
 	}
 	cands = narrowed
-	// gnu-over-musl runs FIRST. Both narrow among assets that are all
-	// valid for this host, and the OS preference is the blunter of the two:
-	// facebook/dotslash publishes `dotslash-linux-musl.x86_64.tar.gz`
-	// beside `dotslash-ubuntu-22.04.x86_64.tar.gz`, and only the first
-	// names linux, so preferring the OS token first would hand the musl
-	// build the win and quietly reverse the gnu preference.
+	// gnu-over-musl runs FIRST: facebook/dotslash's musl build is the
+	// only one naming linux, so preferring the OS token first would hand
+	// it the win and reverse the gnu preference.
 	if len(cands) > 1 {
 		cands = releasePreferGnu(cands)
 	}
@@ -230,14 +185,12 @@ func releaseInstallableShape(name string) bool {
 		}
 	}
 	// Otherwise it is a bare binary if it carries no file extension, and
-	// "carries no extension" cannot be path.Ext: measured on the corpus,
-	// mint publishes `mint-0.29.0-linux-x86_64`, whose last dot-suffix
-	// path.Ext reports as ".0-linux-x86_64", so the version's own dots
-	// made a bare binary read as metadata.
-	//
-	// A real extension is alphanumeric. That is what separates `json`,
-	// `deb`, `sig` and `sha256` from `0-linux-x86_64`, and it needs no
-	// list of the metadata formats of the day.
+	// "carries no extension" cannot be path.Ext: mint publishes
+	// `mint-0.29.0-linux-x86_64`, whose last dot-suffix path.Ext reports
+	// as ".0-linux-x86_64", so the version's own dots made a bare binary
+	// read as metadata. A real extension is alphanumeric instead, which
+	// separates `json`/`deb`/`sha256` from `0-linux-x86_64` with no list
+	// of metadata formats needed.
 	return releaseTrailingExt(lower) == ""
 }
 
@@ -285,15 +238,12 @@ func releaseRejectForeignOS(cands []string) []string {
 	return out
 }
 
-// releaseSelectArch narrows to the host architecture.
-//
-// Matching is on token BOUNDARIES, not substrings, and that is not
-// pedantry: `strings.Contains(name, "x64")` matches every `linux64`
-// asset, so a substring test silently selects an asset for the wrong
-// architecture on a name that never mentioned one.
-//
-// An asset naming no architecture survives, since a release with one
-// linux binary for both architectures is common.
+// releaseSelectArch narrows to the host architecture. Matching is on
+// token BOUNDARIES, not substrings: `strings.Contains(name, "x64")`
+// matches every `linux64` asset, silently selecting the wrong
+// architecture on a name that never mentioned one. An asset naming no
+// architecture survives (a release with one linux binary for both is
+// common).
 func releaseSelectArch(cands []string, goarch string) []string {
 	want := releaseArchTokens[goarch]
 	foreign := releaseForeignArch[goarch]
@@ -341,21 +291,15 @@ func releasePreferGnu(cands []string) []string {
 	return cands
 }
 
-// releasePreferNativeOS narrows to the assets that name THIS OS, when any
-// do.
+// releasePreferNativeOS narrows to the assets that name THIS OS, when
+// any do. Foreign-OS rejection above cannot make this call: it leaves
+// both the ones naming linux and the ones naming nothing, and a name
+// that says nothing may be a source archive — ethereum/solidity
+// publishes solc-static-linux beside solidity_<version>.tar.gz of the
+// sources, whose stem happens to match the tool name.
 //
-// Foreign-OS rejection above cannot make this call: it removes the assets
-// naming somebody else's OS and leaves both the ones naming linux and the
-// ones naming nothing. Between those two, a name that says linux is a
-// build for linux, while a name that says nothing may be a source archive
-// — ethereum/solidity publishes solc-static-linux beside a
-// solidity_<version>.tar.gz of the sources, and the source archive is the
-// one whose stem matches the tool name.
-//
-// Abstains when nothing names the OS, which is the common case and the
-// reason it is a preference rather than a filter: most releases name the
-// platform in the architecture token alone, or not at all (yt-dlp ships
-// exactly `yt-dlp`).
+// Abstains when nothing names the OS (the common case: most releases
+// name the platform in the architecture token alone, or not at all).
 func releasePreferNativeOS(cands []string) []string {
 	var native []string
 	for _, a := range cands {
@@ -369,28 +313,20 @@ func releasePreferNativeOS(cands []string) []string {
 	return cands
 }
 
-// releasePickBest breaks a remaining tie.
-//
-// Name similarity first, then length. Length alone was measured picking
-// wrong on real releases: a PKCS#11 library over the infisical CLI,
-// restatectl over restate-cli, and a legacy gam build over the glibc2.39
-// one. Preferring the asset whose stem best matches the tool name fixes
-// all three, and length remains the tie-break under it.
+// releasePickBest breaks a remaining tie: name similarity first, then
+// length. Length alone was measured picking wrong on real releases (a
+// PKCS#11 library over the infisical CLI, restatectl over restate-cli);
+// preferring the best-matching stem fixes it.
 //
 // Similarity is scored against EVERY name the tool is known by, best
-// wins, and the ORDER of that list breaks a tie. A registry name is a
-// catalog label and the asset is named after what upstream built:
-// `transifex` ships `tx-linux-amd64.tar.gz`, `graphite` ships `gt-linux`,
-// and scoring only the label gives those assets nothing to match. Both
-// directions occur in one corpus — babashka's binary is `bb` and its asset
-// is `babashka-…` — so neither name can be the only one scored.
+// wins, list ORDER breaking a tie: `transifex` ships `tx-linux-…` and
+// babashka's binary is `bb` while its asset is `babashka-…`, so neither
+// the label nor the executable name alone can be scored.
 //
-// The label ranking first is what keeps rancher/k3k's two binaries apart:
-// the tool is `k3kcli`, whose executable the registry calls `k3k`, and the
-// release publishes `k3kcli-linux-amd64` (the CLI) beside
-// `k3k-linux-amd64` (the server). Both score 3, one on the label and one
-// on the executable name, and only the label's precedence picks the CLI
-// the entry is actually for.
+// Label ranking first is what keeps rancher/k3k's `k3kcli-linux-amd64`
+// (the CLI) apart from `k3k-linux-amd64` (the server): both score 3,
+// one on the label and one on the executable name, and only the label's
+// precedence picks the CLI the entry is actually for.
 func releasePickBest(cands, names []string) string {
 	best := cands[0]
 	bestScore, bestName := releaseNameAffinity(best, names)
@@ -458,15 +394,11 @@ func releaseStem(name string) string {
 	return name
 }
 
-// releaseChecksumFor finds a digest source for the chosen asset:
-// a per-asset sibling first, then a manifest listing many files.
-//
-// A sibling is preferred because it needs no parsing and cannot be
-// confused with another asset's line. Measured over the corpus, a
-// manifest covers 38 of 144 repositories and per-asset siblings add 22
-// more, so roughly 60 of 147 releases can be verified at all and the rest
-// install on the transport's word. That is reported per entry rather than
-// hidden (see ToolStatus.Checksum).
+// releaseChecksumFor finds a digest source for the chosen asset: a
+// per-asset sibling first (needs no parsing, cannot be confused with
+// another asset's line), then a manifest. Roughly 60 of 147 releases
+// can be verified at all; the rest install on the transport's word,
+// reported per entry rather than hidden (see ToolStatus.Checksum).
 func releaseChecksumFor(assets []string, chosen string) (name string, isManifest bool) {
 	for _, suffix := range []string{".sha256", ".sha256sum", ".sha256.txt"} {
 		want := chosen + suffix
@@ -493,15 +425,12 @@ func releaseChecksumFor(assets []string, chosen string) (name string, isManifest
 }
 
 // hasAnyToken reports whether name contains any of the tokens as a whole
-// token, bounded by a separator or the ends of the name.
-//
-// The boundary is what makes this correct rather than approximate, in
-// both directions. A plain substring test matches "x64" inside "linux64",
-// so a name mentioning no architecture would read as amd64. But splitting
-// the name into fields is equally wrong: the separators include '_', so
-// "mint-0.29.0-linux-x86_64" splits into x86 and 64 and the token
-// "x86_64" can never match anything. Measured on the corpus, that alone
-// lost mint on both architectures.
+// token, bounded by a separator or the ends of the name. The boundary
+// matters in both directions: a plain substring test matches "x64"
+// inside "linux64", but splitting into fields is equally wrong (the
+// separators include '_', so "mint-0.29.0-linux-x86_64" splits into x86
+// and 64 and "x86_64" can never match) — that alone lost mint on both
+// architectures.
 func hasAnyToken(name string, tokens []string) bool {
 	hay := strings.ToLower(releaseStem(name))
 	for _, t := range tokens {
@@ -546,21 +475,16 @@ func releaseBoundary(s string, i int) bool {
 }
 
 // ReleaseHints are the install hints a registry entry carries for a
-// release-backed tool, compiled into the catalog rather than guessed.
+// release-backed tool, compiled into the catalog rather than guessed:
+// the four fields (of 26 hint-bearing entries) that state something the
+// heuristic cannot derive from a file name alone — which of several
+// binaries in one repository is this tool, and where the executable
+// sits inside the artifact.
 //
-// 26 of the affected registry entries ship at least one hint. These are
-// the four that state something the heuristic cannot derive from a file
-// name: which of several binaries in one repository is this tool, and
-// where the executable sits inside the artifact.
-//
-// The registry's `asset_pattern` is deliberately NOT among them, and that
-// is a least-mechanism call rather than an omission. Its 8 users write
-// three different dialects (Tera `{{ arch(x64='amd64') }}`, mise's own
-// `{amd64_arch}` braces, and shell globs), one of them carries a Tera
-// `{% if %}` block, and consuming any of it means shipping a template
-// evaluator this library declined for the 10 `http:` entries. Measured
-// against every one of those repositories' real release file lists, the
-// heuristic in release.go already picks the right asset for all 8, so the
+// The registry's `asset_pattern` is deliberately NOT among them
+// (least-mechanism, not omission): its 8 users write three different
+// template dialects, and the heuristic already picks the right asset
+// for all 8 against their real release file lists, so a template
 // evaluator would buy nothing.
 type ReleaseHints struct {
 	// Matching narrows the candidate set by substring BEFORE the heuristic
@@ -576,32 +500,25 @@ type ReleaseHints struct {
 	Bin     string `json:"bin,omitempty"`
 	BinPath string `json:"bin_path,omitempty"`
 	// Bins are the names this tool publishes on PATH, carried only when
-	// they are not just the tool's own name — 40 of the 158 release-backed
-	// entries, and the single biggest correctness item in this struct. A
+	// they differ from the tool's own name (40 of 158 entries) — a
 	// release ships whatever upstream's build produced: `qdns` is the
-	// registry's name for `natesales/q`, whose binary is `q`, and `unison`
-	// ships `ucm`. Without this the install links a name the artifact does
-	// not contain.
+	// registry's name for `natesales/q`, whose binary is `q`.
 	//
 	// A set rather than one name because 14 of those 40 publish several
-	// (kotlin ships six kotlinc variants). An absent one is skipped rather
-	// than fatal: the registry and the release move independently, so a
-	// list that has gone stale must still install what IS there.
+	// (kotlin ships six kotlinc variants). An absent one is skipped
+	// rather than fatal, since a stale list must still install what IS
+	// there.
 	Bins []string `json:"bins,omitempty"`
 }
 
-// The registry's `rename_exe` is deliberately NOT among these, on the same
-// least-mechanism grounds as asset_pattern and with the same measurement
-// behind it. It names the name to PUBLISH, and across all 7 entries that
-// carry one it states something the publish set already says: 4 repeat the
-// tool's own name (swiftformat, tanzu, yt-dlp, helm-diff) and 3 repeat an
-// entry in Bins (aws-amplify, oh-my-pi, podman). An earlier draft read it
-// as the name to look for inside the artifact, which is the opposite of
-// what it means, and that mistake is what sent the swiftformat install
+// The registry's `rename_exe` is deliberately NOT among these
+// (least-mechanism): it names the name to PUBLISH, which the publish set
+// already states across all 7 entries carrying one. Reading it as the
+// name to look for INSIDE the artifact — the opposite of what it means —
+// is a mistake that already shipped: it sent the swiftformat install
 // looking for a file called `swiftformat` in an archive holding
 // `swiftformat_linux`. The sole-executable fallback in searchInstallTree
-// is what actually resolves that shape, for every release rather than the
-// 7 the registry annotated.
+// resolves that shape for every release, not just the 7 annotated ones.
 
 // IsZero reports whether the hints carry nothing, so a catalog entry can
 // omit the object entirely rather than emitting an empty one.
@@ -615,13 +532,10 @@ func (h *ReleaseHints) IsZero() bool {
 
 // chooseReleaseAssetWithHints applies the selection hint before falling
 // back to the heuristic, and hands the heuristic every name the tool
-// answers to.
-//
-// A hint that narrows to something is authoritative: it is upstream's own
-// statement about its own release. A hint that matches NOTHING is ignored
-// rather than fatal, because the registry and the release move
-// independently, and a hint that stopped matching is exactly the case the
-// heuristic exists for.
+// answers to. A hint that narrows to something is authoritative; one
+// that matches NOTHING is ignored rather than fatal, since the registry
+// and the release move independently and a stopped-matching hint is
+// exactly the case the heuristic exists for.
 func chooseReleaseAssetWithHints(assets []string, tool, goarch string, hints *ReleaseHints) (assetChoice, error) {
 	names := []string{tool}
 	if hints != nil {

@@ -13,17 +13,11 @@ const (
 	JobCancelled = "cancelled"
 )
 
-// CancelCause identifies WHO cancelled a job. The cause is known inside
-// the engine at every cancellation site, and it is the distinction a
-// consumer needs to decide whether a cancellation deserves an alert: a
-// shutdown cancellation is routine (the process is going down and the
-// engine cancels what it was running), a caller cancellation is a
-// deliberate act. Without it both arrive as a bare JobCancelled and the
-// consumer has to invent its own shutdown flag.
-//
-// Meaningful only for a job whose State is JobCancelled — a job that
-// finished, failed, or timed out always carries CancelUnknown, even if a
-// cancellation was requested and lost the race.
+// CancelCause identifies WHO cancelled a job: a shutdown cancellation is
+// routine, a caller cancellation is a deliberate act a consumer may want
+// to alert on. Meaningful only for a job whose State is JobCancelled —
+// a job that finished, failed, or timed out always carries
+// CancelUnknown, even if a cancellation was requested and lost the race.
 type CancelCause string
 
 const (
@@ -96,30 +90,19 @@ type ToolInfo struct {
 	Latest           string `json:"latest,omitempty"`
 	LastError        string `json:"last_error,omitempty"`
 	// Checksum reports how the INSTALLED artifact's integrity was
-	// established, copied from ToolStatus.Checksum: "verified" when the
-	// definition declared a checksum source and the digest matched,
-	// "unverified" when it declared none. Empty means the question does
-	// not apply — the tool is not installed, or its source has no
-	// artifact to checksum (npm, pip, cargo, go, apt, manual), where the
-	// package manager or the distro archive owns verification.
-	//
-	// A consumer showing a "no checksum" badge reads THIS, not the
-	// source kind: whether verification happened is a fact about the
-	// install that ran, and 252 of the catalog's aqua entries declare no
+	// established (copied from ToolStatus.Checksum): "verified" or
+	// "unverified" per the definition's declared checksum source, empty
+	// when the question does not apply (not installed, or a source with
+	// no artifact to checksum). A "no checksum" badge reads THIS, not
+	// the source kind — 252 of the catalog's aqua entries declare no
 	// checksum while the other 402 do.
 	Checksum string   `json:"checksum,omitempty"`
 	Requires []string `json:"requires,omitempty"`
 	// Dependents names the ENABLED entries that require this tool,
-	// directly (their Requires) or as the implied backend of their source
-	// kind. It is the answer a consumer needs BEFORE it sends a disable
-	// or a remove: without it, the only way to learn that typescript is
-	// holding up typescript-language-server is to send the request and
-	// read the 409 — a round trip whose refusal a browser also records as
-	// a console error, for an outcome that was never exceptional.
-	//
-	// Advisory, and deliberately not a substitute for the refusal: the
-	// engine re-derives the set under the manifest lock, so a consumer
-	// acting on a stale inventory is still refused.
+	// directly or as the implied backend of their source kind: what a
+	// consumer needs BEFORE sending a disable/remove, instead of
+	// learning it from a 409. Advisory only — the engine re-derives the
+	// set under the manifest lock, so a stale inventory is still refused.
 	Dependents []string `json:"dependents,omitempty"`
 	Pin        bool     `json:"pin,omitempty"`
 	Disabled   bool     `json:"disabled,omitempty"`
@@ -135,15 +118,11 @@ type ToolInfo struct {
 	Installing bool `json:"installing"`
 }
 
-// AptPackage is one installed Debian package this engine does not manage:
-// something a user or an agent installed in the shell. Read-only — there is
-// no manifest row behind it, so nothing updates it and nothing can remove it
-// from here.
-//
-// Reported so a consumer's tools surface can answer "what is on this box"
-// without pretending the engine installed it. A reader who wants one managed
-// adds it by name, which creates the row; until then the engine touches
-// neither the package nor apt's record of it.
+// AptPackage is one installed Debian package this engine does not
+// manage: something a user or an agent installed in the shell.
+// Read-only, with no manifest row behind it. Reported so a consumer's
+// tools surface can answer "what is on this box" without pretending the
+// engine installed it.
 type AptPackage struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`

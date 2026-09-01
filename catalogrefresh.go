@@ -211,15 +211,11 @@ func (e *Engine) prepareCatalog(c *Catalog) (*Catalog, error) {
 }
 
 // overlaidCopy applies the consumer's overlay files, in order, to a
-// copied catalog and returns the copy; the input is never mutated, so
-// an overlay failure is transactional (callers keep the original).
-// Runtime leniency for DISPLAY patches: a source-less patch naming a
-// tool the catalog no longer has is SKIPPED with a warning instead of
-// failing the load — a cosmetic description patch must never veto
-// catalog freshness when an upstream entry disappears. Everything else
-// stays strict: source-bearing entries replace/create wholesale, and
-// aqua entries without embedded definitions still error (no registry
-// checkout exists at runtime; resolveAqua is nil).
+// copied catalog; the input is never mutated, so a failure is
+// transactional. A source-less DISPLAY patch naming a vanished tool is
+// SKIPPED with a warning rather than failing the load — a cosmetic
+// patch must never veto freshness. Source-bearing entries and
+// definition-less aqua entries (no runtime registry checkout) stay strict.
 func (e *Engine) overlaidCopy(c *Catalog) (*Catalog, error) {
 	cp := &Catalog{
 		Refs:      c.Refs,
@@ -393,15 +389,12 @@ func (e *Engine) runCatalogRefresh(ctx context.Context, output func(string)) (er
 	return nil
 }
 
-// startCatalogSchedule launches the engine-owned refresh loop when the
-// config asks for one: one refresh per interval, with jitter. There is
-// deliberately NO fire-on-start: the schedule starts inside New, and an
-// immediate enqueue would land AHEAD of the consumer's boot-critical
-// jobs on the single-flight queue (web-terminal-kiro gates session
-// creation on its boot reconcile). Consumers trigger the boot fetch
-// explicitly via RefreshCatalog once their boot work is enqueued. The
-// loop only ENQUEUES; execution serializes with all other tool work on
-// the job worker. Close stops the loop and waits for it.
+// startCatalogSchedule launches the loop for CatalogRefresh.Interval
+// (see its field doc for the no-fire-on-start contract). Starting
+// inside New, an immediate enqueue would land AHEAD of the consumer's
+// boot-critical jobs on the single-flight queue (web-terminal-kiro
+// gates session creation on its boot reconcile) — the reason that
+// contract exists. The loop only ENQUEUES; Close stops and waits for it.
 func (e *Engine) startCatalogSchedule() {
 	if e.refresh == nil || e.refresh.Interval <= 0 {
 		return

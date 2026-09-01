@@ -51,11 +51,8 @@ func TestAptValidName(t *testing.T) {
 	}
 }
 
-// TestAptStatusFrom is the five-state dpkg table. The middle row is the
-// defect this parser exists for: a package removed with its config files
-// left behind still reports a version and exits 0, so a version-only
-// read calls it installed. After a container recreate that mistake scales
-// to every apt entry at once.
+// TestAptStatusFrom is the five-state dpkg table; the middle row is the
+// defect aptStatusFrom exists to catch (see its doc comment).
 func TestAptStatusFrom(t *testing.T) {
 	cases := []struct {
 		state    string
@@ -104,10 +101,8 @@ func TestAptStatusFrom_AgreesWithRealDpkg(t *testing.T) {
 	}
 }
 
-// TestAptCandidateFrom covers the version an apt row displays. "(none)"
-// is apt's answer for a name it knows and cannot install, so recording
-// it as a version would put a pinned entry on a package that can never
-// resolve.
+// TestAptCandidateFrom covers aptCandidateFrom's "(none)" rejection (see
+// its doc comment).
 func TestAptCandidateFrom(t *testing.T) {
 	const installable = `python3:
   Installed: (none)
@@ -131,10 +126,8 @@ func TestAptCandidateFrom(t *testing.T) {
 	}
 }
 
-// TestAptArchivesLockBusy pins the one apt failure worth retrying.
-// DPkg::Lock::Timeout waits on the frontend lock and fails immediately on
-// the archives lock, so treating every lock failure alike would either
-// retry things that will never succeed or give up on the one that would.
+// TestAptArchivesLockBusy covers the one lock failure worth retrying
+// (see aptGetArgs's doc comment for why the others are not).
 func TestAptArchivesLockBusy(t *testing.T) {
 	busy := []string{
 		"E: Could not get lock /var/cache/apt/archives/lock. It is held by process 123",
@@ -157,13 +150,8 @@ func TestAptArchivesLockBusy(t *testing.T) {
 	}
 }
 
-// TestAptKnownName_UsesTheIndexAndFallsBackConservatively covers the gate
-// that stops an unbounded install. A token containing an apt expansion
-// character that matches no literal package is retried by apt as an
-// UNANCHORED REGEX: measured on apt 3.0.3, `apt-get install -s -- 'jq.'`
-// plans 1366 packages from 126 matched names, and apt has no flag to turn
-// that off. So the rule is to hand apt nothing not already known to be a
-// literal name.
+// TestAptKnownName_UsesTheIndexAndFallsBackConservatively covers
+// knownName's unbounded-install gate (see its doc comment).
 func TestAptKnownName_UsesTheIndexAndFallsBackConservatively(t *testing.T) {
 	idx := newAptIndex(slog.Default())
 	idx.names = map[string]string{"gcc": "GNU C compiler", "docker.io": "Linux container runtime"}
@@ -194,16 +182,9 @@ func TestAptKnownName_UsesTheIndexAndFallsBackConservatively(t *testing.T) {
 	}
 }
 
-// TestAptFallbackAllows covers the check used when no index can be loaded
-// at all. The direction is deliberate: refusing a real package until an
-// index arrives costs a retry, while accepting an expandable name costs an
-// unbounded root install, so the fallback errs toward refusal.
-//
-// It is tested as a predicate rather than through the oracle because the
-// oracle tries to LOAD an index first, and on a Debian host it succeeds,
-// so the branch is unreachable end to end. The alternative would be a
-// production seam to disable loading, which is a worse trade than testing
-// the decision directly.
+// TestAptFallbackAllows covers the no-index fallback directly rather
+// than through knownName: the oracle succeeds at loading an index on a
+// Debian host, making the branch unreachable end to end.
 func TestAptFallbackAllows(t *testing.T) {
 	for _, ok := range []string{"gcc", "libc6-dev", "nosuchpackage", "make"} {
 		if err := aptFallbackAllows(ok); err != nil {
@@ -217,10 +198,8 @@ func TestAptFallbackAllows(t *testing.T) {
 	}
 }
 
-// TestParseAptAvailable reads the stanza format apt-cache dumpavail
-// emits. Only the name and the short description are kept: the full
-// stanza set is ~200 MB of text and a search result needs neither the
-// dependencies nor the long description.
+// TestParseAptAvailable covers the stanza format apt-cache dumpavail
+// emits (see parseAptAvailable's doc comment for the field-scope why).
 func TestParseAptAvailable(t *testing.T) {
 	const doc = `Package: gcc
 Version: 4:14.2.0-1
@@ -265,11 +244,8 @@ Version: 1.0
 	}
 }
 
-// TestRankAptNames_PutsTheShortestPrefixMatchFirst is the apt half of the
-// ranking measurement. Ordering prefix matches by name alone put python3
-// 909th of 6,607 hits for "python" behind 908 alphabetically-earlier
-// python-* packages, which is what made an earlier design reach for a
-// Section filter that dropped python3 entirely.
+// TestRankAptNames_PutsTheShortestPrefixMatchFirst is the apt half of
+// CompareRank's tie-break measurement (see its doc comment).
 func TestRankAptNames_PutsTheShortestPrefixMatchFirst(t *testing.T) {
 	names := map[string]string{
 		"python3":         "interactive high-level object-oriented language",
@@ -300,10 +276,8 @@ func TestRankAptNames_PutsTheShortestPrefixMatchFirst(t *testing.T) {
 	}
 }
 
-// TestAptIndexSearch_DistinguishesUnavailableFromEmpty covers the pair of
-// answers that look identical and mean opposite things. Reporting "no
-// results" for an index that was never loaded is the exact shape of the
-// original catalog bug: the user reads it as "this tool does not exist".
+// TestAptIndexSearch_DistinguishesUnavailableFromEmpty covers the
+// unavailable-vs-empty distinction Search's doc comment explains.
 func TestAptIndexSearch_DistinguishesUnavailableFromEmpty(t *testing.T) {
 	empty := newAptIndex(slog.Default())
 	if hits, ok := empty.Search("gcc"); ok || hits != nil {
@@ -325,11 +299,9 @@ func TestAptIndexSearch_DistinguishesUnavailableFromEmpty(t *testing.T) {
 	}
 }
 
-// TestSearchApt_ReportsUnavailableRatherThanEmpty covers the engine's own
-// apt surface. The distinction is the whole point: an empty result and an
-// unconsultable package list look identical to a client, and reporting the
-// second as the first is what made a user searching for python conclude
-// the tool did not exist.
+// TestSearchApt_ReportsUnavailableRatherThanEmpty covers the engine's
+// SearchApt surface for the unavailable-vs-empty distinction Search's
+// doc comment explains.
 func TestSearchApt_ReportsUnavailableRatherThanEmpty(t *testing.T) {
 	dir := t.TempDir()
 	e, err := New(&Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
@@ -354,12 +326,8 @@ func TestSearchApt_ReportsUnavailableRatherThanEmpty(t *testing.T) {
 	}
 }
 
-// TestSearchApt_FillsTheCandidateForTheCappedSet pins where the version
-// on an apt row comes from. It is resolved per result rather than in the
-// index because it costs one apt-cache call each: eight is nothing,
-// 68,799 would be absurd. Without it a client cannot show that the
-// catalog offers one version of a tool and Debian another, which is the
-// reason both blocks are shown at all.
+// TestSearchApt_FillsTheCandidateForTheCappedSet covers AptHit.Candidate
+// (see its doc comment for why it is resolved per-result).
 func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
 	if !AptAvailable() {
 		t.Skip("apt is not usable on this host")
@@ -389,13 +357,10 @@ func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
 	}
 }
 
-// TestAptSetHold covers the call that makes a pinned apt row real.
-//
-// Manifest-level pinning already stops this engine bumping the row, but apt
-// upgrades a package as a DEPENDENCY of some other install, so without a
-// dpkg hold a pinned package can move underneath a pin that reported it
-// frozen. The name still goes through the install grammar gate: a name this
-// engine would refuse to install is one it must not mark either.
+// TestAptSetHold covers why a pin needs a dpkg hold: apt can still
+// upgrade a package as a DEPENDENCY of some other install, moving it
+// underneath a pin that reported it frozen. The name still goes
+// through the install grammar gate.
 func TestAptSetHold(t *testing.T) {
 	t.Run("hold and unhold are distinct actions", func(t *testing.T) {
 		for _, tc := range []struct {
@@ -458,18 +423,10 @@ func TestAptSetHold(t *testing.T) {
 	})
 }
 
-// TestParseDpkgPackages covers what a reader is shown of the host's package
-// set, which is decided by two exclusions that are each insufficient alone.
-//
-// apt's auto-installed record removes DEPENDENCIES — measured on a Debian
-// trixie container, 438 of 536 packages — and the base priorities remove what
-// is left of the OS, which is manually marked because debootstrap marks it so.
-// What survives is what a Dockerfile asked for plus what a user or an agent
-// installed later, which is the whole question this group answers.
+// TestParseDpkgPackages covers the two exclusions decided in
+// aptBasePriorities's doc comment (dependencies via auto, base system
+// via priority) plus the tab-separated empty-Priority column shift.
 func TestParseDpkgPackages(t *testing.T) {
-	// Tab-separated, mirroring the -f format: a Priority can be EMPTY, and
-	// with spaces an empty field shifts every column after it so a priority
-	// would be read as a status.
 	dump := []byte(strings.Join([]string{
 		"curl\t8.14.1-2\tinstalled\toptional\tno",            // a Dockerfile install
 		"jq\t1.7.1-3\tinstalled\toptional\tno",               // ditto

@@ -1,34 +1,18 @@
 // Package toolbelt provisions developer tools onto a persistent volume,
-// declaratively. A manifest (tools.json) records intent: which tools, at
-// which versions, enabled or disabled. A compiled catalog carries install
-// knowledge (sources, artifact templates, checksum locations,
-// dependencies). The Engine reconciles installed state against intent
-// through a single-flight job queue: enabled-but-missing tools are
-// installed, disabled-but-installed tools are uninstalled (their template
-// kept), unmanaged files are never touched.
+// declaratively. A manifest (tools.json) records intent; a compiled
+// catalog carries install knowledge; the Engine reconciles installed
+// state against intent through a single-flight job queue, never
+// touching unmanaged files.
 //
-// Data files (all under the consumer's persistent config volume):
-//
-//	<ConfigDir>/tools.json       — the manifest: user intent. Toolbelt is
-//	                               the only writer, but out-of-band hand
-//	                               edits are supported by design (the file
-//	                               is re-read on every operation).
-//	<ConfigDir>/tools-state.json — engine-owned machine state (installed
-//	                               version, owned bin names, last error).
+//	<ConfigDir>/tools.json       — user intent, re-read every operation.
+//	<ConfigDir>/tools-state.json — engine-owned machine state.
 //	<ToolsDir>/opt/<name>/<ver>/ — versioned install trees.
 //	<ToolsDir>/bin               — the single PATH dir (symlinks).
 //
-// The catalog (CatalogPath, compiled at image build by cmd/toolcatalog) is
-// read-only environment data; a missing catalog degrades to manual and
-// ecosystem sources only, and entries that need catalog knowledge fail
-// their jobs with a named error.
-//
-// Install sources: aqua-registry artifact definitions (with upstream
-// checksum verification when the definition declares a source), npm, pip
-// (via uv), cargo, go install, and a manual bash escape hatch. No external
-// package-manager binary ships with the library; ecosystem backends are
-// themselves installable tools (npm needs node, pip needs uv, ...), and
-// the engine adopts those backend dependencies automatically.
+// CatalogPath (compiled by cmd/toolcatalog) is read-only; a missing
+// catalog degrades to manual and ecosystem sources only. Install
+// sources: aqua-registry, npm, pip (via uv), cargo, go install, and a
+// manual bash escape hatch.
 package toolbelt
 
 import (
@@ -88,58 +72,33 @@ type Config struct {
 	// the first-boot/offline fallback: a valid refresh cache under
 	// ConfigDir takes precedence at construction.
 	CatalogPath string
-	// Refresh, when non-nil, enables runtime catalog refresh: the
-	// engine fetches the published catalog at Refresh.URL (on the
-	// engine-owned schedule when Interval is positive, and on demand
-	// via RefreshCatalog), verifies it against Refresh.Require, caches
-	// it under ConfigDir, and swaps it in atomically. The last good
-	// catalog stands on any failure. Nil keeps the baked catalog
-	// static for the process lifetime (the pre-refresh behavior).
+	// Refresh, when non-nil, enables runtime catalog refresh: fetches
+	// the published catalog at Refresh.URL (on the engine-owned
+	// schedule, or on demand via RefreshCatalog), verifies it against
+	// Refresh.Require, caches it under ConfigDir, and swaps it in
+	// atomically. The last good catalog stands on any failure. Nil
+	// keeps the baked catalog static for the process lifetime.
 	Refresh *CatalogRefresh
 	// CatalogOverlays are consumer overlay JSON files (see
-	// ApplyOverlay) applied in order to every catalog the engine
-	// loads: the baked file, the refresh cache, and each fetched
-	// refresh. This keeps app-specific display patches independent of
-	// the published artifact. Entries added by a runtime overlay must
-	// embed any aqua definition inline (there is no registry checkout
-	// to resolve from at runtime).
+	// ApplyOverlay) applied to every catalog the engine loads, keeping
+	// app-specific display patches independent of the published
+	// artifact. A runtime overlay must embed any aqua definition inline
+	// — there is no registry checkout to resolve from at runtime.
 	CatalogOverlays []string
 	// System names image-baked binaries surfaced read-only in
 	// Inventory's System group (informational; not managed).
 	System []string
 	// KeepVersions is how many SUPERSEDED versions of a tool to retain
-	// under <ToolsDir>/opt/<name>/ when an install publishes a new one
-	// (the current version is always kept). An update that turns out bad
-	// can then be rolled back to a tree that is still on disk. 0 (unset)
-	// means DefaultKeepVersions; a negative value keeps none, pruning
-	// every superseded tree as soon as the new one is committed.
+	// under <ToolsDir>/opt/<name>/ (the current version is always kept),
+	// so a bad update can be rolled back. 0 means DefaultKeepVersions; a
+	// negative value keeps none.
 	KeepVersions int
 	// VerifyRootIntegrity makes New REFUSE to construct an Engine over
-	// managed roots it cannot safely execute from. Off by default (the
-	// zero value is the pre-check behavior, byte for byte).
-	//
-	// Turn it on when the tool tree lives on an operator-controlled
-	// persistent volume and the process runs privileged: the install
-	// probe executes what it finds in <ToolsDir>/bin, and that dir goes
-	// first on PATH for package-manager runs, so a managed root that is
-	// a symlink elsewhere or that a non-owner can write is a
-	// code-execution surface.
-	//
-	// Checked, in order: ConfigDir, ToolsDir, and <ToolsDir>/{bin, opt,
-	// npm, npm/bin, python, python/bin}. A path that does not exist yet
-	// is skipped (a fresh volume has almost none of them). A path that
-	// exists must be a real directory — never a symlink — that no group
-	// or other principal can write, and (ConfigDir excepted, it is
-	// legitimately elsewhere) that still resolves inside the tool tree.
-	// An unreadable path fails closed.
-	//
-	// The check REPORTS ONLY: it never chmods, creates, repairs or
-	// deletes anything, because tightening an operator's volume from
-	// inside a library is not the library's call. Repair belongs to the
-	// consumer's entrypoint. A failure returns ErrRootIntegrity
-	// (errors.Is) as a *RootIntegrityError carrying every offending path
-	// and reason (errors.As), logged at Error before New returns, so a
-	// consumer can choose between fatal and degraded-but-running.
+	// managed roots it cannot safely execute from (see rootintegrity.go).
+	// Off by default; turn it on when the tool tree lives on an
+	// operator-controlled volume and the process runs privileged. A
+	// failure returns ErrRootIntegrity as a *RootIntegrityError
+	// (errors.As), logged at Error before New returns.
 	VerifyRootIntegrity bool
 }
 
@@ -240,12 +199,10 @@ func newEngineClient() *http.Client {
 // error) and launches the job worker.
 //
 // With Config.VerifyRootIntegrity set, the managed roots are inspected
-// FIRST — before any file is written, any directory created, or the job
-// worker started — and an unfit root refuses construction with
-// ErrRootIntegrity. New is the seam on purpose: Inventory and
-// EnsureInstalled probe (and therefore execute) synchronously, so gating
-// only the reconcile queue would leave those paths open, while no Engine
-// at all closes every one of them.
+// FIRST — before any file is written or directory created — and an
+// unfit root refuses construction with ErrRootIntegrity. New is the
+// seam on purpose: Inventory and EnsureInstalled probe synchronously
+// too, so gating only the reconcile queue would leave those paths open.
 func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
@@ -330,17 +287,13 @@ func (e *Engine) Close() {
 
 // DefaultSeed returns the shared starter manifest: the officially
 // supported language servers for Go, TypeScript, and Python plus the
-// GitHub CLI, all disabled. Nothing downloads until an entry is
-// enabled; install knowledge (source, dependencies, version) hydrates
-// from the catalog at enable time.
+// GitHub CLI, all disabled. Nothing downloads until enabled; install
+// knowledge hydrates from the catalog at enable time.
 //
-// Backend runtimes (node, go) and required packages (typescript) are
-// deliberately NOT seeded, because the engine adopts a missing
-// dependency at install time and a seeded row would only be a second
-// place for its version to drift. A seeded-but-disabled dependency is no
-// longer a trap either — the install plan ENABLES an obligatory
-// dependency rather than refusing through it — so this is a leanness
-// choice now, not a correctness one. Returns a fresh copy on every call.
+// Backend runtimes and required packages are deliberately NOT seeded:
+// the engine adopts a missing dependency at install time, so a seeded
+// row would only be a second place for its version to drift. Returns a
+// fresh copy on every call.
 func DefaultSeed() *Manifest {
 	return &Manifest{
 		Version: ManifestVersion,

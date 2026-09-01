@@ -189,14 +189,10 @@ func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool)
 }
 
 // noteCancelLocked attributes a cancellation to cause. Caller holds the
-// queue lock.
-//
-// Two rules keep the attribution honest. A job that already reached a
-// terminal state is left alone: a Close that arrives after the worker
-// finalized a successful job must not stamp a cancel cause on it. And
-// the FIRST cause wins: when an operator cancels a job and the engine
-// closes before the worker finalizes, the operator's cancel is why the
-// job stopped, so it stays attributed to the caller.
+// queue lock. A job already in a terminal state is left alone (a late
+// Close must not stamp a cancel cause on a finished job), and the
+// FIRST cause wins so a race between an operator cancel and shutdown
+// stays attributed to the operator.
 func (j *job) noteCancelLocked(cause CancelCause) {
 	if j.state != JobQueued && j.state != JobRunning {
 		return
@@ -297,15 +293,9 @@ func (q *jobQueue) InstallingSet() map[string]bool {
 }
 
 // setCovers records an install job's resolved plan and publishes the
-// change. Called from the worker, so it takes the queue lock for the same
-// reason the output callback does: InstallingSet reads the field
-// concurrently.
-//
-// The notification is the point, not a side effect. Resolving a plan is
-// when the manifest gains its adopted and newly-enabled rows, and it
-// happens AFTER the queued -> running transition, so without a
-// publication here a consumer holds a row set that predates the plan
-// until the job ends — which for a cold runtime is the whole download.
+// change. The publish matters: plan resolution happens after the
+// queued -> running transition, so without it a consumer holds a row
+// set that predates the plan until the job ends.
 func (q *jobQueue) setCovers(j *job, names []string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -428,15 +418,11 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 		q.onOutput(j.id, lines)
 	}
 	done := make(chan struct{})
-	// flushed closes after the ticker goroutine's FINAL flush() returns,
-	// and runOne waits on it before publishing the terminal state below.
-	// Without that wait, close(done) only SIGNALS the goroutine: its last
-	// flush() could still be inside q.onOutput while the finalize block
-	// and the worker's notifyLocked already reported the job finished, so
-	// a consumer (vibekit's tools panel) could receive tool_job_output
-	// lines AFTER the tool_job_changed that said the job was done
-	// (go-rulebook C20). flush() takes only outMu, never q.mu, so waiting
-	// here — outside the lock — cannot deadlock against the finalize.
+	// flushed closes after the ticker goroutine's FINAL flush() returns;
+	// runOne waits on it before publishing terminal state, or a consumer
+	// could see tool_job_output arrive after tool_job_changed said the
+	// job was done (go-rulebook C20). flush() takes only outMu, never
+	// q.mu, so waiting here cannot deadlock against the finalize.
 	flushed := make(chan struct{})
 	go func() {
 		defer close(flushed)

@@ -33,22 +33,14 @@ const (
 // not be able to grow the engine's heap.
 const probeOutputCap = 64 << 10
 
-// exitCouldNotExecute is the one exit status that is NOT an answer.
-// 127 is reserved end to end for "this program was not run": the
-// dynamic loader exits with it when a shared library is missing
-// (`error while loading shared libraries`), a shell exits with it when
-// a command or an interpreter cannot be found, and an unresolvable
-// shebang lands on it too. In every case `main` never ran, so the exit
-// status carries no claim about the tool.
-//
-// The probe grades every OTHER non-zero status as an answer on purpose
-// (a tool that does not understand --version still proved it can
-// execute), and this constant is what keeps that tolerance from
-// swallowing the opposite fact. Measured cost of the missing
-// distinction: a Node.js whose libatomic.so.1 was absent probed clean,
-// was recorded as installed, and every npm-sourced tool behind it then
-// failed with a bare `npm failed: exit status 127` naming the wrong
-// tool.
+// exitCouldNotExecute is the one exit status that is NOT an answer: 127
+// means the dynamic loader, shell, or shebang never ran `main` (missing
+// shared library, unresolvable interpreter), so it carries no claim
+// about the tool. Every other non-zero status is graded as an answer
+// (a tool that rejects --version still proved it can execute).
+// Measured cost of missing this distinction: a Node.js missing
+// libatomic.so.1 probed clean and every npm tool behind it then failed
+// naming the wrong tool.
 const exitCouldNotExecute = 127
 
 // defaultVersionArgs is what the probe runs when a definition declares
@@ -142,19 +134,13 @@ func (c *probeCache) forget(name string) {
 func (e *Engine) binDir() string { return filepath.Join(e.toolsDir, "bin") }
 
 // probeInstalled reports whether the tool is installed. Presence of
-// bin/<name> is necessary but not sufficient: every recorded bin (or the
-// derived probe name before the first status write) must exist AND the
-// tool's probe binary must answer when executed — and, when the
-// definition declares its version-reporting shape (Tool.VersionArgs),
-// the answer must contain the recorded version. A truncated download, a
-// wrong-architecture binary, a dangling symlink into a pruned version
-// dir, or a tool left at the wrong version therefore reads as NOT
-// installed, which routes it to a reinstall; a failed probe is never
-// fatal.
-//
-// A recorded bin the engine cannot execute at all (a data file a manual
-// install script placed in bin/) falls back to presence only and says so
-// at Warn rather than claiming the install was verified.
+// bin/<name> is necessary but not sufficient: the recorded bin must
+// exist AND execute, and when the definition declares its
+// version-reporting shape the answer must contain the recorded version
+// — so a truncated download, a wrong-architecture binary, a dangling
+// symlink, or the wrong version all read as NOT installed and route to
+// a reinstall. A bin the engine cannot execute at all falls back to
+// presence only and says so at Warn.
 func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeTool(name, t, s).OK
 }
@@ -190,20 +176,11 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	return v
 }
 
-// probeApt asks dpkg, because an apt package cannot be probed the way
-// every other source is.
-//
-// Two reasons, and each alone would be enough. A package may ship no
-// executable at all (libc6-dev), so there is nothing to run. And its
-// files are in /usr rather than the engine's bin dir, so the presence
-// check every other source starts with would look at the wrong place.
-//
-// This verdict is deliberately NOT cached. The other sources' cache is
-// keyed on a fingerprint of a file the engine owns, so it only changes
-// when the engine changes it; an apt package can be removed from under
-// the process by anyone with a shell in the container, and a recreate
-// removes every one of them at once. dpkg-query is a local database read,
-// so re-asking is cheap.
+// probeApt asks dpkg, because an apt package may ship no executable at
+// all (libc6-dev) and its files sit in /usr, not the engine's bin dir.
+// The verdict is deliberately NOT cached: unlike the other sources, an
+// apt package can be removed from under the process by anyone with a
+// container shell, and dpkg-query is a cheap local read.
 func (e *Engine) probeApt(pkg string) probeVerdict {
 	if !AptAvailable() {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "apt is unavailable on this host"}
@@ -235,11 +212,9 @@ func (e *Engine) logVerdict(name string, v probeVerdict) {
 }
 
 // runProbe executes the probe target under a hard timeout and grades the
-// answer. Exit status is deliberately not part of the grade, with one
-// exception: a tool that does not support --version still proves it can
-// execute, which is what the exec-only probe claims, but exit 127 proves
-// the opposite (see exitCouldNotExecute). When the version shape is
-// declared, the output must carry the recorded version.
+// answer. Exit status is not part of the grade except exit 127 (see
+// exitCouldNotExecute). When the version shape is declared, the output
+// must carry the recorded version.
 func (e *Engine) runProbe(target string, args []string, want string, declared bool) probeVerdict {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
@@ -300,9 +275,8 @@ func (e *Engine) execProbe(target string, args []string) (string, error) {
 	if err != nil && !isExit {
 		return out.String(), fmt.Errorf("%w: %w", errCannotExecute, err)
 	}
-	// The loader's own diagnostic is the only description of WHY the
-	// binary would not run, and it goes to stderr, so carry it: without
-	// it the verdict reads "exit status 127" and names no cause.
+	// The loader's own diagnostic (stderr) is the only description of
+	// why the binary would not run.
 	if isExit && exit.ExitCode() == exitCouldNotExecute {
 		return out.String(), fmt.Errorf("%w: %s", errCannotExecute, probeFailureDetail(out.String()))
 	}
@@ -352,17 +326,11 @@ func derivedProbeName(name string, t *Tool) string {
 
 // probeFingerprint identifies what is about to be probed, so a cached
 // verdict is only reused for the exact same binary, recorded version and
-// probe shape.
-//
-// The components are assembled with keyenc rather than concatenated, because
-// two of them can contain a separator and they are not separated by anything
-// that cannot: the resolved path is a filesystem path and the wanted version
-// is a manifest string, so a path containing the separator shifts the split
-// and one tool's fingerprint can be made to match another shape's. The arg
-// list nests by composition for the same reason a space-joined list is not
-// enough on its own: joining ["--version"] and ["--", "version"] to one string
-// loses the element boundary, so two different probe invocations would share a
-// verdict.
+// probe shape. Assembled with keyenc rather than concatenated: the
+// resolved path and the wanted version can both contain a separator, so
+// a raw join lets one tool's fingerprint collide with another's; the
+// arg list nests for the same reason (["--version"] vs ["--","version"]
+// must not share a joined form).
 func probeFingerprint(target, want string, args []string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {

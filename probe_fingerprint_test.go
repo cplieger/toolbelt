@@ -9,18 +9,11 @@ import (
 	"github.com/cplieger/keyenc"
 )
 
-// TestProbeFingerprintCannotBeForged pins that two different probe subjects
-// never share a fingerprint. The fingerprint gates the probe-verdict cache, so
-// a collision reuses one binary's verdict for another shape: a tool reported
-// working on the strength of a different tool's successful probe, or the
-// reverse.
-//
-// The previous form concatenated the components with a raw '|' and joined the
-// arg list with a space. Two of the components can contain a '|' — the resolved
-// path is a filesystem path, and the wanted version is a manifest string — and
-// they are adjacent to each other and to the arg join, so a path containing the
-// separator shifts the split. Each pair below is one the previous form
-// collapsed.
+// TestProbeFingerprintCannotBeForged pins that two different probe
+// subjects never share a fingerprint: a collision reuses one binary's
+// verdict for another shape. The previous raw '|'-joined form collapsed
+// on a path or version containing '|', or on an arg list whose elements
+// merge across a space join. Each pair below is one it collapsed.
 func TestProbeFingerprintCannotBeForged(t *testing.T) {
 	// Build the two subjects as real files, since probeFingerprint stats them:
 	// identical size and mtime, so only the varying components can distinguish

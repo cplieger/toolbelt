@@ -777,21 +777,14 @@ func (e *Engine) Remove(name string) (*Job, []string, error) {
 }
 
 // RemoveWithDependents uninstalls a tool together with every enabled
-// entry that requires it, deleting all their templates. It is the
-// cascading form of Remove: where Remove refuses a tool with dependents,
-// this removes them, so the returned job carries every removed name and
-// the dependents slice reports which ones rode along.
+// entry that requires it, deleting all their templates; the returned job
+// carries every removed name and dependents reports which rode along.
 //
-// The cascade is ONE LEVEL — the direct requirers of name, which is what
-// the returned dependents slice holds. A transitive chain is not walked:
-// with A requiring B and B requiring name, this removes name and B and
-// leaves A enabled against a dependency that is gone. Removing A too is
-// the caller's decision to make, and a caller that wants the whole chain
-// asks again for each level it uncovers.
-//
-// Prefer Remove unless the caller has established that removing the
-// dependents is intended — the UI's cascade confirmation, an operator's
-// explicit force. Nothing here re-checks that intent.
+// The cascade is ONE LEVEL: the direct requirers of name. With A
+// requiring B and B requiring name, this removes name and B and leaves A
+// enabled against a gone dependency — removing A too is the caller's
+// decision. Prefer Remove unless the caller has already established
+// that removing the dependents is intended; nothing here re-checks that.
 func (e *Engine) RemoveWithDependents(name string) (*Job, []string, error) {
 	return e.remove(name, true)
 }
@@ -1191,17 +1184,11 @@ type installPlan struct {
 // visit walks a tool's dependencies depth-first, appending each to the
 // plan's order after its deps. A tool already on the stack is a cycle.
 //
-// A DISABLED dependency is ENABLED rather than refused. Asking for a tool
-// is asking for the things it cannot run without: gopls is a Go binary
-// installed by the Go toolchain, and typescript-language-server without
-// the typescript package is a launcher with nothing to launch, so
-// "install this, but not the thing it requires" is not a state a user can
-// have meant. The refusal it replaces read as user policy being honoured
-// and landed as a dead end — the dependent's install failed with "enable
-// it first" and the user had to find and toggle a row they had not asked
-// about. The enable is recorded in the job log, so it is visible rather
-// than silent, and it is the mirror of the force-disable cascade that
-// already walks the same edge in the other direction.
+// A DISABLED dependency is ENABLED rather than refused: asking for a
+// tool is asking for what it cannot run without (typescript-language-server
+// with no typescript is a launcher with nothing to launch). The enable is
+// recorded in the job log, and mirrors the force-disable cascade's edge
+// walk in the other direction.
 func (p *installPlan) visit(ctx context.Context, n string, stack []string) error {
 	if p.seen[n] {
 		return nil
@@ -1397,20 +1384,13 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 
 // verifyInstalled probes what the install just published and refuses to
 // let a binary the OS will not run stand as a completed install. It runs
-// AFTER the status write, so the durability protocol above is unchanged,
-// and BEFORE pruning, so a failed verification leaves the retained
-// predecessor in place — that predecessor IS the fallback, and pruning it
-// on the strength of an install that cannot run is how a working version
-// gets thrown away.
+// AFTER the status write (durability unchanged) and BEFORE pruning, so a
+// failed verification leaves the retained predecessor as the fallback.
 //
-// Only a CannotExec verdict fails the install. A version-banner mismatch
-// is reported and tolerated, because an unparseable banner is a gap in
-// this engine's knowledge of the tool rather than evidence the tool is
-// broken; the existing reinstall-on-next-reconcile path still covers it.
-//
-// The probe's own cache is warmed rather than wasted: the verdict is
-// keyed by the binary's fingerprint, so the inventory read that follows
-// reuses this answer instead of spawning the subprocess again.
+// Only CannotExec fails the install; a version-banner mismatch is
+// reported and tolerated as a knowledge gap rather than evidence the
+// tool is broken. The probe verdict is cached by binary fingerprint, so
+// the inventory read that follows reuses it instead of re-spawning.
 func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
 	st := e.store.State().Tools[name]
 	v := e.probeTool(name, t, &st)
@@ -1752,17 +1732,12 @@ func validToolName(name string) bool {
 // validNameComponents requires every slash-separated part of the name to
 // be a usable single path component: not empty, not "." and not "..".
 //
-// The name is not only a key. It is joined onto the opt dir as a path
-// component (`opt/<name>/<version>`) and uninstall hands the whole join
-// to os.RemoveAll, so a dot component aims that removal at a directory
-// the tool does not own: "." at the shared opt tree, ".." at its parent,
-// "@a/.." at the opt tree again. Only an EXACT dot component is
-// traversal — "tool.v2", "..extras" and "..." are ordinary names and stay
-// valid, which a leading-dot or contains-".." test would refuse.
-//
-// Splitting on '/' alone is right here rather than a general separator
-// split, because validToolNameRune admits no other separator, on any
-// platform.
+// The name is joined onto the opt dir (`opt/<name>/<version>`) and
+// uninstall hands the join to os.RemoveAll, so a dot component aims that
+// removal outside the tool's own directory. Only an EXACT dot component
+// is traversal — "tool.v2", "..extras" and "..." stay valid, which a
+// leading-dot or contains-".." test would wrongly refuse. Splitting on
+// '/' alone is safe because validToolNameRune admits no other separator.
 func validNameComponents(name string) bool {
 	for part := range strings.SplitSeq(name, "/") {
 		if part == "" || part == "." || part == ".." {

@@ -73,13 +73,8 @@ func TestSearch_RanksExactNameOverPrefixOverAlias(t *testing.T) {
 	}
 }
 
-// TestRankEntries_BreaksTiesOnNameLength pins the tie-break that decides
-// whether a search is usable on a large corpus. Every prefix match scores
-// alike, so with a name-ascending tie-break alone the shortest and most
-// likely answer loses to every alphabetically-earlier sibling sharing its
-// prefix. Measured on Debian trixie's 68,799 package names before the fix,
-// `python3` ranked 909th of 6,607 hits for "python" and `nodejs` 1,701st
-// for "node". The corpus here is the shape of that failure, not its size.
+// TestRankEntries_BreaksTiesOnNameLength covers CompareRank's tie-break
+// (see its doc comment for the measurement this guards against).
 func TestRankEntries_BreaksTiesOnNameLength(t *testing.T) {
 	entries := map[string]CatalogEntry{
 		"python3":         {Name: "python3"},
@@ -185,12 +180,8 @@ func TestUnavailableIsInvisibleToAnOlderEngine(t *testing.T) {
 	}
 }
 
-// TestApplyOverlay_EvictsARevivedNameFromUnavailable covers the one way a
-// name can reach both maps: the compiler skips a tool for an unsupported
-// backend and an overlay then supplies a source for it. node, go, java,
-// rust and glab are all in that position on the live registries. Left in
-// both, Search offers an install while SearchUnavailable simultaneously
-// reports there is none.
+// TestApplyOverlay_EvictsARevivedNameFromUnavailable covers the delete
+// at applyOverlayDoc's revival site (see its comment for why).
 func TestApplyOverlay_EvictsARevivedNameFromUnavailable(t *testing.T) {
 	c := &Catalog{
 		Entries: map[string]CatalogEntry{},

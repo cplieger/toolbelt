@@ -1,48 +1,22 @@
 // Package httpapi is the HTTP projection of a toolbelt Engine: a REST
 // surface over the Engine's Go API, one route per method, JSON in and
-// out. It is a pure function of the Engine — no auth, no SSE, and one
-// piece of middleware only, the cache policy below; consumers wrap the
-// returned handler in their own stack (an origin/CSP chain, a
-// loopback-peer gate, logging) and stream job progress themselves via
-// the Engine's Config callbacks or by polling the jobs route.
+// out. No auth, no SSE; consumers wrap the handler in their own stack
+// and stream job progress via the Engine's Config callbacks or by
+// polling the jobs route.
 //
-// Mutations return 202 with the enqueued job (null when the operation
-// needed none, e.g. adding a disabled template). Refusals map to
-// conflict responses: has_dependents and disabled are 409 with the
-// standard webhttp error envelope, has_dependents additionally naming
-// the blocking tools.
+// Mutations return 202 with the enqueued job (null when none was
+// needed). has_dependents and disabled refusals are 409.
 //
-// # Search
+// GET /search?q=<query> returns installable hits, and, with
+// &unavailable=1, the catalog entries no install source exists for
+// (opt-in: a UI offering installs has no use for a row it cannot act
+// on). See [SearchResponse].
 //
-// GET /search?q=<query> returns the installable hits — catalog entries
-// and matching Debian packages merged into ONE relevance order — and then,
-// with &unavailable=1, the catalog entries no install source exists for,
-// each carrying the registry backend that defeated the compiler. That
-// block is opt-in rather than default, because a UI offering things to
-// install has no use for a row it cannot act on, while an agent calling
-// this API is better served by "this tool is known and here is why it
-// cannot be installed" than by an empty result. Every hit states which
-// field the query hit, so a client can tell a name match from the far more
-// numerous description match. See [SearchResponse].
-//
-// # Cache policy
-//
-// The handler owns its cache policy: every response it produces
-// carries Cache-Control: no-store, so a consumer no longer needs to
-// wrap it in a no-store middleware of its own. This is a mutable JSON
-// control plane — it lists jobs and accepts installs — so a stored
-// response is always wrong, on a success body, a decode rejection, an
-// engine error, and the mux's own 404/405/redirect alike.
-//
-// A Cache-Control header already set on the response when the handler
-// runs is left exactly as it is, on the same rule webhttp.JSONHeaders
-// applies to X-Content-Type-Options: a wrapping stack that states the
-// policy stays that header's single writer. The package cannot tell a
-// stricter value from a weaker one without parsing directives, so it
-// treats any present value as deliberate — which makes an outer
-// Cache-Control both the way to say "no-store, no-cache,
-// must-revalidate" and the documented escape hatch for a consumer that
-// genuinely wants this route cached.
+// Every response carries Cache-Control: no-store, since this is a
+// mutable JSON control plane where a stored response is always wrong.
+// A value already set when the handler runs is left as-is, treated as
+// deliberate — the escape hatch for a consumer that wants a route
+// cached.
 package httpapi
 
 import (
@@ -85,14 +59,9 @@ type SearchHit struct {
 	// is set only alongside Unavailable.
 	Reason string `json:"reason,omitempty"`
 	// Match names which field the query hit — see [toolbelt.MatchKind].
-	// Empty for the featured set (there was no query) and for an
-	// unavailable hit (that block is informational, not ranked against
-	// the rest).
-	//
-	// It is on the wire because a client cannot work it out: aliases are
-	// not projected here, so a hit on `rg` looks exactly like a
-	// description match on ripgrep's summary. A client that wants to
-	// group, label or filter the weakest tier needs the answer stated.
+	// Empty for the featured set and for an unavailable hit. On the wire
+	// because a client cannot derive it: aliases are not projected here,
+	// so a hit on `rg` would look like a description match otherwise.
 	Match    string `json:"match,omitempty"`
 	Featured bool   `json:"featured,omitempty"`
 	Lsp      bool   `json:"lsp,omitempty"`
@@ -111,34 +80,16 @@ type SearchHit struct {
 	Apt bool `json:"apt,omitempty"`
 }
 
-// SearchResponse is the search route's body.
-//
-// Results carry the INSTALLABLE hits first — catalog entries and Debian
-// packages merged into ONE relevance order — then, only when the caller
-// asked for them, the catalog entries no install source exists for.
-//
-// The two installable corpora are merged rather than blocked, because
-// blocking them made the best answer unreachable. Both are scored by the
-// same [toolbelt.Match] tiers, so concatenating them put every catalog
-// hit ahead of every Debian one whatever it scored: "python" answered
-// with sixteen catalog tools that merely mention Python in their
-// descriptions, and `python3` — a name-prefix hit, and the thing the
-// reader was looking for — sat seventeenth. Each corpus is still capped
-// independently by the engine, so one cannot crowd the other out of the
-// merge.
-//
-// The unavailable block stays last and is deliberately NOT merged: it is
-// informational rather than actionable, so ranking it against rows a
-// caller can install would put a dead end above a live option. It is
-// OPT-IN via `?unavailable=1`, absent by default because a dialog
-// offering things to install has no use for a row it cannot act on, while
-// an agent reading this API does — it would rather be told a tool is
-// known and why it cannot be installed than get an empty result and
-// conclude the tool does not exist.
+// SearchResponse is the search route's body: installable hits merged
+// into one relevance order via [toolbelt.Match] (catalog and Debian, not
+// concatenated — a bare concatenation put every catalog hit ahead of
+// every Debian one regardless of score), then the opt-in unavailable
+// block, kept separate and unranked since ranking a dead end above a
+// live option would be wrong.
 //
 // AptAvailable distinguishes "no Debian package matched" from "the
-// package list could not be consulted", which look identical in an empty
-// result and mean opposite things.
+// package list could not be consulted" — identical in an empty result,
+// opposite in meaning.
 type SearchResponse struct {
 	Results      []SearchHit `json:"results"`
 	AptAvailable bool        `json:"apt_available"`
@@ -203,16 +154,13 @@ var routes = []route{
 }
 
 // Handler builds the projection's routes under prefix (e.g.
-// "/api/tools") and returns the handler. Mount it at both the exact
-// prefix and the subtree:
+// "/api/tools"). Mount it at both the exact prefix and the subtree:
 //
 //	h := httpapi.Handler(engine, "/api/tools")
 //	mux.Handle("/api/tools", h)
 //	mux.Handle("/api/tools/", h)
 //
-// Every response the returned handler produces carries Cache-Control:
-// no-store unless the header is already set — see the package doc's
-// cache-policy section.
+// Every response carries Cache-Control: no-store unless already set.
 func Handler(e *toolbelt.Engine, prefix string) http.Handler {
 	prefix = strings.TrimSuffix(prefix, "/")
 	mux := http.NewServeMux()
@@ -224,17 +172,11 @@ func Handler(e *toolbelt.Engine, prefix string) http.Handler {
 	return withNoStore(mux)
 }
 
-// withNoStore states the package's cache policy on the response header
-// map before h runs, which is the only site that cannot be missed: it
-// is upstream of every route in the table, of every error writer those
-// routes reach, and of the responses the mux itself generates (404 for
-// an unrouted path, 405 for a method the path doesn't serve, a
-// path-cleaning redirect). Setting it here also settles the ordering
-// requirement structurally — the header is in the map before any
-// handler can call WriteHeader, after which it would be ignored.
-//
-// A value already present is left alone; see the package doc for why
-// that, and not an overwrite, is the right precedence.
+// withNoStore states the package's cache policy before h runs: upstream
+// of every route, every error writer, and the mux's own 404/405/redirect
+// responses, and before any handler can call WriteHeader (after which a
+// header set here would be ignored). A value already present is left
+// alone; see the package doc for why.
 func withNoStore(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if w.Header().Get(cacheControlHeader) == "" {
@@ -253,17 +195,12 @@ func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	webhttp.WriteJSON(w, inv)
 }
 
-// searchUnavailableParam is the query parameter that opts a caller INTO
-// the uninstallable block. Absent means hidden, which is the default
-// every consumer gets by doing nothing.
-//
-// Hidden by default because the two consumers want opposite things and
-// only one of them is a person: vibekit's Add dialog offers what can be
-// installed, and a row it cannot act on is noise there. The headless
-// consumer's caller is an agent reading the loopback API, which benefits
-// from being told a tool is known and why it cannot be installed instead
-// of getting an empty result. A per-request parameter serves both without
-// a deployment flag or a per-app build.
+// searchUnavailableParam opts a caller INTO the uninstallable block;
+// absent means hidden. Hidden by default because a UI offering installs
+// has no use for a row it cannot act on, while an agent reading this
+// API benefits from knowing why a tool cannot be installed rather than
+// getting an empty result. A per-request parameter serves both without
+// a deployment flag.
 const searchUnavailableParam = "unavailable"
 
 func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
@@ -291,16 +228,13 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 // mergeSearchHits projects both installable corpora into ONE
 // relevance-ordered list, stamping each hit's match kind on the way.
 //
-// A pure function of its inputs, because that is the only way the
-// ordering gets a test that runs: apt needs root, so a test driving the
-// route can exercise a cross-corpus merge on a privileged host only and
-// would skip on every CI runner — which is precisely where the order has
-// to hold.
+// A pure function of its inputs: apt needs root, so a test driving the
+// route can only exercise this merge on a privileged host — this way
+// the ordering gets a test that runs on every CI runner.
 //
-// The sort is skipped for an empty query, which selects the featured set
-// rather than matching anything: every hit then scores 0, so sorting
-// would reorder that set by the length tie-break and discard the by-name
-// order Featured deliberately gives it.
+// Sort is skipped for an empty query (the featured set): every hit
+// scores 0 then, so sorting would discard Featured's by-name order for
+// the length tie-break instead.
 func mergeSearchHits(catalog []toolbelt.CatalogEntry, apt []toolbelt.AptHit, query string) []SearchHit {
 	// The score is an implementation detail of the ranking and never
 	// reaches the wire, unlike the match kind, which is a contract.
@@ -338,10 +272,8 @@ func mergeSearchHits(catalog []toolbelt.CatalogEntry, apt []toolbelt.AptHit, que
 	return hits
 }
 
-// searchWantsUnavailable reads the opt-in parameter. Any of the usual
-// affirmative spellings counts, and a bare `?unavailable` counts too,
-// because a caller writing that plainly means yes and answering it with
-// silence would be the unhelpful reading.
+// searchWantsUnavailable reads the opt-in parameter. A bare
+// `?unavailable` counts too: a caller writing that plainly means yes.
 func searchWantsUnavailable(r *http.Request) bool {
 	qs := r.URL.Query()
 	if !qs.Has(searchUnavailableParam) {
