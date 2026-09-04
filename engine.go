@@ -276,7 +276,11 @@ func (e *Engine) aptHitsWithCandidate(hits []AptHit) []AptHit {
 	ctx, cancel := context.WithTimeout(context.Background(), aptCandidateBudget)
 	defer cancel()
 	for i := range hits {
-		if v, err := e.inst.aptCandidate(ctx, hits[i].Name); err == nil {
+		// Validated with the same grammar the install path applies, so
+		// the two readers of one apt-cache candidate cannot disagree
+		// about whether it is a version. They did: search displayed
+		// openssh-client's epoch candidate that Add then refused.
+		if v, err := e.inst.aptCandidate(ctx, hits[i].Name); err == nil && validVersion(SourceApt, v) {
 			hits[i].Candidate = v
 		}
 	}
@@ -404,8 +408,8 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 	if t.Disabled {
 		// Template: no source requirement, no network. Hydration
 		// completes it when it is enabled.
-		if t.Version != "" && !validVersionString(t.Version) {
-			return t, errors.New("invalid version string")
+		if t.Version != "" && !validVersion(t.Source, t.Version) {
+			return t, versionRejected(t.Source, t.Version)
 		}
 		return t, nil
 	}
@@ -422,8 +426,8 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		}
 		t.Version = latest
 	}
-	if !validVersionString(t.Version) {
-		return t, errors.New("invalid version string")
+	if !validVersion(t.Source, t.Version) {
+		return t, versionRejected(t.Source, t.Version)
 	}
 	return t, nil
 }
@@ -533,9 +537,6 @@ type patchOutcome struct {
 // footprint uninstall (template kept), version change on an enabled
 // tool → reinstall. Returns nil when no job is needed.
 func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
-	if req.Version != nil && !validVersionString(*req.Version) {
-		return nil, errors.New("invalid version string")
-	}
 	var out patchOutcome
 	err := e.store.MutateManifest(func(m *Manifest) error {
 		return patchManifest(m, name, &req, &out, e.backends())
@@ -579,6 +580,12 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
+	}
+	// The version check runs here rather than in Patch because the
+	// grammar it must apply depends on this row's source, and the refusal
+	// precedes every mutation below.
+	if req.Version != nil && !validVersion(t.Source, *req.Version) {
+		return versionRejected(t.Source, *req.Version)
 	}
 	var deps []string
 	if req.Disabled != nil && *req.Disabled && !t.Disabled {

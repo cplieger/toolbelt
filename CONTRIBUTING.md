@@ -34,6 +34,15 @@ toggles, a loopback REST projection, a boot gate on `Reconcile`).
 - **Disabled entries stay offline.** Static catalog fields only; no
   version resolution, no fetches. `TestHydration_DisabledStaysOffline`
   pins it with a failing transport.
+- **A version's legal alphabet belongs to its source, not to the
+  engine.** `sourceVersionGrammar` maps each source kind to what its
+  producer can emit: a forge tag or registry semver for most, a Debian
+  version for `apt:` (epoch and tilde included), a PEP 440 version for
+  `pip:`. A new source kind must declare one;
+  `TestSourceVersionGrammarIsTotal` fails otherwise. The separate
+  constraint, that a version is usable as a path component, belongs to
+  the sources that build a path and is asserted where the path is built
+  (`extractAndSwap`) rather than folded into every alphabet.
 - **Install is policy-neutral.** `Install` (the retry verb) refuses
   disabled templates with `ErrDisabled`; enabling is an explicit
   `Patch{Disabled: false}`. The one sanctioned exception is
