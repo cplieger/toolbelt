@@ -306,6 +306,13 @@ func (in *installer) refuseUnverified(name, version, url string, cause error) er
 // failure restores the previous version rather than leaving a tree the
 // engine would prune around.
 func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, error) {
+	// The version is a path component from here on, and only the sources
+	// routed through this function have that constraint (see
+	// versionpolicy.go). Asserting it here is what stops a wider
+	// grammar's value reaching the join if another source is wired in.
+	if !versionPathComponent(version) {
+		return "", fmt.Errorf("refusing to install %s: version %q is not a path component", name, version)
+	}
 	versDir := filepath.Join(in.optDir(), name, version)
 	staging := versDir + stagingSuffix
 	if err := os.RemoveAll(staging); err != nil {

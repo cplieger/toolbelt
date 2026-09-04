@@ -59,8 +59,8 @@ func (v *versionResolver) Latest(ctx context.Context, source string, aq *AquaPac
 	if err != nil {
 		return "", err
 	}
-	if !validVersionString(latest) {
-		return "", fmt.Errorf("upstream version %q contains illegal characters", latest)
+	if !validVersion(source, latest) {
+		return "", fmt.Errorf("upstream %s: %v", source, versionRejected(source, latest))
 	}
 	v.mu.Lock()
 	v.cache[source] = latest
@@ -373,23 +373,4 @@ func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) e
 		return err
 	}
 	return json.Unmarshal(body, out)
-}
-
-// validVersionString allows only the characters real upstream version
-// tags use. The version lands in URLs, file paths, and (for manual
-// installs) a shell environment variable, so anything exotic is
-// rejected outright.
-func validVersionString(s string) bool {
-	if s == "" || len(s) > 100 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-		case r == '.' || r == '-' || r == '_' || r == '+':
-		default:
-			return false
-		}
-	}
-	return true
 }

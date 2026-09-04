@@ -31,8 +31,10 @@ type Tool struct {
 	// "npm:pyright", "pip:x", "cargo:x", "go:golang.org/x/tools/gopls",
 	// or "manual". Empty = hydrate from the catalog.
 	Source string `json:"source,omitempty"`
-	// Version is the concrete upstream version, exactly as upstream
-	// tags it (may or may not carry a leading v). Never a range.
+	// Version is the concrete version exactly as its source spells it —
+	// a forge tag or registry semver for most kinds, a Debian version
+	// (epoch and all) for apt:, a PEP 440 version for pip:. Never a
+	// range; the legal alphabet per source is versionpolicy.go.
 	// Empty = resolve latest when the tool is actively installed.
 	Version string `json:"version,omitempty"`
 	// Description is display text (catalog-provided or user-written).
@@ -199,6 +201,13 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 	for _, name := range slices.Sorted(maps.Keys(m.Tools)) {
 		if !validToolName(name) {
 			return nil, fmt.Errorf("%s: invalid tool name %q", s.manifestPath, name)
+		}
+		// Same reasoning as the key, and the same gap it closed: Add and
+		// Patch validate a version they resolve, so a version reaching
+		// the engine through a hand edit was the only one nothing
+		// checked, and it is the one that lands in a path component.
+		if t := m.Tools[name]; t.Version != "" && !validVersion(t.Source, t.Version) {
+			return nil, fmt.Errorf("%s: %s: %v", s.manifestPath, name, versionRejected(t.Source, t.Version))
 		}
 	}
 	return &m, nil

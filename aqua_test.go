@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -221,27 +220,6 @@ func TestEnvSupported(t *testing.T) {
 	for _, c := range cases {
 		if got := envSupported(c.envs, c.arch); got != c.want {
 			t.Errorf("envSupported(%v, %s) = %v, want %v", c.envs, c.arch, got, c.want)
-		}
-	}
-}
-
-func TestValidVersionString(t *testing.T) {
-	good := []string{
-		"v2.96.0", "1.1.411", "go1.23.4", "jdk-21.0.5+11", "2025-01-06",
-		// The length limit is inclusive: 100 characters is a version, and
-		// it lands in a path and an env var, so the cap is what stops an
-		// upstream tag from being anything longer.
-		strings.Repeat("a", 100),
-	}
-	for _, v := range good {
-		if !validVersionString(v) {
-			t.Errorf("validVersionString(%q) = false, want true", v)
-		}
-	}
-	bad := []string{"", "v1.0.0; rm -rf /", "a b", "$(evil)", "v1/../../etc", strings.Repeat("a", 101)}
-	for _, v := range bad {
-		if validVersionString(v) {
-			t.Errorf("validVersionString(%q) = true, want false", v)
 		}
 	}
 }
