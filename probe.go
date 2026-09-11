@@ -131,7 +131,7 @@ func (c *probeCache) forget(name string) {
 }
 
 // binDir is the single PATH dir the engine publishes into.
-func (e *Engine) binDir() string { return filepath.Join(e.toolsDir, "bin") }
+func (e *Engine) binDir() string { return binDir(e.toolsDir) }
 
 // probeInstalled reports whether the tool is installed. Presence of
 // bin/<name> is necessary but not sufficient: the recorded bin must

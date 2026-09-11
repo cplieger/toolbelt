@@ -102,14 +102,7 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 		}
 	}
 
-	for _, path := range []string{
-		filepath.Join(toolsDir, "bin"),
-		filepath.Join(toolsDir, "opt"),
-		filepath.Join(toolsDir, "npm"),
-		filepath.Join(toolsDir, "npm", "bin"),
-		filepath.Join(toolsDir, "python"),
-		filepath.Join(toolsDir, "python", "bin"),
-	} {
+	for _, path := range managedDirs(toolsDir) {
 		findings, isDir := inspectRootDir(path)
 		out = append(out, findings...)
 		if isDir && contained {
