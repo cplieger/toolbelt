@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -108,8 +107,13 @@ func (d *aptDiscovery) List(ctx context.Context) []AptPackage {
 func aptInstalledPackages(ctx context.Context) ([]AptPackage, error) {
 	ctx, cancel := context.WithTimeout(ctx, aptDiscoverTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "dpkg-query", "-W",
-		"-f=${binary:Package}\t${Version}\t${db:Status-Status}\t${Priority}\t${Essential}\n").Output()
+	cmd, err := systemCommand(ctx, "dpkg-query", "-W",
+		"-f=${binary:Package}\t${Version}\t${db:Status-Status}\t${Priority}\t${Essential}\n")
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = aptEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}

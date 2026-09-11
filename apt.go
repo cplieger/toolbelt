@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -88,7 +87,10 @@ func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) erro
 	}
 	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "apt-mark", action, "--", pkg)
+	cmd, err := systemCommand(ctx, "apt-mark", action, "--", pkg)
+	if err != nil {
+		return err
+	}
 	cmd.Env = aptEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("apt-mark %s %s: %w: %s", action, pkg, err, strings.TrimSpace(string(out)))
@@ -107,10 +109,10 @@ const aptStatusInstalled = "installed"
 // touches no network, so this is a wedge guard rather than a work budget.
 const aptHoldTimeout = 30 * time.Second
 
-// AptAvailable reports whether this process can install apt packages:
-// euid 0 and apt-get on PATH. Consumers surface it rather than offering
-// an install that always fails, and the engine's own converge skips apt
-// entries when it is false.
+// AptAvailable reports whether this process can install apt packages: euid 0,
+// and apt-get present per resolveSystemBin, so this gate and the spawn it guards
+// answer about one file. Consumers surface it rather than offering an install
+// that always fails, and the engine's own converge skips apt when it is false.
 //
 // Root is required because apt writes to /usr and the dpkg database.
 // There is no sudo path here by design: the two consumers of this
@@ -121,14 +123,16 @@ func AptAvailable() bool {
 	if os.Geteuid() != 0 {
 		return false
 	}
-	_, err := exec.LookPath("apt-get")
-	return err == nil
+	return hasSystemBin("apt-get")
 }
 
 // aptInstalled reports whether a package is installed AND its version.
 // See aptStatusFrom for why the status word, not just the version, decides.
 func (in *installer) aptInstalled(ctx context.Context, pkg string) (version string, installed bool) {
-	cmd := exec.CommandContext(ctx, "dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", pkg)
+	cmd, err := systemCommand(ctx, "dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", pkg)
+	if err != nil {
+		return "", false
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -162,7 +166,11 @@ func (in *installer) aptCandidate(ctx context.Context, pkg string) (string, erro
 	if err := in.aptKnownName(ctx, pkg); err != nil {
 		return "", err
 	}
-	out, err := exec.CommandContext(ctx, "apt-cache", "policy", "--", pkg).Output()
+	cmd, err := systemCommand(ctx, "apt-cache", "policy", "--", pkg)
+	if err != nil {
+		return "", err
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("apt-cache policy %s: %w", pkg, err)
 	}
@@ -275,17 +283,19 @@ func aptArchivesLockBusy(output string) bool {
 		strings.Contains(output, "Unable to lock the download directory")
 }
 
-// aptEnv is the environment every apt-get invocation runs under.
+// aptEnv is the environment every apt-family spawn runs under: the inherited
+// PATH with the trusted directories prepended, so bin/ cannot precede them for
+// whatever apt or a dpkg maintainer script resolves for itself (systemPATHFirst).
 //
 // DEBIAN_FRONTEND=noninteractive is not optional: a package whose
 // maintainer script asks debconf a question would otherwise block on a
 // prompt no operator can see, and the job would hang until its context
 // expired rather than failing. Nothing here reads a terminal.
 func aptEnv() []string {
-	return append(os.Environ(),
+	return systemPATHFirst(append(os.Environ(),
 		"DEBIAN_FRONTEND=noninteractive",
 		"DEBCONF_NONINTERACTIVE_SEEN=true",
-	)
+	))
 }
 
 // runCombined runs a command, streams its output into the job as it
@@ -296,7 +306,10 @@ func aptEnv() []string {
 // lock apt failed on, and a caller that has already streamed the lines
 // away cannot answer that.
 func (in *installer) runCombined(ctx context.Context, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd, err := systemCommand(ctx, name, args...)
+	if err != nil {
+		return "", err
+	}
 	cmd.Env = aptEnv()
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {

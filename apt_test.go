@@ -367,17 +367,19 @@ func TestAptSetHold(t *testing.T) {
 			hold bool
 			want string
 		}{{true, "hold"}, {false, "unhold"}} {
-			bin := t.TempDir()
-			log := filepath.Join(bin, "args")
-			// Redirects only: aptEnv gives the child a PATH of its own, so a
-			// stub calling `touch` or `printf` would fail for want of the
-			// binary and its FAILURE would be mistaken for the behaviour under
-			// test. Measured: that is what made the grammar-gate case vacuous.
-			script := "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> " + log + "; done\n"
-			if err := os.WriteFile(filepath.Join(bin, "apt-mark"), []byte(script), 0o755); err != nil {
-				t.Fatalf("Setup: %v", err)
-			}
-			t.Setenv("PATH", bin)
+			// The stub is reached by pointing the RESOLVER at it, not by
+			// replacing PATH: apt-mark is pinned to the trusted system
+			// directories now, so a PATH fake is unreachable — and in the
+			// negative case below that failure mode is silent, because a
+			// sentinel the stub can never write reads exactly like a gate that
+			// refused. Redirects only: the child's PATH is the trusted set
+			// first, which under the stub is this directory alone, so a script
+			// calling `touch` or `printf` would fail for want of the binary and
+			// its FAILURE would be mistaken for the behaviour under test.
+			// Measured: that is what made the grammar-gate case vacuous.
+			log := filepath.Join(t.TempDir(), "args")
+			stubSystemBin(t, "apt-mark",
+				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n")
 
 			in := &installer{output: func(string) {}}
 			if err := in.aptSetHold(t.Context(), "jq", tc.hold); err != nil {
@@ -398,13 +400,8 @@ func TestAptSetHold(t *testing.T) {
 	// The gate runs BEFORE the subprocess: a refused name must not reach
 	// apt-mark at all, so the check cannot be "apt-mark rejected it".
 	t.Run("an invalid package name is refused without running apt-mark", func(t *testing.T) {
-		bin := t.TempDir()
-		sentinel := filepath.Join(bin, "ran")
-		script := "#!/bin/sh\n: > " + sentinel + "\n"
-		if err := os.WriteFile(filepath.Join(bin, "apt-mark"), []byte(script), 0o755); err != nil {
-			t.Fatalf("Setup: %v", err)
-		}
-		t.Setenv("PATH", bin)
+		sentinel := filepath.Join(t.TempDir(), "ran")
+		stubSystemBin(t, "apt-mark", "#!/bin/sh\n: > "+sentinel+"\n")
 
 		in := &installer{output: func(string) {}}
 		// Grammar-invalid only. A dotted name like "jq." is grammar-LEGAL by
@@ -502,5 +499,41 @@ func TestAptAutoInstalled(t *testing.T) {
 	// over-long list while an empty one reports a false fact.
 	if auto := aptAutoInstalled(filepath.Join(t.TempDir(), "absent")); len(auto) != 0 {
 		t.Errorf("aptAutoInstalled(absent) = %v, want an empty set", auto)
+	}
+}
+
+// TestAptEnv_PutsTheTrustedDirectoriesAheadOfTheInheritedPATH pins the wiring
+// rather than the primitive, and it is here because a mutant that removed the
+// systemPATHFirst call from aptEnv survived every other test in the package.
+//
+// It matters beyond tidiness: pinning argv[0] does not reach what apt itself, or
+// a dpkg maintainer script, resolves for ITSELF. Without the reorder the
+// published bin dir stays ahead of /usr/bin for those children, which is the
+// exposure the pin exists to remove, on the one family that runs as root.
+func TestAptEnv_PutsTheTrustedDirectoriesAheadOfTheInheritedPATH(t *testing.T) {
+	t.Setenv("PATH", "/tools/bin:/usr/sbin")
+
+	var gotPATH string
+	for _, kv := range aptEnv() {
+		if rest, ok := strings.CutPrefix(kv, "PATH="); ok {
+			gotPATH = rest
+		}
+	}
+	trusted := strings.Join(systemBinDirs, ":")
+	if !strings.HasPrefix(gotPATH, trusted+":") {
+		t.Errorf("aptEnv PATH = %q, want it to start with the trusted set %q", gotPATH, trusted)
+	}
+	// Prepended, not replaced: Debian policy lets a maintainer script rely on
+	// /usr/sbin, so dropping the inherited entries would trade a package's
+	// postinst for a hardening the ordering already delivers.
+	if !strings.Contains(gotPATH, "/usr/sbin") {
+		t.Errorf("aptEnv PATH = %q, want the inherited entries kept after the trusted set", gotPATH)
+	}
+	// The debconf pair is what makes apt non-interactive; a reorder must not
+	// disturb it.
+	for _, want := range []string{"DEBIAN_FRONTEND=noninteractive", "DEBCONF_NONINTERACTIVE_SEEN=true"} {
+		if !slices.Contains(aptEnv(), want) {
+			t.Errorf("aptEnv() dropped %q", want)
+		}
 	}
 }
