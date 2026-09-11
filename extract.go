@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -124,7 +123,12 @@ func decompressTo(ctx context.Context, out, name string, args ...string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd, err := systemCommand(ctx, name, args...)
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	cmd.Env = systemEnvPATH()
 	cmd.Stdout = f
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -144,7 +148,11 @@ func decompressTo(ctx context.Context, out, name string, args ...string) error {
 
 // runQuiet runs a command, returning combined output only on failure.
 func runQuiet(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd, err := systemCommand(ctx, name, args...)
+	if err != nil {
+		return err
+	}
+	cmd.Env = systemEnvPATH()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))

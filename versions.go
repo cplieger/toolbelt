@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -155,7 +154,12 @@ func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, er
 	if err := v.aptIdx.knownName(ctx, pkg); err != nil {
 		return "", err
 	}
-	out, err := exec.CommandContext(ctx, "apt-cache", "policy", "--", pkg).Output()
+	cmd, err := systemCommand(ctx, "apt-cache", "policy", "--", pkg)
+	if err != nil {
+		return "", err
+	}
+	cmd.Env = aptEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("apt-cache policy %s: %w", pkg, err)
 	}

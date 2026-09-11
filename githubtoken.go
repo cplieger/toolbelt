@@ -45,6 +45,8 @@ func (c *githubTokenCache) Token() string {
 	c.checked = time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// A bare name on purpose: this engine installs gh into its own bin/, so a
+	// systemCommand pin would break forge auth and confine nothing.
 	out, err := exec.CommandContext(ctx, "gh", "auth", "token").Output()
 	if err == nil {
 		c.token = strings.TrimSpace(string(out))

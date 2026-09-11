@@ -180,11 +180,14 @@ Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (
 - Fetches ride an SSRF-guarded client (public-IP enforcement at the dial boundary, redirect policy, port allowlist) with transient-failure retry and rate-limit handling via [`cplieger/httpx`](https://github.com/cplieger/httpx).
 - Downloads are size-capped (1 GiB); archive extraction rejects symlink members that escape the install tree; installs land in versioned directories swapped atomically.
 - The `manual` source runs arbitrary bash by design: it is an operator escape hatch for single-principal volumes, equivalent in trust to editing the manifest itself.
+- A binary the consumer image bakes in (`apt-get`, `dpkg-query`, `tar`, `bash`) is spawned by absolute path from a fixed set of `/usr/bin` and `/bin`, never resolved through `PATH`. The engine's own link directory sits on `PATH` ahead of the system directories and lives on the volume, so a `PATH` lookup would let anything written there shadow those binaries on paths the engine runs unattended, and as root for the apt family. What this buys is bounded: the engine runs as root and the system directories are root's too, so a pinned path is not unforgeable. What changes is that a file placed in the system directories dies with the container, while one placed in the managed tree persists on the volume and runs again on every boot reconcile.
+- The apt family's children get the trusted directories prepended to their inherited `PATH`, so a `dpkg` maintainer script can still rely on `/usr/sbin`. Decompressors get the trusted set alone. A `manual` script keeps the managed tree first, because reaching it is what the escape hatch is for.
+- A binary the engine installs (`gh`, `npm`, `uv`, `cargo`, `go`) still resolves through the managed tree, necessarily: publishing it there is the point, and an absolute path would name the same writable file. `VerifyRootIntegrity` bounds which other principals can reach that tree, but it cannot separate the engine from a shell command running beside it at the same uid. On a volume where another principal holds a shell at that uid, those binaries are that principal's to replace. Single-principal volumes are the stated posture.
 
 ## Scope notes
 
 - Linux only (amd64, arm64). The aqua evaluator resolves definitions for linux and ignores other platforms.
-- No apt/system-package backend: OS packages belong to the image or the consumer's entrypoint, not volume intent.
+- OS packages are manifest intent like anything else: an `apt:` entry installs a Debian package, and `AptPackages` reports the ones present on the host that no entry owns. Removing an `apt:` entry is a logged no-op rather than an uninstall, because apt packages are shared and the engine will not remove one it cannot prove nothing else needs.
 - The manifest store's single-writer guarantee is in-process. Run one engine per data directory; other processes go through the consumer's server.
 
 ## Contributing

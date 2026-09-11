@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -85,7 +84,13 @@ func (a *aptIndex) ensureLists(ctx context.Context) error {
 		}
 		uctx, cancel := context.WithTimeout(ctx, aptUpdateBudget)
 		defer cancel()
-		out, err := exec.CommandContext(uctx, "apt-get", "-qq", "update").CombinedOutput()
+		cmd, err := systemCommand(uctx, "apt-get", "-qq", "update")
+		if err != nil {
+			a.updateErr = err
+			return
+		}
+		cmd.Env = aptEnv()
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			a.updateErr = fmt.Errorf("apt-get update: %w: %s", err, strings.TrimSpace(string(out)))
 			return
@@ -322,7 +327,11 @@ func (a *aptIndex) load(ctx context.Context) (map[string]string, error) {
 		// be on disk, and a stale one yields false negatives only.
 		a.log.Warn("toolbelt: apt-get update failed, parsing whatever index is on disk", "error", err)
 	}
-	cmd := exec.CommandContext(ctx, "apt-cache", "dumpavail")
+	cmd, err := systemCommand(ctx, "apt-cache", "dumpavail")
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = aptEnv()
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
