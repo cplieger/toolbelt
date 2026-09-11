@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -266,7 +265,7 @@ func New(cfg *Config) (*Engine, error) {
 	// and enforces there too, but by then this call has already created it,
 	// so leaving this one unverified would make that enforcement dead code
 	// in every flow that goes through New.
-	if err := ensureManagedDir(filepath.Join(cfg.ToolsDir, "bin")); err != nil {
+	if err := ensureManagedDir(binDir(cfg.ToolsDir)); err != nil {
 		return nil, err
 	}
 	e.startCatalogSchedule()
