@@ -346,6 +346,104 @@ func TestLinkPMBins_OwnershipFallback(t *testing.T) {
 	})
 }
 
+// TestOwnedBins_SurvivesAReinstall pins the union that keeps ownership across
+// an update. A reinstall over an existing binary creates no new entry, so the
+// diff alone reports nothing; since uninstall acts only on the recorded
+// footprint, letting the diff erase the record orphans the binary forever.
+func TestOwnedBins_SurvivesAReinstall(t *testing.T) {
+	t.Run("a_reinstall_that_added_nothing_keeps_the_recorded_bins", func(t *testing.T) {
+		dir := binDirWith(t, "tsc", "tsserver")
+
+		owned := ownedBins(dir, nil, []string{"tsc", "tsserver"}, "tsc")
+		if !slices.Equal(owned, []string{"tsc", "tsserver"}) {
+			t.Errorf("ownedBins = %v, want [tsc tsserver]: an empty diff must not erase ownership", owned)
+		}
+	})
+	t.Run("a_recorded_bin_the_new_version_dropped_is_released", func(t *testing.T) {
+		dir := binDirWith(t, "tsc")
+
+		owned := ownedBins(dir, nil, []string{"tsc", "tsserver"}, "tsc")
+		if !slices.Equal(owned, []string{"tsc"}) {
+			t.Errorf("ownedBins = %v, want [tsc]: tsserver is gone from the dir, so it is not owned", owned)
+		}
+	})
+	t.Run("the_diff_and_the_record_union", func(t *testing.T) {
+		dir := binDirWith(t, "tsc", "tsgo")
+
+		owned := ownedBins(dir, []string{"tsgo"}, []string{"tsc"}, "tsc")
+		if !slices.Equal(owned, []string{"tsc", "tsgo"}) {
+			t.Errorf("ownedBins = %v, want [tsc tsgo]", owned)
+		}
+	})
+	t.Run("an_erased_record_repairs_itself_from_the_conventional_name", func(t *testing.T) {
+		dir := binDirWith(t, "jq")
+
+		owned := ownedBins(dir, nil, nil, "jq")
+		if !slices.Equal(owned, []string{"jq"}) {
+			t.Errorf("ownedBins = %v, want [jq]: nothing recorded and nothing added, so the fallback applies", owned)
+		}
+	})
+	t.Run("the_fallback_is_a_last_resort", func(t *testing.T) {
+		dir := binDirWith(t, "tsc", "typescript")
+
+		owned := ownedBins(dir, nil, []string{"tsc"}, "typescript")
+		if !slices.Equal(owned, []string{"tsc"}) {
+			t.Errorf("owned = %v, want [tsc] only: ownership was known, so a same-named binary is not absorbed", owned)
+		}
+	})
+}
+
+// TestInstallManual_ReinstallKeepsTheRecordedBins drives the whole manual
+// source through a script that installs two bins, then re-runs it with the
+// files already there. The second pass is the one an update takes: its diff is
+// empty, and before the union it recorded the probe name alone — silently
+// orphaning every other bin the entry owned.
+func TestInstallManual_ReinstallKeepsTheRecordedBins(t *testing.T) {
+	dir := t.TempDir()
+	in := &installer{toolsDir: dir, output: func(string) {}}
+	if err := ensureManagedDirs(in.binDir()); err != nil {
+		t.Fatal(err)
+	}
+	tool := &Tool{
+		Source:  SourceManual,
+		Version: "1.0.0",
+		Install: `printf '#!/bin/sh\n' > "$BIN/tsgo" && printf '#!/bin/sh\n' > "$BIN/tsgo-lsp" && chmod 0755 "$BIN/tsgo" "$BIN/tsgo-lsp"`,
+		Probe:   "tsgo",
+	}
+
+	first, err := in.installManual(t.Context(), "tsgo", tool, nil)
+	if err != nil {
+		t.Fatalf("installManual (first): %v", err)
+	}
+	if !slices.Equal(first, []string{"tsgo", "tsgo-lsp"}) {
+		t.Fatalf("installManual (first) = %v, want [tsgo tsgo-lsp]", first)
+	}
+
+	second, err := in.installManual(t.Context(), "tsgo", tool, first)
+	if err != nil {
+		t.Fatalf("installManual (second): %v", err)
+	}
+	if !slices.Equal(second, []string{"tsgo", "tsgo-lsp"}) {
+		t.Errorf("installManual (reinstall) = %v, want [tsgo tsgo-lsp]: an update must not drop a recorded bin", second)
+	}
+}
+
+// binDirWith creates the engine bin dir holding the named entries and returns
+// its path.
+func binDirWith(t *testing.T, names ...string) string {
+	t.Helper()
+	in := &installer{toolsDir: t.TempDir()}
+	if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(in.binDir(), n), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return in.binDir()
+}
+
 // pmBinWith creates the package manager's bin dir holding the named entries,
 // plus the engine bin dir the links land in, and returns the pm bin path.
 func pmBinWith(t *testing.T, in *installer, names ...string) string {

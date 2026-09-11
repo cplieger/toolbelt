@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"os/exec"
 	"runtime"
 	"slices"
 	"strings"
@@ -183,8 +182,7 @@ func (e *Engine) installedFor(name string, t *Tool, s *ToolStatus) bool {
 func (e *Engine) systemTools() []SystemTool {
 	out := make([]SystemTool, 0, len(e.system))
 	for _, b := range e.system {
-		_, err := exec.LookPath(b)
-		out = append(out, SystemTool{Name: b, Installed: err == nil})
+		out = append(out, SystemTool{Name: b, Installed: hasSystemBin(b)})
 	}
 	return out
 }
@@ -1311,7 +1309,7 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		return nil
 	}
 	output(fmt.Sprintf("installing %s %s (%s)", name, t.Version, t.Source))
-	res, err := e.inst.install(ctx, name, t, e.aquaDef(t.Source), st.PMBins)
+	res, err := e.inst.install(ctx, name, t, e.aquaDef(t.Source), &st)
 	if err != nil {
 		if serr := e.recordFailure(name, err); serr != nil {
 			e.log.Error("toolbelt: install error not recorded", "tool", name, "error", serr)

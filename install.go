@@ -99,10 +99,10 @@ func (in *installer) logger() *slog.Logger {
 	return in.log
 }
 
-func (in *installer) binDir() string    { return filepath.Join(in.toolsDir, "bin") }
-func (in *installer) optDir() string    { return filepath.Join(in.toolsDir, "opt") }
-func (in *installer) npmDir() string    { return filepath.Join(in.toolsDir, "npm") }
-func (in *installer) pythonDir() string { return filepath.Join(in.toolsDir, "python") }
+func (in *installer) binDir() string    { return binDir(in.toolsDir) }
+func (in *installer) optDir() string    { return optDir(in.toolsDir) }
+func (in *installer) npmDir() string    { return npmDir(in.toolsDir) }
+func (in *installer) pythonDir() string { return pythonDir(in.toolsDir) }
 
 // managedDirMode is the mode every directory the engine creates for
 // itself is pinned to: traversable by anyone who can reach the tools
@@ -179,30 +179,33 @@ const downloadAttemptBudget = 10 * time.Minute
 
 // install dispatches one tool install and returns what it produced: the
 // bins it now owns in the bin dir (symlinks/wrappers), the pm-owned
-// bins, and the artifact's verification outcome. prevPM is the tool's
-// previously recorded pm bin set (ownership survives updates).
-func (in *installer) install(ctx context.Context, name string, t *Tool, aq *AquaPackage, prevPM []string) (installOutcome, error) {
+// bins, and the artifact's verification outcome. prev is the tool's
+// previously recorded status, whose bin sets the diff-based sources union
+// with so ownership survives an update (see ownedBins). READ-ONLY: a pointer
+// only because the struct is too wide to copy per install (gocritic hugeParam).
+func (in *installer) install(ctx context.Context, name string, t *Tool, aq *AquaPackage, prev *ToolStatus) (installOutcome, error) {
 	var out installOutcome
 	var err error
 	kind, ref, _ := strings.Cut(t.Source, ":")
+	fallback := derivedProbeName(name, t)
 	switch kind {
 	case SourceAqua:
 		out.bins, out.checksum, err = in.installAqua(ctx, name, t.Version, aq)
 	case SourceNpm:
-		out.pmBins, err = in.installNpm(ctx, ref, t.Version, prevPM)
+		out.pmBins, err = in.installNpm(ctx, ref, t.Version, prev.PMBins)
 	case SourcePip:
-		out.pmBins, err = in.installPip(ctx, ref, t.Version, prevPM)
+		out.pmBins, err = in.installPip(ctx, ref, t.Version, prev.PMBins)
 	case SourceCargo:
-		out.bins, err = in.installCargo(ctx, ref, t.Version)
+		out.bins, err = in.installCargo(ctx, ref, t.Version, prev.Bins, fallback)
 	case SourceGo:
-		out.bins, err = in.installGo(ctx, ref, t.Version)
+		out.bins, err = in.installGo(ctx, ref, t.Version, prev.Bins, fallback)
 	case SourceRelease:
 		out.bins, out.checksum, err = in.installRelease(ctx, name, ref, t.Version, t.Release)
 	case SourceApt:
 		out.apt = true
 		err = in.installApt(ctx, ref)
 	case SourceManual:
-		out.bins, err = in.installManual(ctx, name, t)
+		out.bins, err = in.installManual(ctx, name, t, prev.Bins)
 	default:
 		return installOutcome{}, fmt.Errorf("unknown source %q", t.Source)
 	}
@@ -800,12 +803,16 @@ func (in *installer) pmEnv() []string {
 		// persistent tools tree (the managed interpreter lands under
 		// $HOME/.local/share/uv, which is also on the volume).
 		"UV_TOOL_DIR="+filepath.Join(in.pythonDir(), "tools"),
-		"UV_TOOL_BIN_DIR="+filepath.Join(in.pythonDir(), "bin"),
+		"UV_TOOL_BIN_DIR="+pythonBinDir(in.toolsDir),
 	)
 }
 
 // runPM runs a package-manager command, streaming its combined output
 // line by line into the job log.
+//
+// Bare names on purpose: this engine installs these runtimes, so resolving them
+// through bin/ is the feature and a systemCommand pin would break every backend
+// install. pmEnv puts bin/ first for that reason.
 func (in *installer) runPM(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = in.pmEnv()
@@ -884,10 +891,10 @@ func (in *installer) binDiff(dir string, fn func() error) ([]string, error) {
 // installNpm installs one npm package globally under the engine's npm
 // prefix and symlinks its new bins into the bin dir.
 func (in *installer) installNpm(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.npmDir(), filepath.Join(in.npmDir(), "bin")); err != nil {
+	if err := ensureManagedDirs(in.npmDir(), npmBinDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
-	pmBin := filepath.Join(in.npmDir(), "bin")
+	pmBin := npmBinDir(in.toolsDir)
 	added, err := in.binDiff(pmBin, func() error {
 		return in.runPM(ctx, "npm", "install", "-g", "--prefix", in.npmDir(), pkg+"@"+version)
 	})
@@ -903,10 +910,10 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 // its launcher points at the managed interpreter without the prefix's
 // site-packages, so every entry point dies with ModuleNotFoundError.
 func (in *installer) installPip(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.pythonDir(), filepath.Join(in.pythonDir(), "bin")); err != nil {
+	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
-	pmBin := filepath.Join(in.pythonDir(), "bin")
+	pmBin := pythonBinDir(in.toolsDir)
 	added, err := in.binDiff(pmBin, func() error {
 		return in.runPM(ctx, "uv", "tool", "install", "--reinstall", pkg+"=="+version)
 	})
@@ -916,38 +923,47 @@ func (in *installer) installPip(ctx context.Context, pkg, version string, prev [
 	return in.linkPMBins(pmBin, added, prev, pkg)
 }
 
-// linkPMBins symlinks package-manager bin entries into the engine bin
-// dir and returns the tool's owned bin set: the union of previously
-// recorded bins still present in the pm dir and the diff's new names —
-// a reinstall creates no new entries, so trusting the diff alone would
-// clobber ownership of multi-bin packages (tsc + tsserver). Falls back
-// to the package's conventional bin name for a first install that
-// created nothing new.
-func (in *installer) linkPMBins(pmBin string, added, prev []string, pkg string) ([]string, error) {
+// ownedBins resolves what a tool owns in dir after a diff-based install: the
+// recorded names still present, unioned with the names the diff saw appear.
+// The union is what carries ownership across an update — a reinstall over an
+// existing binary creates no new entry, so the diff alone erases the record,
+// and uninstall acts only on the record, so an erased name is orphaned
+// forever. fallback is the conventional bin name, adopted when neither source
+// named anything: a first install whose binary already existed, and the one
+// thing that lets an already-erased record repair itself.
+func ownedBins(dir string, added, prev []string, fallback string) []string {
 	owned := map[string]bool{}
 	for _, b := range prev {
-		if _, err := os.Stat(filepath.Join(pmBin, b)); err == nil {
+		if _, err := os.Stat(filepath.Join(dir, b)); err == nil {
 			owned[b] = true
 		}
 	}
 	for _, b := range added {
 		owned[b] = true
 	}
-	if len(owned) == 0 {
-		base := pkgBinName(pkg)
-		if _, err := os.Stat(filepath.Join(pmBin, base)); err == nil {
-			owned[base] = true
+	if len(owned) == 0 && fallback != "" {
+		if _, err := os.Stat(filepath.Join(dir, fallback)); err == nil {
+			owned[fallback] = true
 		}
 	}
 	out := make([]string, 0, len(owned))
 	for b := range owned {
-		if err := in.linkBin(b, filepath.Join(pmBin, b)); err != nil {
-			return nil, err
-		}
 		out = append(out, b)
 	}
 	slices.Sort(out)
-	return out, nil
+	return out
+}
+
+// linkPMBins symlinks package-manager bin entries into the engine bin
+// dir and returns the tool's owned bin set.
+func (in *installer) linkPMBins(pmBin string, added, prev []string, pkg string) ([]string, error) {
+	owned := ownedBins(pmBin, added, prev, pkgBinName(pkg))
+	for _, b := range owned {
+		if err := in.linkBin(b, filepath.Join(pmBin, b)); err != nil {
+			return nil, err
+		}
+	}
+	return owned, nil
 }
 
 // pkgBinName maps a package ref to its conventional bin name
@@ -961,28 +977,36 @@ func pkgBinName(pkg string) string {
 
 // installCargo builds/installs a crate with binaries landing directly
 // in the engine bin dir (cargo --root writes <root>/bin).
-func (in *installer) installCargo(ctx context.Context, crate, version string) ([]string, error) {
-	return in.binDiff(in.binDir(), func() error {
+func (in *installer) installCargo(ctx context.Context, crate, version string, prev []string, fallback string) ([]string, error) {
+	added, err := in.binDiff(in.binDir(), func() error {
 		return in.runPM(ctx, "cargo", "install", crate,
 			"--version", strings.TrimPrefix(version, "v"), "--root", in.toolsDir)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return ownedBins(in.binDir(), added, prev, fallback), nil
 }
 
 // installGo `go install`s a module with GOBIN pointed at the bin dir.
-func (in *installer) installGo(ctx context.Context, module, version string) ([]string, error) {
+func (in *installer) installGo(ctx context.Context, module, version string, prev []string, fallback string) ([]string, error) {
 	ver := version
 	if !strings.HasPrefix(ver, "v") {
 		ver = "v" + ver
 	}
-	return in.binDiff(in.binDir(), func() error {
+	added, err := in.binDiff(in.binDir(), func() error {
 		return in.runPM(ctx, "go", "install", module+"@"+ver)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return ownedBins(in.binDir(), added, prev, fallback), nil
 }
 
 // installManual runs a user-provided shell command with the engine's
 // path variables exported. The command is responsible for placing
 // binaries in $BIN (or $OPT for larger trees).
-func (in *installer) installManual(ctx context.Context, name string, t *Tool) ([]string, error) {
+func (in *installer) installManual(ctx context.Context, name string, t *Tool, prev []string) ([]string, error) {
 	if strings.TrimSpace(t.Install) == "" {
 		return nil, fmt.Errorf("manual tool %s has no install command", name)
 	}
@@ -1003,10 +1027,7 @@ func (in *installer) installManual(ctx context.Context, name string, t *Tool) ([
 	if _, err := os.Stat(filepath.Join(in.binDir(), probe)); err != nil {
 		return nil, fmt.Errorf("install command finished but %s is not in the bin dir", probe)
 	}
-	if !slices.Contains(added, probe) {
-		added = append(added, probe)
-	}
-	return added, nil
+	return ownedBins(in.binDir(), append(added, probe), prev, probe), nil
 }
 
 // runShell executes a manual install/uninstall command under bash with
@@ -1015,7 +1036,12 @@ func (in *installer) installManual(ctx context.Context, name string, t *Tool) ([
 // (self-documenting OR names: the value is the left side on amd64, the
 // right side on arm64).
 func (in *installer) runShell(ctx context.Context, command, version, optDir string) error {
-	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	// The interpreter is pinned; the script's own PATH is not, because reaching
+	// the managed tools is what the escape hatch is for.
+	cmd, err := systemCommand(ctx, "bash", "-c", command)
+	if err != nil {
+		return err
+	}
 	arm := runtime.GOARCH == goarchARM64
 	pick := func(amd, a64 string) string {
 		if arm {
