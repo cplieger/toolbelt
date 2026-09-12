@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/cplieger/atomicfile/v3 v3.0.1 h1:F5MZQ8Tvn9K0imJ59rFVofgtnGR5Gtf94Ivk9v3gC7o=
-github.com/cplieger/atomicfile/v3 v3.0.1/go.mod h1:jhxOw5RQn5pYB0eAo5SLRPXKYChRxT/bW/TnTcLZa78=
+github.com/cplieger/atomicfile/v3 v3.1.0 h1:jcDzYnT6nvhIqbo3w9g0Wnkeca8r0ofs0hy6+xQmwo4=
+github.com/cplieger/atomicfile/v3 v3.1.0/go.mod h1:jhxOw5RQn5pYB0eAo5SLRPXKYChRxT/bW/TnTcLZa78=
 github.com/cplieger/httpx/v5 v5.0.3 h1:bMtqn9nQXCD/0AdS2eEsl4K7QjYdANyM3ZyksDxKSug=
 github.com/cplieger/httpx/v5 v5.0.3/go.mod h1:3LKMRNjhTYJM9lwDfGpyjtpL4umH6wSMpeD2vanUYlk=
 github.com/cplieger/keyenc v1.0.7 h1:WlTRDm84eHjWqhiNVlT7mmVcNLIehMAzFFHSU05zz1w=
