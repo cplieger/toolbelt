@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -255,7 +256,7 @@ func TestRankAptNames_PutsTheShortestPrefixMatchFirst(t *testing.T) {
 		"ipython3":        "enhanced interactive Python shell",
 		"unrelated":       "nothing to do with it",
 	}
-	got := rankAptNames(names, "python")
+	got, _ := rankAptNames(names, "python")
 	if len(got) == 0 {
 		t.Fatal("rankAptNames returned nothing")
 	}
@@ -271,8 +272,22 @@ func TestRankAptNames_PutsTheShortestPrefixMatchFirst(t *testing.T) {
 			t.Error("a non-matching package was returned")
 		}
 	}
-	if len(rankAptNames(names, "nothing to do")) == 0 {
+	if descHits, _ := rankAptNames(names, "nothing to do"); len(descHits) == 0 {
 		t.Error("a description-only match returned nothing")
+	}
+}
+
+// TestRankAptNames_CountsEveryMatchBeforeTheCap pins the count a consumer
+// needs to say "8 of 11 shown": the hits stop at aptSearchLimit, the
+// count does not.
+func TestRankAptNames_CountsEveryMatchBeforeTheCap(t *testing.T) {
+	names := map[string]string{"unrelated": "nothing to do with it"}
+	for i := range 11 {
+		names[fmt.Sprintf("zqx-%02d", i)] = "probe package"
+	}
+	hits, matched := rankAptNames(names, "zqx")
+	if len(hits) != aptSearchLimit || matched != 11 {
+		t.Errorf("rankAptNames(zqx) = %d hits, %d matched, want %d hits, 11 matched", len(hits), matched, aptSearchLimit)
 	}
 }
 
@@ -280,21 +295,21 @@ func TestRankAptNames_PutsTheShortestPrefixMatchFirst(t *testing.T) {
 // unavailable-vs-empty distinction Search's doc comment explains.
 func TestAptIndexSearch_DistinguishesUnavailableFromEmpty(t *testing.T) {
 	empty := newAptIndex(slog.Default())
-	if hits, ok := empty.Search("gcc"); ok || hits != nil {
+	if hits, _, ok := empty.Search("gcc"); ok || hits != nil {
 		t.Errorf("an unloaded index reported ok=%v hits=%v, want false/nil", ok, hits)
 	}
 	loaded := newAptIndex(slog.Default())
 	loaded.names = map[string]string{"gcc": "GNU C compiler"}
-	if hits, ok := loaded.Search("nosuchthing"); !ok || len(hits) != 0 {
+	if hits, _, ok := loaded.Search("nosuchthing"); !ok || len(hits) != 0 {
 		t.Errorf("a loaded index with no matches reported ok=%v hits=%v, want true/empty", ok, hits)
 	}
 	// Below the minimum query length there is nothing to rank: one
 	// character matches tens of thousands of the 68,799 names.
-	if hits, _ := loaded.Search("g"); len(hits) != 0 {
+	if hits, _, _ := loaded.Search("g"); len(hits) != 0 {
 		t.Errorf("a single-character query returned %d hits, want 0", len(hits))
 	}
 	var nilIdx *aptIndex
-	if hits, ok := nilIdx.Search("gcc"); ok || hits != nil {
+	if hits, _, ok := nilIdx.Search("gcc"); ok || hits != nil {
 		t.Error("a nil index did not report unavailable")
 	}
 }

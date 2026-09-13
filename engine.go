@@ -187,13 +187,60 @@ func (e *Engine) systemTools() []SystemTool {
 	return out
 }
 
+// SearchCounts is one query answered from every corpus the engine
+// searches, each block cut to its cap beside the count it had before
+// the cut. A block is cut iff its Matched count exceeds its length;
+// nothing else reports a cut.
+//
+// The catalog entries alias the catalog: do not mutate their slice fields
+// (see [CatalogEntry]).
+type SearchCounts struct {
+	// Installable is what [Engine.Search] returns: catalog entries with
+	// an install source, minus those already in the manifest.
+	Installable []CatalogEntry
+	// Unavailable is what [Engine.SearchUnavailable] returns.
+	Unavailable []CatalogEntry
+	// Apt is what [Engine.SearchApt] returns; empty when AptAvailable is
+	// false.
+	Apt []AptHit
+	// InstallableMatched is how many entries Installable would hold had
+	// nothing cut it.
+	InstallableMatched int
+	// UnavailableMatched is how many entries Unavailable would hold had
+	// nothing cut it.
+	UnavailableMatched int
+	// AptMatched is how many packages Apt would hold had nothing cut it.
+	AptMatched int
+	// AptAvailable is the bool [Engine.SearchApt] returns: false means
+	// the package list could not be consulted, which a consumer must
+	// render differently from an empty Apt.
+	AptAvailable bool
+}
+
+// SearchWithCounts answers one query from every corpus at once. It is
+// what a consumer building one reply calls, so the per-package work behind
+// Apt (see aptHitsWithCandidate) runs once per request; [Engine.Search],
+// [Engine.SearchUnavailable] and [Engine.SearchApt] are its projections.
+func (e *Engine) SearchWithCounts(query string) SearchCounts {
+	var sc SearchCounts
+	sc.Installable, sc.InstallableMatched = e.searchInstallable(query)
+	sc.Unavailable, sc.UnavailableMatched = e.searchUnavailable(query)
+	sc.Apt, sc.AptMatched, sc.AptAvailable = e.searchApt(query)
+	return sc
+}
+
 // Search queries the catalog (empty query = featured set), hiding
 // entries already in the manifest.
 //
 // The returned entries alias the catalog: do not mutate their slice fields
 // (see [CatalogEntry]).
 func (e *Engine) Search(query string) []CatalogEntry {
-	return e.filterInstalled(e.cat().Search(query))
+	hits, _ := e.searchInstallable(query)
+	return hits
+}
+
+func (e *Engine) searchInstallable(query string) (hits []CatalogEntry, matched int) {
+	return cutSearch(e.filterInstalled(e.cat().Search(query)))
 }
 
 // SearchUnavailable ranks the catalog entries no install source exists
@@ -203,7 +250,22 @@ func (e *Engine) Search(query string) []CatalogEntry {
 // The returned entries alias the catalog: do not mutate their slice fields
 // (see [CatalogEntry]).
 func (e *Engine) SearchUnavailable(query string) []CatalogEntry {
-	return e.filterInstalled(e.cat().SearchUnavailable(query))
+	hits, _ := e.searchUnavailable(query)
+	return hits
+}
+
+func (e *Engine) searchUnavailable(query string) (hits []CatalogEntry, matched int) {
+	return cutSearch(e.filterInstalled(e.cat().SearchUnavailable(query)))
+}
+
+// cutSearch caps a filtered block at searchLimit and reports how many
+// rows it held before the cap. It runs AFTER filterInstalled so the count
+// and the rows describe one population: a cut taken before the filter
+// would count a row the filter then drops, and report a cut on a reply
+// that carries every row the user can see.
+func cutSearch(hits []CatalogEntry) (cut []CatalogEntry, matched int) {
+	matched = len(hits)
+	return hits[:min(matched, searchLimit)], matched
 }
 
 // filterInstalled drops hits already present in the manifest. An
@@ -245,17 +307,22 @@ func (e *Engine) filterInstalled(hits []CatalogEntry) []CatalogEntry {
 // lazy precisely so a headless consumer that never searches never pays
 // for the index at all.
 func (e *Engine) SearchApt(query string) ([]AptHit, bool) {
+	hits, _, ok := e.searchApt(query)
+	return hits, ok
+}
+
+func (e *Engine) searchApt(query string) (hits []AptHit, matched int, ok bool) {
 	if !AptAvailable() {
-		return nil, false
+		return nil, 0, false
 	}
 	if e.aptIdx.stale() {
 		go e.aptIdx.refresh(context.WithoutCancel(context.Background()))
 	}
-	hits, ok := e.aptIdx.Search(query)
+	hits, matched, ok = e.aptIdx.Search(query)
 	if !ok {
-		return nil, false
+		return nil, 0, false
 	}
-	return e.aptHitsWithCandidate(hits), true
+	return e.aptHitsWithCandidate(hits), matched, true
 }
 
 // aptHitsWithCandidate fills in the version apt would install, for the

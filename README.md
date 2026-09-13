@@ -137,7 +137,7 @@ go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
 | Route | Engine call | Notes |
 | --- | --- | --- |
 | `GET {prefix}` | `Inventory` | |
-| `GET {prefix}/search?q=` | `Search` | results omit embedded install definitions |
+| `GET {prefix}/search?q=` | `SearchWithCounts` | results omit embedded install definitions; `truncated` is true when a block was cut to its cap |
 | `POST {prefix}` | `Add` | 202 `{job}` (null for template adds) |
 | `PATCH {prefix}/{name}` | `Patch` | the toggle verb; 409 `has_dependents` + names |
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on templates |
