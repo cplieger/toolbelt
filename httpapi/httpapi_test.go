@@ -692,6 +692,92 @@ func TestRoutes_SearchHidesUnavailableUnlessAsked(t *testing.T) {
 	}
 }
 
+// probeCatalogDoc is a compiled catalog whose every entry matches the
+// query "zqx" by name prefix (and nothing in a Debian package list does):
+// installable zqx-01.. and unavailable zqx-u01...
+func probeCatalogDoc(installable, unavailable int) string {
+	entries := make([]string, 0, installable)
+	for i := 1; i <= installable; i++ {
+		name := fmt.Sprintf("zqx-%02d", i)
+		entries = append(entries, fmt.Sprintf(`%q:{"name":%q,"source":"npm:%s"}`, name, name, name))
+	}
+	unavail := make([]string, 0, unavailable)
+	for i := 1; i <= unavailable; i++ {
+		name := fmt.Sprintf("zqx-u%02d", i)
+		unavail = append(unavail, fmt.Sprintf(`%q:{"name":%q,"reason":"core:%s"}`, name, name, name))
+	}
+	return `{"entries":{` + strings.Join(entries, ",") + `},"unavailable":{` + strings.Join(unavail, ",") + `}}`
+}
+
+// TestRoutes_SearchReportsTheCutAfterTheInstalledFilter pins the wire
+// meaning of truncated: a block in Results matched more rows than the
+// reply carries. The count is taken after the manifest filter, so a
+// reply holding every row the user can see is never flagged, and it is
+// taken only over the blocks the reply holds, so the unavailable block
+// sets it only when the caller asked for that block.
+func TestRoutes_SearchReportsTheCutAfterTheInstalledFilter(t *testing.T) {
+	cases := []struct {
+		name          string
+		doc           string
+		installed     string
+		path          string
+		wantRows      int
+		wantTruncated bool
+	}{
+		{
+			name:      "25_matched_one_installed",
+			doc:       probeCatalogDoc(25, 0),
+			installed: "zqx-01",
+			path:      "/api/tools/search?q=zqx",
+			wantRows:  24,
+		},
+		{
+			name:          "27_matched_one_installed",
+			doc:           probeCatalogDoc(27, 0),
+			installed:     "zqx-01",
+			path:          "/api/tools/search?q=zqx",
+			wantRows:      25,
+			wantTruncated: true,
+		},
+		{
+			name:          "26_unavailable_asked",
+			doc:           probeCatalogDoc(0, 26),
+			path:          "/api/tools/search?q=zqx&unavailable=1",
+			wantRows:      25,
+			wantTruncated: true,
+		},
+		{
+			name:     "26_unavailable_unasked",
+			doc:      probeCatalogDoc(0, 26),
+			path:     "/api/tools/search?q=zqx",
+			wantRows: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e, srv := newServerWithCatalog(t, tc.doc)
+			if tc.installed != "" {
+				if _, err := e.Add(t.Context(), &toolbelt.AddRequest{Name: tc.installed, Disabled: true}); err != nil {
+					t.Fatalf("Add(%s): %v", tc.installed, err)
+				}
+			}
+			var sr SearchResponse
+			if code := call(t, srv, http.MethodGet, tc.path, "", &sr); code != http.StatusOK {
+				t.Fatalf("GET %s = %d, want 200", tc.path, code)
+			}
+			if len(sr.Results) != tc.wantRows || sr.Truncated != tc.wantTruncated {
+				t.Errorf("GET %s = %d rows, truncated %v; want %d rows, truncated %v",
+					tc.path, len(sr.Results), sr.Truncated, tc.wantRows, tc.wantTruncated)
+			}
+			for i := range sr.Results {
+				if sr.Results[i].Name == tc.installed {
+					t.Errorf("GET %s offers %q, which the manifest already holds", tc.path, tc.installed)
+				}
+			}
+		})
+	}
+}
+
 // TestSearchWantsUnavailable covers the parameter's spellings. A bare
 // `?unavailable` is a yes: a caller who writes it plainly means it, and
 // answering with silence would be the unhelpful reading.

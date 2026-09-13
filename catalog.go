@@ -214,8 +214,9 @@ func (c *Catalog) SearchUnavailable(query string) []CatalogEntry {
 }
 
 // rankEntries scores one entry map against a lowercased query and
-// returns the best searchLimit matches. Scoring and ordering are
-// [Match] and [CompareRank], shared with the Debian package corpus.
+// returns every match, best first. Scoring and ordering are [Match] and
+// [CompareRank], shared with the Debian package corpus. The cap is the
+// engine's, applied after its installed filter (see cutSearch).
 func rankEntries(entries map[string]CatalogEntry, q string) []CatalogEntry {
 	type scored struct {
 		e     CatalogEntry
@@ -233,9 +234,8 @@ func rankEntries(entries map[string]CatalogEntry, q string) []CatalogEntry {
 	slices.SortStableFunc(hits, func(a, b scored) int {
 		return CompareRank(Rank{Name: a.e.Name, Score: a.score}, Rank{Name: b.e.Name, Score: b.score})
 	})
-	lim := min(len(hits), searchLimit)
-	out := make([]CatalogEntry, 0, lim)
-	for i := range hits[:lim] {
+	out := make([]CatalogEntry, 0, len(hits))
+	for i := range hits {
 		out = append(out, hits[i].e)
 	}
 	return out
@@ -352,9 +352,6 @@ func (c *Catalog) Featured() []CatalogEntry {
 		}
 	}
 	slices.SortFunc(out, func(a, b CatalogEntry) int { return cmp.Compare(a.Name, b.Name) })
-	if len(out) > searchLimit {
-		out = out[:searchLimit]
-	}
 	return out
 }
 

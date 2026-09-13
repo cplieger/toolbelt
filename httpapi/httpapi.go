@@ -93,6 +93,12 @@ type SearchHit struct {
 type SearchResponse struct {
 	Results      []SearchHit `json:"results"`
 	AptAvailable bool        `json:"apt_available"`
+	// Truncated reports a CUT: some block in Results matched more rows than
+	// the reply carries, so a client showing "N results" is showing fewer than
+	// the query found. It is judged only over the blocks the reply holds, so
+	// an unavailable block the caller did not ask for never sets it, and a
+	// reply carrying every row the query matched is never flagged.
+	Truncated bool `json:"truncated"`
 }
 
 // JobsResponse is the jobs route's body: the active job (with output
@@ -205,22 +211,20 @@ const searchUnavailableParam = "unavailable"
 
 func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
-	installable := e.Search(q)
-	aptHits, aptOK := e.SearchApt(q)
+	sc := e.SearchWithCounts(q)
 
-	var unavailable []toolbelt.CatalogEntry
-	if searchWantsUnavailable(r) {
-		unavailable = e.SearchUnavailable(q)
-	}
-
-	merged := mergeSearchHits(installable, aptHits, q)
+	merged := mergeSearchHits(sc.Installable, sc.Apt, q)
 	res := SearchResponse{
-		Results:      make([]SearchHit, 0, len(merged)+len(unavailable)),
-		AptAvailable: aptOK,
+		Results:      make([]SearchHit, 0, len(merged)+len(sc.Unavailable)),
+		AptAvailable: sc.AptAvailable,
+		Truncated:    sc.InstallableMatched > len(sc.Installable) || sc.AptMatched > len(sc.Apt),
 	}
 	res.Results = append(res.Results, merged...)
-	for i := range unavailable {
-		res.Results = append(res.Results, searchHit(&unavailable[i], true))
+	if searchWantsUnavailable(r) {
+		for i := range sc.Unavailable {
+			res.Results = append(res.Results, searchHit(&sc.Unavailable[i], true))
+		}
+		res.Truncated = res.Truncated || sc.UnavailableMatched > len(sc.Unavailable)
 	}
 	webhttp.WriteJSON(w, res)
 }

@@ -139,7 +139,7 @@ func (a *aptIndex) stale() bool {
 
 // Search ranks the package list against a query.
 //
-// It returns (nil, false) when no index is available, which a consumer
+// It returns (nil, 0, false) when no index is available, which a consumer
 // must render as "apt search is unavailable" rather than as an empty
 // result: those two answers look identical and mean opposite things, and
 // conflating them is how the original catalog bug hid for as long as it
@@ -148,17 +148,18 @@ func (a *aptIndex) stale() bool {
 // A query shorter than aptMinQuery returns nothing. With 68,799 names, a
 // single character matches tens of thousands of them and every one of
 // those results is noise.
-func (a *aptIndex) Search(query string) ([]AptHit, bool) {
+func (a *aptIndex) Search(query string) (hits []AptHit, matched int, ok bool) {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if a == nil || len(q) < aptMinQuery {
-		return nil, a != nil && a.ready()
+		return nil, 0, a != nil && a.ready()
 	}
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if len(a.names) == 0 {
-		return nil, false
+		return nil, 0, false
 	}
-	return rankAptNames(a.names, q), true
+	hits, matched = rankAptNames(a.names, q)
+	return hits, matched, true
 }
 
 // aptMinQuery is the shortest query the package corpus answers.
@@ -183,33 +184,36 @@ type AptHit struct {
 // rankAptNames scores the package corpus with [Match] and orders it with
 // [CompareRank] — the catalog's own scoring, which is what lets a
 // consumer merge the two corpora into one relevance-ordered list. A
-// package has no aliases, which is the only difference between the two
-// corpora and the reason this once carried a near-copy of the tier table.
-func rankAptNames(names map[string]string, q string) []AptHit {
+// package has no aliases, the only difference between the two corpora.
+//
+// The cut to aptSearchLimit sits here, not in the engine, because nothing
+// downstream drops a row (aptHitsWithCandidate fills every hit it is
+// given), so hits and matched already describe one population.
+func rankAptNames(names map[string]string, q string) (hits []AptHit, matched int) {
 	type scored struct {
 		hit   AptHit
 		score int
 	}
-	var hits []scored
+	var ranked []scored
 	for name, desc := range names {
 		_, score := Match(name, nil, desc, q)
 		if score == 0 {
 			continue
 		}
-		hits = append(hits, scored{AptHit{Name: name, Description: desc}, score})
+		ranked = append(ranked, scored{AptHit{Name: name, Description: desc}, score})
 	}
-	slices.SortStableFunc(hits, func(a, b scored) int {
+	slices.SortStableFunc(ranked, func(a, b scored) int {
 		return CompareRank(
 			Rank{Name: a.hit.Name, Score: a.score},
 			Rank{Name: b.hit.Name, Score: b.score},
 		)
 	})
-	lim := min(len(hits), aptSearchLimit)
-	out := make([]AptHit, 0, lim)
-	for i := range hits[:lim] {
-		out = append(out, hits[i].hit)
+	lim := min(len(ranked), aptSearchLimit)
+	hits = make([]AptHit, 0, lim)
+	for i := range ranked[:lim] {
+		hits = append(hits, ranked[i].hit)
 	}
-	return out
+	return hits, len(ranked)
 }
 
 // ensure makes the index usable as an oracle, synchronously: the lists
