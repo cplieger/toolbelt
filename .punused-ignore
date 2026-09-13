@@ -133,3 +133,19 @@ method (*RootIntegrityError).Is
 # -- called directly -- is not flagged and this one, reached through the
 # io.Writer interface, is. Upstream: bep/punused#3.
 method (*cappedBuffer).Write
+
+#
+# The three list-returning search projections (engine.go) are the published
+# surface httpapi used until SearchWithCounts replaced it, and every in-module
+# production caller moved with the route. Neither consumer calls them directly
+# (vibekit and web-terminal-kiro both mount httpapi.Handler; grep 2026-09-13),
+# so this is genuine test-only reach, not a gopls blind spot. They stay because
+# removing an exported method is a breaking change: gorelease would demand a
+# major, and a major on this module is a /v4 import-path migration in both
+# consumers, disproportionate for three methods. Their removal is scheduled for
+# the release that adopts the shared search envelope, which is a major anyway.
+# The trailing clause pins each name exactly; a bare `Search` prefix would also
+# swallow SearchWithCounts, whose reach this entry must not hide.
+method (*Engine).Search is used in test only
+method (*Engine).SearchUnavailable is used in test only
+method (*Engine).SearchApt is used in test only
