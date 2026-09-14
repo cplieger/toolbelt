@@ -26,7 +26,7 @@ import (
 	"strings"
 
 	"github.com/cplieger/toolbelt/v3"
-	"github.com/cplieger/webhttp/v2"
+	"github.com/cplieger/webhttp/v3"
 )
 
 // maxBodyBytes caps request bodies: tool definitions are small.
