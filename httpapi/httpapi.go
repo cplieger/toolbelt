@@ -5,7 +5,8 @@
 // polling the jobs route.
 //
 // Mutations return 202 with the enqueued job (null when none was
-// needed). has_dependents and disabled refusals are 409.
+// needed). A refusal is 409 under a code naming it: has_dependents,
+// essential, disabled, not_configured.
 //
 // GET /search?q=<query> returns installable hits, and, with
 // &unavailable=1, the catalog entries no install source exists for
@@ -89,10 +90,24 @@ type SearchHit struct {
 //
 // AptAvailable distinguishes "no Debian package matched" from "the
 // package list could not be consulted" — identical in an empty result,
-// opposite in meaning.
+// opposite in meaning. AptState says which of the two reasons the list
+// could not be consulted, which is what lets a client report a pending
+// condition instead of asserting an absence.
 type SearchResponse struct {
-	Results      []SearchHit `json:"results"`
-	AptAvailable bool        `json:"apt_available"`
+	Results []SearchHit `json:"results"`
+	// AptState names what the Debian corpus could say — see
+	// [toolbelt.AptState] for the three values. Absent from an engine
+	// predating the field, where AptAvailable is the whole answer.
+	AptState string `json:"apt_state,omitempty"`
+	// Matched is how many rows the query matched across the blocks
+	// Results holds, before each was cut to its cap. It is the
+	// denominator Truncated has no room for, so a client can say "25 of
+	// 61" instead of stating a cut it cannot size. Same population as
+	// Truncated: an unavailable block the caller did not ask for is not
+	// counted. Absent when the query matched nothing, and from an engine
+	// predating the field.
+	Matched      int  `json:"matched,omitempty"`
+	AptAvailable bool `json:"apt_available"`
 	// Truncated reports a CUT: some block in Results matched more rows than
 	// the reply carries, so a client showing "N results" is showing fewer than
 	// the query found. It is judged only over the blocks the reply holds, so
@@ -216,6 +231,8 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	merged := mergeSearchHits(sc.Installable, sc.Apt, q)
 	res := SearchResponse{
 		Results:      make([]SearchHit, 0, len(merged)+len(sc.Unavailable)),
+		AptState:     string(sc.AptState),
+		Matched:      sc.InstallableMatched + sc.AptMatched,
 		AptAvailable: sc.AptAvailable,
 		Truncated:    sc.InstallableMatched > len(sc.Installable) || sc.AptMatched > len(sc.Apt),
 	}
@@ -224,6 +241,7 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		for i := range sc.Unavailable {
 			res.Results = append(res.Results, searchHit(&sc.Unavailable[i], true))
 		}
+		res.Matched += sc.UnavailableMatched
 		res.Truncated = res.Truncated || sc.UnavailableMatched > len(sc.Unavailable)
 	}
 	webhttp.WriteJSON(w, res)
@@ -416,6 +434,8 @@ func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 			Code:       "has_dependents",
 			Dependents: dep.Dependents,
 		})
+	case errors.Is(err, toolbelt.ErrEssential):
+		webhttp.WriteError(w, r, http.StatusConflict, "essential", err.Error())
 	case errors.Is(err, toolbelt.ErrNotFound):
 		webhttp.WriteError(w, r, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, toolbelt.ErrDisabled):

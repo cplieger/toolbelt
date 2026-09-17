@@ -209,6 +209,9 @@ type SearchCounts struct {
 	// UnavailableMatched is how many entries Unavailable would hold had
 	// nothing cut it.
 	UnavailableMatched int
+	// AptState says WHY the package list did or did not answer; see
+	// [AptState]. AptAvailable is the same verdict narrowed to a bool.
+	AptState AptState
 	// AptMatched is how many packages Apt would hold had nothing cut it.
 	AptMatched int
 	// AptAvailable is the bool [Engine.SearchApt] returns: false means
@@ -225,7 +228,8 @@ func (e *Engine) SearchWithCounts(query string) SearchCounts {
 	var sc SearchCounts
 	sc.Installable, sc.InstallableMatched = e.searchInstallable(query)
 	sc.Unavailable, sc.UnavailableMatched = e.searchUnavailable(query)
-	sc.Apt, sc.AptMatched, sc.AptAvailable = e.searchApt(query)
+	sc.Apt, sc.AptMatched, sc.AptState = e.searchApt(query)
+	sc.AptAvailable = sc.AptState == AptStateAvailable
 	return sc
 }
 
@@ -295,11 +299,13 @@ func (e *Engine) filterInstalled(hits []CatalogEntry) []CatalogEntry {
 
 // SearchApt ranks Debian packages against a query.
 //
-// ok=false means no package list is available: apt is not usable on this
-// host, or no index has been loaded yet. A consumer must render that
-// differently from an empty result, because "apt search is unavailable"
-// and "no package matches" look identical and mean opposite things, and
-// conflating them is the exact shape of the bug this whole change fixes.
+// ok=false means no package list is available. A consumer must render
+// that differently from an empty result, because "apt search is
+// unavailable" and "no package matches" look identical and mean opposite
+// things, and conflating them is the exact shape of the bug this whole
+// change fixes. Which of the two reasons it was is [AptState], on
+// [SearchCounts]; a consumer that tells a reader anything about apt wants
+// that rather than this bool.
 //
 // The first call triggers a background refresh and returns whatever is
 // loaded, which on a cold engine is nothing. That is deliberate: a search
@@ -307,22 +313,49 @@ func (e *Engine) filterInstalled(hits []CatalogEntry) []CatalogEntry {
 // lazy precisely so a headless consumer that never searches never pays
 // for the index at all.
 func (e *Engine) SearchApt(query string) ([]AptHit, bool) {
-	hits, _, ok := e.searchApt(query)
-	return hits, ok
+	hits, _, state := e.searchApt(query)
+	return hits, state == AptStateAvailable
 }
 
-func (e *Engine) searchApt(query string) (hits []AptHit, matched int, ok bool) {
+// AptState says what one search could learn from the Debian package
+// corpus. It splits the false half of the bool [Engine.SearchApt]
+// returns, which covers two facts that mean opposite things to a reader:
+// a host where apt cannot be used at all, and a host whose index has not
+// been read yet.
+//
+// The zero value states nothing, so a consumer decoding a reply from an
+// engine that predates this falls back to the bool.
+type AptState string
+
+// The states, ordered by how much the corpus can ever say. There is no
+// name for the zero value: no search returns it, and it exists on the
+// wire only as the absence a consumer reads from an older engine.
+const (
+	// AptStateUnavailable means apt is not usable here (see
+	// [AptAvailable]), so no search will answer from the corpus.
+	AptStateUnavailable AptState = "unavailable"
+	// AptStateIndexing means apt is usable and no package index is
+	// loaded. The first search starts the load and answers without it, so
+	// a later search answers from the corpus — a consumer says it is
+	// checking rather than asserting an absence it cannot support.
+	AptStateIndexing AptState = "indexing"
+	// AptStateAvailable means the corpus answered this query, so an empty
+	// Apt block means nothing matched.
+	AptStateAvailable AptState = "available"
+)
+
+func (e *Engine) searchApt(query string) (hits []AptHit, matched int, state AptState) {
 	if !AptAvailable() {
-		return nil, 0, false
+		return nil, 0, AptStateUnavailable
 	}
 	if e.aptIdx.stale() {
 		go e.aptIdx.refresh(context.WithoutCancel(context.Background()))
 	}
-	hits, matched, ok = e.aptIdx.Search(query)
-	if !ok {
-		return nil, 0, false
+	hits, matched, consulted := e.aptIdx.Search(query)
+	if !consulted {
+		return nil, 0, AptStateIndexing
 	}
-	return e.aptHitsWithCandidate(hits), matched, true
+	return e.aptHitsWithCandidate(hits), matched, AptStateAvailable
 }
 
 // aptHitsWithCandidate fills in the version apt would install, for the

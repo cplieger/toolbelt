@@ -387,12 +387,27 @@ func TestCatalogRefreshRoute(t *testing.T) {
 // response headers, which needs no listener.
 func newHandler(t *testing.T) (*toolbelt.Engine, http.Handler) {
 	t.Helper()
+	return newHandlerWithCatalog(t, "")
+}
+
+// newHandlerWithCatalog is newHandler over a compiled catalog. An empty
+// doc leaves CatalogPath unset, which is the degraded mode newHandler
+// wants; a doc is what a refusal derived from catalog data needs.
+func newHandlerWithCatalog(t *testing.T, doc string) (*toolbelt.Engine, http.Handler) {
+	t.Helper()
 	dir := t.TempDir()
-	e, err := toolbelt.New(&toolbelt.Config{
+	cfg := &toolbelt.Config{
 		ConfigDir: dir,
 		ToolsDir:  dir + "/tools",
 		Logger:    slog.Default(),
-	})
+	}
+	if doc != "" {
+		cfg.CatalogPath = filepath.Join(dir, "tool-catalog.json")
+		if err := os.WriteFile(cfg.CatalogPath, []byte(doc), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e, err := toolbelt.New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,6 +584,49 @@ func TestCachePolicy_EveryWriterClass(t *testing.T) {
 	}
 }
 
+// TestRoutes_EssentialRemovalIsACodedRefusal covers the writeEngineError
+// arm the table above cannot reach: the refusal is derived from catalog
+// data, so it needs a catalog declaring a tool essential.
+//
+// The code is the whole point — the default arm answers 400 bad_request,
+// which a client cannot tell from a malformed request. Both spellings of
+// the DELETE go through it: the cascade is how an essential tool would
+// otherwise leave as somebody else's collateral.
+func TestRoutes_EssentialRemovalIsACodedRefusal(t *testing.T) {
+	const doc = `{"entries":{"gh":{"name":"gh","source":"manual","version":"1","install":"true","essential":true}}}`
+	e, h := newHandlerWithCatalog(t, doc)
+	if _, err := e.Add(t.Context(), &toolbelt.AddRequest{Name: "gh", Disabled: true}); err != nil {
+		t.Fatalf("Setup: add gh: %v", err)
+	}
+	for _, path := range []string{"/api/tools/gh", "/api/tools/gh?force=1"} {
+		t.Run(path, func(t *testing.T) {
+			rec, atCommit := serve(t, h, http.MethodDelete, path, "")
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("DELETE %s = %d, want 409 (body %s)", path, rec.Code, rec.Body.String())
+			}
+			var env struct {
+				Error string `json:"error"`
+				Code  string `json:"code"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatalf("DELETE %s: decode %s: %v", path, rec.Body.String(), err)
+			}
+			if env.Code != "essential" {
+				t.Errorf("DELETE %s code = %q, want %q", path, env.Code, "essential")
+			}
+			if !strings.Contains(env.Error, "gh") {
+				t.Errorf("DELETE %s error = %q, want it to name the tool", path, env.Error)
+			}
+			assertCachePolicy(t, rec, atCommit, noStorePolicy)
+		})
+	}
+	if inv, err := e.Inventory(); err != nil {
+		t.Fatal(err)
+	} else if !slices.ContainsFunc(inv.Tools, func(ti toolbelt.ToolInfo) bool { return ti.Name == "gh" }) {
+		t.Error("the refused removals still deleted the row")
+	}
+}
+
 // TestCachePolicy_SuccessfulCancel covers webhttp.Ok, the one writer
 // class the table above cannot reach without a job actually queued.
 func TestCachePolicy_SuccessfulCancel(t *testing.T) {
@@ -722,14 +780,16 @@ func TestRoutes_SearchReportsTheCutAfterTheInstalledFilter(t *testing.T) {
 		installed     string
 		path          string
 		wantRows      int
+		wantMatched   int
 		wantTruncated bool
 	}{
 		{
-			name:      "25_matched_one_installed",
-			doc:       probeCatalogDoc(25, 0),
-			installed: "zqx-01",
-			path:      "/api/tools/search?q=zqx",
-			wantRows:  24,
+			name:        "25_matched_one_installed",
+			doc:         probeCatalogDoc(25, 0),
+			installed:   "zqx-01",
+			path:        "/api/tools/search?q=zqx",
+			wantRows:    24,
+			wantMatched: 24,
 		},
 		{
 			name:          "27_matched_one_installed",
@@ -737,6 +797,7 @@ func TestRoutes_SearchReportsTheCutAfterTheInstalledFilter(t *testing.T) {
 			installed:     "zqx-01",
 			path:          "/api/tools/search?q=zqx",
 			wantRows:      25,
+			wantMatched:   26,
 			wantTruncated: true,
 		},
 		{
@@ -744,6 +805,7 @@ func TestRoutes_SearchReportsTheCutAfterTheInstalledFilter(t *testing.T) {
 			doc:           probeCatalogDoc(0, 26),
 			path:          "/api/tools/search?q=zqx&unavailable=1",
 			wantRows:      25,
+			wantMatched:   26,
 			wantTruncated: true,
 		},
 		{
@@ -768,6 +830,11 @@ func TestRoutes_SearchReportsTheCutAfterTheInstalledFilter(t *testing.T) {
 			if len(sr.Results) != tc.wantRows || sr.Truncated != tc.wantTruncated {
 				t.Errorf("GET %s = %d rows, truncated %v; want %d rows, truncated %v",
 					tc.path, len(sr.Results), sr.Truncated, tc.wantRows, tc.wantTruncated)
+			}
+			// The denominator of the cut, over the same blocks Truncated is
+			// judged over: without it a client states a cut it cannot size.
+			if sr.Matched != tc.wantMatched {
+				t.Errorf("GET %s matched = %d, want %d", tc.path, sr.Matched, tc.wantMatched)
 			}
 			for i := range sr.Results {
 				if sr.Results[i].Name == tc.installed {
@@ -819,6 +886,52 @@ func TestSearchHit_OmitsTheNewFieldsForAnInstallableEntry(t *testing.T) {
 	}
 	if got := string(b); strings.Contains(got, "unavailable") || strings.Contains(got, "reason") {
 		t.Errorf("installable hit serialised the new fields: %s", got)
+	}
+}
+
+// TestSearchResponse_OmitsTheAdditiveFieldsWithNothingToSay keeps the
+// reply's additive pair honest. A client must be able to read an absent
+// apt_state as "this engine does not say" and an absent matched as "no
+// denominator", which is also what it gets from an engine predating them;
+// a tag edit dropping either omitempty would publish "no state" and "0
+// matched" as facts instead.
+func TestSearchResponse_OmitsTheAdditiveFieldsWithNothingToSay(t *testing.T) {
+	b, err := json.Marshal(SearchResponse{Results: []SearchHit{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"apt_state", "matched"} {
+		if strings.Contains(string(b), field) {
+			t.Errorf("a reply with nothing to say serialised %q: %s", field, b)
+		}
+	}
+	for _, field := range []string{"results", "apt_available", "truncated"} {
+		if !strings.Contains(string(b), field) {
+			t.Errorf("the reply dropped %q, which the wire has always carried: %s", field, b)
+		}
+	}
+}
+
+// TestRoutes_SearchStatesWhyTheAptCorpusDidNotAnswer pins the projection
+// of the engine's three-valued answer plus the agreement a client falling
+// back to the bool depends on. WHICH state this host is in is not
+// assertable here — apt needs root, so a runner and a container disagree
+// legitimately — so what is pinned is that a state is always stated and
+// that the two fields cannot contradict each other.
+func TestRoutes_SearchStatesWhyTheAptCorpusDidNotAnswer(t *testing.T) {
+	_, srv := newServerWithCatalog(t, probeCatalogDoc(1, 0))
+	var sr SearchResponse
+	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=zqx", "", &sr); code != http.StatusOK {
+		t.Fatalf("search = %d, want 200", code)
+	}
+	switch toolbelt.AptState(sr.AptState) {
+	case toolbelt.AptStateUnavailable, toolbelt.AptStateIndexing, toolbelt.AptStateAvailable:
+	default:
+		t.Fatalf("apt_state = %q, want one of the three states", sr.AptState)
+	}
+	if sr.AptAvailable != (toolbelt.AptState(sr.AptState) == toolbelt.AptStateAvailable) {
+		t.Errorf("apt_available = %v beside apt_state %q: the bool must be the state narrowed",
+			sr.AptAvailable, sr.AptState)
 	}
 }
 
