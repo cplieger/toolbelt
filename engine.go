@@ -195,6 +195,11 @@ func (e *Engine) systemTools() []SystemTool {
 // The catalog entries alias the catalog: do not mutate their slice fields
 // (see [CatalogEntry]).
 type SearchCounts struct {
+	// AptState says WHY the package list did or did not answer; see
+	// [AptState]. AptAvailable is the same verdict narrowed to a bool.
+	// It leads the struct because govet's fieldalignment wants the
+	// smaller pointer-bearing field ahead of the slices.
+	AptState AptState
 	// Installable is what [Engine.Search] returns: catalog entries with
 	// an install source, minus those already in the manifest.
 	Installable []CatalogEntry
@@ -209,9 +214,6 @@ type SearchCounts struct {
 	// UnavailableMatched is how many entries Unavailable would hold had
 	// nothing cut it.
 	UnavailableMatched int
-	// AptState says WHY the package list did or did not answer; see
-	// [AptState]. AptAvailable is the same verdict narrowed to a bool.
-	AptState AptState
 	// AptMatched is how many packages Apt would hold had nothing cut it.
 	AptMatched int
 	// AptAvailable is the bool [Engine.SearchApt] returns: false means

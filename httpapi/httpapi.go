@@ -94,11 +94,13 @@ type SearchHit struct {
 // could not be consulted, which is what lets a client report a pending
 // condition instead of asserting an absence.
 type SearchResponse struct {
-	Results []SearchHit `json:"results"`
 	// AptState names what the Debian corpus could say — see
 	// [toolbelt.AptState] for the three values. Absent from an engine
-	// predating the field, where AptAvailable is the whole answer.
-	AptState string `json:"apt_state,omitempty"`
+	// predating the field, where AptAvailable is the whole answer. It
+	// leads the struct because govet's fieldalignment wants the smaller
+	// pointer-bearing field ahead of the slice.
+	AptState string      `json:"apt_state,omitempty"`
+	Results  []SearchHit `json:"results"`
 	// Matched is how many rows the query matched across the blocks
 	// Results holds, before each was cut to its cap. It is the
 	// denominator Truncated has no room for, so a client can say "25 of
