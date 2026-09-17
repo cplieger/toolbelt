@@ -3,8 +3,6 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/toolbelt/v3.svg)](https://pkg.go.dev/github.com/cplieger/toolbelt/v3)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/toolbelt)](https://github.com/cplieger/toolbelt/blob/main/go.mod)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/mutation.json)](https://github.com/cplieger/toolbelt/issues?q=label%3Agremlins-tracker)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13646/badge)](https://www.bestpractices.dev/projects/13646)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/toolbelt/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/toolbelt)
 
 > Declarative dev-tool provisioning for container dev boxes: manifest + catalog + reconciler engine
 
