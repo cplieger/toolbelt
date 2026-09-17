@@ -446,8 +446,8 @@ func verifyAquaEntry(e *CatalogEntry) error {
 
 // overlayDoc is an overlay document: entries keyed by tool name. An
 // entry with a source replaces/creates the whole catalog entry; an
-// entry without one patches display fields (featured, lsp, description,
-// requires, probe) onto the compiled entry.
+// entry without one patches the fields mergeOverlayEntry merges onto the
+// compiled entry.
 type overlayDoc struct {
 	Entries map[string]CatalogEntry `json:"entries"`
 }
@@ -531,9 +531,16 @@ func overlayReplaceEntry(name string, patch *CatalogEntry, resolveAqua func(ref 
 }
 
 // mergeOverlayEntry patches display fields of a compiled entry.
+//
+// Every field of [CatalogEntry] is either merged here or listed as a
+// deliberate omission in mergeOverlayEntry's completeness test, which
+// fails when the struct gains a field with no decision recorded.
 func mergeOverlayEntry(cur, patch *CatalogEntry) {
 	if patch.Featured {
 		cur.Featured = true
+	}
+	if patch.Essential {
+		cur.Essential = true
 	}
 	if patch.Lsp {
 		cur.Lsp = true

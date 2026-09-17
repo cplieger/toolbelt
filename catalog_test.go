@@ -2,6 +2,7 @@ package toolbelt
 
 import (
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -227,5 +228,53 @@ func TestApplyOverlay_PatchesAnUnavailableDescription(t *testing.T) {
 	}
 	if err := ApplyOverlay(c, []byte(`{"entries":{"nope":{"description":"x"}}}`), nil); err == nil {
 		t.Error("a patch against a name in neither map was accepted")
+	}
+}
+
+// TestMergeOverlayEntry_EveryFieldHasARecordedDecision is the completeness
+// guard over a hand-written per-field merge and a struct that grows: a field
+// added with no decision reaches neither list and fails here. The merge branch
+// itself is asserted in TestApplyOverlay's display-patch subtest; this asserts
+// that no field escapes that scrutiny.
+func TestMergeOverlayEntry_EveryFieldHasARecordedDecision(t *testing.T) {
+	merged := []string{"Description", "Requires", "Probe", "Featured", "Lsp", "Essential"}
+	// Why a display patch has no business setting each of these.
+	notMerged := map[string]string{
+		"Name":        "the map key, stamped by overlayReplaceEntry",
+		"Source":      "its presence is what selects the replace branch",
+		"Reason":      "the compiler's answer about an entry it could not install",
+		"Aliases":     "registry data, and Lookup's index is rebuilt from it",
+		"Aqua":        "install knowledge",
+		"Release":     "install knowledge",
+		"Version":     "install knowledge",
+		"Install":     "install knowledge",
+		"Uninstall":   "install knowledge",
+		"VersionArgs": "install knowledge",
+	}
+
+	decided := make(map[string]bool, len(merged)+len(notMerged))
+	for _, name := range merged {
+		if _, both := notMerged[name]; both {
+			t.Errorf("%s is listed as both merged and not merged", name)
+		}
+		decided[name] = true
+	}
+	for name := range notMerged {
+		decided[name] = true
+	}
+
+	entry := reflect.TypeFor[CatalogEntry]()
+	fields := make(map[string]bool, entry.NumField())
+	for i := range entry.NumField() {
+		name := entry.Field(i).Name
+		fields[name] = true
+		if !decided[name] {
+			t.Errorf("CatalogEntry.%s has no merge decision: merge it in mergeOverlayEntry, or list it here with the reason it is not a display patch's business", name)
+		}
+	}
+	for name := range decided {
+		if !fields[name] {
+			t.Errorf("%s is listed here and is not a field of CatalogEntry", name)
+		}
 	}
 }
