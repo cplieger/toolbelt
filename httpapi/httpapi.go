@@ -96,9 +96,7 @@ type SearchHit struct {
 type SearchResponse struct {
 	// AptState names what the Debian corpus could say — see
 	// [toolbelt.AptState] for the three values. Absent from an engine
-	// predating the field, where AptAvailable is the whole answer. It
-	// leads the struct because govet's fieldalignment wants the smaller
-	// pointer-bearing field ahead of the slice.
+	// predating the field, where AptAvailable is the whole answer.
 	AptState string      `json:"apt_state,omitempty"`
 	Results  []SearchHit `json:"results"`
 	// Matched is how many rows the query matched across the blocks
