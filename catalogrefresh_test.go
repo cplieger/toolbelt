@@ -108,13 +108,20 @@ func TestApplyOverlay(t *testing.T) {
 	t.Run("display patch merges onto existing entry", func(t *testing.T) {
 		c := base()
 		ov := []byte(`{"entries":{"tool-a":{"description":"new","featured":true,"lsp":true,` +
-			`"requires":["node"],"probe":"tool-a --version"}}}`)
+			`"essential":true,"requires":["node"],"probe":"tool-a --version"}}}`)
 		if err := ApplyOverlay(c, ov, nil); err != nil {
 			t.Fatal(err)
 		}
 		got := c.Entries["tool-a"]
 		if got.Description != "new" || !got.Featured || !got.Lsp || got.Source != "npm:tool-a" {
 			t.Errorf("merge wrong: %+v", got)
+		}
+		// essential is the only field here with a REFUSAL behind it: the
+		// engine declines to remove the entry (ErrEssential), and a
+		// consumer withholds the delete control. Dropped, the protection
+		// is inert and nothing on the row says so.
+		if !got.Essential {
+			t.Errorf("Essential = false, want the patch's true")
 		}
 		// requires drives the dependency install order and probe decides
 		// what install verification executes: a patch that declares

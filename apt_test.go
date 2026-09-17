@@ -341,6 +341,80 @@ func TestSearchApt_ReportsUnavailableRatherThanEmpty(t *testing.T) {
 	}
 }
 
+// newAptEngine is an engine on temp dirs with the package index the full
+// constructor attaches.
+func newAptEngine(t *testing.T) *Engine {
+	t.Helper()
+	dir := t.TempDir()
+	e, err := New(&Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	return e
+}
+
+// TestSearchWithCounts_StatesWhyTheAptCorpusDidNotAnswer covers the three
+// states. The bool alone cannot separate a host that has no apt from one
+// whose index has not been read yet, and the two are byte-identical in a
+// reply: a consumer reading only the bool tells a reader Debian packages
+// are not searchable here, and the next search on the same process
+// contradicts it.
+func TestSearchWithCounts_StatesWhyTheAptCorpusDidNotAnswer(t *testing.T) {
+	// The invariant a consumer of either field depends on, in every state.
+	assertAgree := func(t *testing.T, sc SearchCounts) {
+		t.Helper()
+		if sc.AptAvailable != (sc.AptState == AptStateAvailable) {
+			t.Errorf("AptAvailable = %v beside AptState %q: the bool must be the state narrowed",
+				sc.AptAvailable, sc.AptState)
+		}
+	}
+
+	t.Run("apt is not usable on this host", func(t *testing.T) {
+		e := newAptEngine(t)
+		// An empty trusted set is how resolveSystemBin fails to find
+		// apt-get, which is what AptAvailable reads. On an unprivileged
+		// runner the euid check already answers false and this changes
+		// nothing, so the case holds either way.
+		prev := systemBinDirs
+		systemBinDirs = []string{t.TempDir()}
+		t.Cleanup(func() { systemBinDirs = prev })
+
+		sc := e.SearchWithCounts("gcc")
+		if sc.AptState != AptStateUnavailable {
+			t.Errorf("AptState = %q, want %q", sc.AptState, AptStateUnavailable)
+		}
+		if len(sc.Apt) != 0 || sc.AptMatched != 0 {
+			t.Errorf("an unusable corpus answered %d rows (matched %d)", len(sc.Apt), sc.AptMatched)
+		}
+		assertAgree(t, sc)
+	})
+
+	t.Run("the index has not been read yet, then has", func(t *testing.T) {
+		if !AptAvailable() {
+			t.Skip("apt is not usable here, so a loaded corpus is unreachable")
+		}
+		e := newAptEngine(t)
+
+		// A cold engine has parsed nothing, and the first search starts the
+		// read rather than waiting for it.
+		if sc := e.SearchWithCounts("gcc"); sc.AptState != AptStateIndexing {
+			t.Errorf("AptState on a cold engine = %q, want %q", sc.AptState, AptStateIndexing)
+		} else {
+			assertAgree(t, sc)
+		}
+
+		if err := e.aptIdx.ensure(t.Context()); err != nil {
+			t.Skipf("no package index available here: %v", err)
+		}
+		sc := e.SearchWithCounts("gcc")
+		if sc.AptState != AptStateAvailable {
+			t.Errorf("AptState with the index read = %q, want %q", sc.AptState, AptStateAvailable)
+		}
+		assertAgree(t, sc)
+	})
+}
+
 // TestSearchApt_FillsTheCandidateForTheCappedSet covers AptHit.Candidate
 // (see its doc comment for why it is resolved per-result).
 func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
