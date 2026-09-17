@@ -302,8 +302,7 @@ func (e *Engine) filterInstalled(hits []CatalogEntry) []CatalogEntry {
 // ok=false means no package list is available. A consumer must render
 // that differently from an empty result, because "apt search is
 // unavailable" and "no package matches" look identical and mean opposite
-// things, and conflating them is the exact shape of the bug this whole
-// change fixes. Which of the two reasons it was is [AptState], on
+// things. Which of the two reasons it was is [AptState], on
 // [SearchCounts]; a consumer that tells a reader anything about apt wants
 // that rather than this bool.
 //
