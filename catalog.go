@@ -530,7 +530,8 @@ func overlayReplaceEntry(name string, patch *CatalogEntry, resolveAqua func(ref 
 	return nil
 }
 
-// mergeOverlayEntry patches display fields of a compiled entry.
+// mergeOverlayEntry patches a compiled entry with the overlay's display
+// fields and its essential mark.
 //
 // Every field of [CatalogEntry] is either merged here or listed as a
 // deliberate omission in mergeOverlayEntry's completeness test, which

@@ -35,6 +35,8 @@ Dependencies are obligatory, so asking for a tool is asking for what it cannot r
 
 Each row also reports its `dependents`: the enabled entries that require it, through `requires` or as the backend their source kind implies. It is what a client needs to ask the disable question before sending a request the engine would refuse. It is advisory: the engine re-derives the set under the manifest lock, so acting on a stale inventory is still refused.
 
+An overlay entry may also mark a tool `essential`, which is the consumer's statement about its own product — a feature stops working without that binary — and never something registry data can say. The engine reads the flag off the live catalog when a removal is requested and refuses (`ErrEssential`, `409 essential`); `force` does not override it, and a cascade whose dependent set holds an essential row is refused whole. Disabling stays available and is the intended escape hatch, since it uninstalls the footprint and keeps the entry. `Inventory` reports the flag per row, so a client can withhold a delete control rather than offering one the engine will refuse.
+
 ## Install
 
 `go get github.com/cplieger/toolbelt/v3@latest`
@@ -84,13 +86,13 @@ mux.Handle("/api/tools", h)
 mux.Handle("/api/tools/", h)
 ```
 
-Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`has_dependents` names the blockers, `disabled` marks install-on-a-template, `not_configured` marks a catalog refresh without `Config.Refresh`). Stream job progress via the `Config` callbacks or poll `GET .../jobs`.
+Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`has_dependents` names the blockers, `essential` marks a tool the product declares it needs, `disabled` marks install-on-a-template, `not_configured` marks a catalog refresh without `Config.Refresh`). Stream job progress via the `Config` callbacks or poll `GET .../jobs`.
 
 **The handler owns its cache policy.** Every response it produces carries `Cache-Control: no-store`: success bodies, decode rejections, engine errors, and the router's own 404/405/redirects alike, so a consumer needs no no-store middleware of its own. A `Cache-Control` your own stack has already set on the response is left untouched, on the same rule `webhttp.JSONHeaders` applies to `X-Content-Type-Options`, so a stricter policy (`no-store, no-cache, must-revalidate`) or a deliberately weaker one stays yours to set.
 
 ### Runtime catalog refresh
 
-The catalog is data on its own cadence. With `Config.Refresh` set, the engine fetches the published catalog on the configured interval and on demand via `RefreshCatalog` or the httpapi route. There is deliberately no fetch at construction: call `RefreshCatalog` once your boot work is enqueued. Each fetch is verified (a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify`), re-overlaid with any `Config.CatalogOverlays` display patches, persisted raw under `ConfigDir` (`tool-catalog.cached.json`; at the next boot the newer of cache and baked wins), and swapped in atomically. The last good catalog stands on any failure: a bad fetch changes nothing. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
+The catalog is data on its own cadence. With `Config.Refresh` set, the engine fetches the published catalog on the configured interval and on demand via `RefreshCatalog` or the httpapi route. There is deliberately no fetch at construction: call `RefreshCatalog` once your boot work is enqueued. Each fetch is verified (a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify`), re-overlaid with any `Config.CatalogOverlays` patches, persisted raw under `ConfigDir` (`tool-catalog.cached.json`; at the next boot the newer of cache and baked wins), and swapped in atomically. The last good catalog stands on any failure: a bad fetch changes nothing. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
 
 Consumer defaults ship with the library. `DefaultCatalogURL` is the published catalog's latest-download URL. `ParseCatalogRefresh(RefreshEnv(raw), RefreshEnvName(name))` turns a refresh env value into the `Interval` under the canonical policy: default 24h, clamped to 1h–30d, and `off`/`disabled`/`0` disables the schedule while keeping on-demand refresh available. `ParseRequireList(raw)` parses a one-name-per-line requirements list (`#` comments and blank lines ignored) for `Require`.
 
@@ -116,6 +118,7 @@ go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
 - `New(cfg *Config) (*Engine, error)`: construct and start (seed the manifest when absent, launch the job worker; a manifest of any other schema version is an error). `Close()` stops the worker.
 - `Inventory() (*Inventory, error)`: the full read-side snapshot (every manifest entry joined with install state, the system group, the active job).
 - `Search(q string) []CatalogEntry`: catalog lookup (empty query = the featured set), hiding names already in the manifest.
+- `SearchWithCounts(q string) SearchCounts`: one query answered from every corpus at once — `Search`, `SearchUnavailable` and `SearchApt` are its projections — carrying each block's pre-cut match count plus `AptState` (`unavailable` / `indexing` / `available`). The state is what lets a consumer say "still indexing" instead of asserting an absence the corpus has not been read for yet; `SearchApt`'s own bool collapses the first two.
 - `Add(ctx, *AddRequest) (*Job, error)`: record a new tool and enqueue its install; present-and-enabled is the default intent. `Disabled: true` adds a template instead (no job, returns nil).
 - `Patch(name, PatchRequest) (*Job, error)`: merge fields. `Disabled` is the enable/disable toggle (false→true uninstalls and keeps the template, true→false installs), a version change enqueues a reinstall, and `Force` permits disabling a tool enabled entries require, which disables those dependents too (one level, as `RemoveWithDependents`).
 - `Install(name) (*Job, error)`: retry an existing, enabled entry. Refuses templates with `ErrDisabled` (install is policy-neutral).
@@ -130,19 +133,19 @@ go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
 
 ### Types and errors
 
-`Tool` (manifest entry), `Manifest`, `ToolStatus`/`State` (machine state), `CatalogEntry`/`Catalog` (+ `VerifyCatalog`), `Inventory`/`ToolInfo`/`SystemTool`/`Job` (result shapes; also the httpapi wire shapes), `CancelCause` (`CancelShutdown`/`CancelCaller`, zero value `CancelUnknown`), `DefaultSeed()`. Sentinels: `ErrNotFound`, `ErrDisabled`, `ErrHasDependents` (match with `errors.Is`; `*DependentsError` carries the blocking names for `errors.As`), `ErrUnknownJob` (a `Wait` on a job id the queue no longer holds).
+`Tool` (manifest entry), `Manifest`, `ToolStatus`/`State` (machine state), `CatalogEntry`/`Catalog` (+ `VerifyCatalog`), `Inventory`/`ToolInfo`/`SystemTool`/`Job` (result shapes; also the httpapi wire shapes), `SearchCounts`/`AptState` (search result shapes), `CancelCause` (`CancelShutdown`/`CancelCaller`, zero value `CancelUnknown`), `DefaultSeed()`. Sentinels: `ErrNotFound`, `ErrDisabled`, `ErrHasDependents` (match with `errors.Is`; `*DependentsError` carries the blocking names for `errors.As`), `ErrEssential` (a removal the live catalog forbids; disabling still works), `ErrUnknownJob` (a `Wait` on a job id the queue no longer holds), `ErrRefreshNotConfigured`, `ErrRootIntegrity` (+ `*RootIntegrityError`).
 
 ### httpapi routes
 
 | Route | Engine call | Notes |
 | --- | --- | --- |
 | `GET {prefix}` | `Inventory` | |
-| `GET {prefix}/search?q=` | `SearchWithCounts` | results omit embedded install definitions; `truncated` is true when a block was cut to its cap |
+| `GET {prefix}/search?q=` | `SearchWithCounts` | results omit embedded install definitions; `truncated` is true when a block was cut to its cap and `matched` is how many rows the query found before the cuts; `apt_state` is `unavailable`, `indexing` or `available` (`apt_available` is the same verdict as a bool) |
 | `POST {prefix}` | `Add` | 202 `{job}` (null for template adds) |
 | `PATCH {prefix}/{name}` | `Patch` | the toggle verb; 409 `has_dependents` + names |
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on templates |
 | `POST {prefix}/update` | `Update` | optional `{"names": [...]}` body |
-| `DELETE {prefix}/{name}?force=1` | `Remove` / `RemoveWithDependents` | 202 `{job, dependents}`; 409 without `force` |
+| `DELETE {prefix}/{name}?force=1` | `Remove` / `RemoveWithDependents` | 202 `{job, dependents}`; 409 without `force`; 409 `essential` whatever `force` says, and a cascade holding an essential row is refused whole |
 | `GET {prefix}/jobs` | `Jobs` | active job carries the output tail; a cancelled job carries `cancel_cause` |
 | `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | the job reports `cancel_cause: caller` |
 | `GET {prefix}/catalog` | `CatalogInfo` | provenance + freshness of the live catalog |
@@ -160,7 +163,7 @@ go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
 | `ToolsDir` | install tree root: `bin/` (the single PATH dir), `opt/<name>/<version>/`, `npm/`, `python/` (required) |
 | `CatalogPath` | baked catalog path (the first-boot/offline fallback with `Refresh` set); missing degrades to manual/ecosystem sources with named errors for catalog-dependent entries |
 | `Refresh` | runtime catalog refresh: the published-catalog URL, the schedule interval (0 = on-demand only), and the required names verified before every swap; nil keeps the baked catalog static |
-| `CatalogOverlays` | consumer overlay files re-applied to every loaded catalog (display patches survive refreshes); entries they add must embed any aqua definition inline |
+| `CatalogOverlays` | consumer overlay files re-applied to every loaded catalog (the patches survive refreshes); a patch carries display fields and `essential`, which makes the engine refuse to remove that row; entries they add must embed any aqua definition inline |
 | `Seed` | manifest written when none exists (fresh volume); nil seeds empty |
 | `System` | image-baked binaries reported read-only in `Inventory` |
 | `KeepVersions` | how many superseded versions to retain under `opt/<name>/` for rollback (0 = the default 1; negative = keep none) |
