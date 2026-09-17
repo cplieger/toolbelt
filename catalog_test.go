@@ -265,8 +265,8 @@ func TestMergeOverlayEntry_EveryFieldHasARecordedDecision(t *testing.T) {
 
 	entry := reflect.TypeFor[CatalogEntry]()
 	fields := make(map[string]bool, entry.NumField())
-	for i := range entry.NumField() {
-		name := entry.Field(i).Name
+	for f := range entry.Fields() {
+		name := f.Name
 		fields[name] = true
 		if !decided[name] {
 			t.Errorf("CatalogEntry.%s has no merge decision: merge it in mergeOverlayEntry, or list it here with the reason it is not a display patch's business", name)
