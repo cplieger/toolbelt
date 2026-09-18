@@ -499,31 +499,6 @@ func TestReleaseDownloadURL(t *testing.T) {
 	}
 }
 
-// TestReleaseFormat maps asset names onto the extractor's own vocabulary.
-// A format the extractor does not know would fail at extraction time
-// rather than at selection, which is the wrong place to find out.
-func TestReleaseFormat(t *testing.T) {
-	cases := map[string]string{
-		"tool.tar.gz":  "tar.gz",
-		"tool.tgz":     "tar.gz",
-		"tool.tar.xz":  "tar.xz",
-		"tool.txz":     "tar.xz",
-		"tool.tar.bz2": "tar.bz2",
-		"tool.tar.zst": "tar.zst",
-		"tool.tar":     "tar",
-		"tool.zip":     "zip",
-		"tool.gz":      "gz",
-		"tool.xz":      "xz",
-		"yt-dlp":       formatRaw,
-		"tool-1.2.3":   formatRaw,
-	}
-	for asset, want := range cases {
-		if got := releaseFormat(asset); got != want {
-			t.Errorf("releaseFormat(%q) = %q, want %q", asset, got, want)
-		}
-	}
-}
-
 // TestReleaseFiles covers what gets published on PATH and where each
 // executable is found inside an artifact. The default is the tool's own
 // name; the registry's binary list replaces it, because a registry label

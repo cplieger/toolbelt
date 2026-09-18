@@ -240,11 +240,11 @@ func (in *installer) installFromSpec(ctx context.Context, name, version string, 
 		return nil, "", err
 	}
 
-	versDir, err := in.extractAndSwap(ctx, name, version, spec, artifact)
+	versDir, declared, err := in.extractAndSwap(ctx, name, version, spec, artifact)
 	if err != nil {
 		return nil, "", err
 	}
-	bins, err = in.linkDeclaredFiles(versDir, spec.Files, spec.SearchFiles)
+	bins, err = in.linkDeclaredBins(versDir, declared)
 	if err != nil {
 		return nil, "", err
 	}
@@ -300,64 +300,95 @@ func (in *installer) refuseUnverified(name, version, url string, cause error) er
 	return fmt.Errorf("refusing to install %s %s unverified: %w", name, version, cause)
 }
 
-// extractAndSwap extracts the artifact into a fresh staging dir and
-// atomically swaps it into the versioned opt dir. The backup rename means
-// a same-version reinstall has no window where the tool is deleted but
-// not yet replaced. Durability: every extracted file and the staged
-// directory's entry list are flushed before the publishing rename, and
-// the parent directory's entry list is flushed after it; a barrier
-// failure restores the previous version rather than leaving a tree the
-// engine would prune around.
-func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, error) {
+// extractAndSwap extracts the artifact into a staging dir, resolves the
+// declared executables there, and only then swaps the tree in as the live
+// version dir, returning it and the executables to publish. An artifact
+// missing a declared file is refused while the previous version is still
+// live, and the staging tree is removed on every pre-publish failure. The
+// publish keeps a backup so a same-version reinstall has no window with the
+// tool absent, flushes staging before the rename and the parent after it,
+// and restores the backup when a barrier fails.
+func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, []declaredBin, error) {
 	// The version is a path component from here on, and only the sources
 	// routed through this function have that constraint (see
 	// versionpolicy.go). Asserting it here is what stops a wider
 	// grammar's value reaching the join if another source is wired in.
-	if !versionPathComponent(version) {
-		return "", fmt.Errorf("refusing to install %s: version %q is not a path component", name, version)
+	if !pathComponent(version) {
+		return "", nil, fmt.Errorf("refusing to install %s: version %q is not a path component", name, version)
 	}
 	versDir := filepath.Join(in.optDir(), name, version)
 	staging := versDir + stagingSuffix
-	if err := os.RemoveAll(staging); err != nil {
-		return "", err
+	declared, err := in.stageArtifact(ctx, name, version, spec, artifact, staging)
+	if err == nil {
+		err = publishStaged(name, version, staging, versDir)
 	}
-	// The mode certified on staging carries across: the publish below is
-	// a rename of this same inode.
+	if err != nil {
+		_ = os.RemoveAll(staging)
+		return "", nil, err
+	}
+	return versDir, declared, nil
+}
+
+// stageArtifact extracts the artifact into staging and resolves the
+// declared executables against that tree, so a refusal happens before
+// anything is published.
+func (in *installer) stageArtifact(ctx context.Context, name, version string, spec *InstallSpec, artifact, staging string) ([]declaredBin, error) {
+	// Declared names come from a registry and are published as bin/<name>,
+	// which the publish clears before linking.
+	for _, f := range spec.Files {
+		if !pathComponent(f.Name) {
+			return nil, fmt.Errorf("declared file name %q is not a path component", f.Name)
+		}
+	}
+	if err := os.RemoveAll(staging); err != nil {
+		return nil, err
+	}
+	// The mode certified on staging carries across: the publish is a
+	// rename of this same inode.
 	if err := ensureManagedDirs(in.optDir(), filepath.Join(in.optDir(), name), staging); err != nil {
-		return "", err
+		return nil, err
 	}
 	binName := name
 	if len(spec.Files) > 0 {
 		binName = spec.Files[0].Name
 	}
 	if err := extractArtifact(ctx, artifact, spec.Format, staging, binName); err != nil {
-		return "", err
+		return nil, err
+	}
+	declared, err := in.resolveDeclaredFiles(staging, spec.Files, spec.SearchFiles)
+	if err != nil {
+		return nil, err
 	}
 	if err := syncTree(staging); err != nil {
-		return "", fmt.Errorf("flush staged install of %s %s: %w", name, version, err)
+		return nil, fmt.Errorf("flush staged install of %s %s: %w", name, version, err)
 	}
+	return declared, nil
+}
+
+// publishStaged swaps the staged tree in as the live version directory.
+func publishStaged(name, version, staging, versDir string) error {
 	backup := versDir + backupSuffix
 	if err := os.RemoveAll(backup); err != nil {
-		return "", err
+		return err
 	}
 	if _, err := os.Stat(versDir); err == nil {
 		if err := os.Rename(versDir, backup); err != nil {
-			return "", err
+			return err
 		}
 	}
 	if err := os.Rename(staging, versDir); err != nil {
 		restoreBackup(versDir, backup)
-		return "", err
+		return err
 	}
 	if err := fsyncDir(filepath.Dir(versDir)); err != nil {
 		// The rename is visible but not committed: undo it so the
 		// previous version stays the live one and the install fails.
 		_ = os.RemoveAll(versDir)
 		restoreBackup(versDir, backup)
-		return "", fmt.Errorf("commit install of %s %s: %w", name, version, err)
+		return fmt.Errorf("commit install of %s %s: %w", name, version, err)
 	}
 	_ = os.RemoveAll(backup)
-	return versDir, nil
+	return nil
 }
 
 // restoreBackup puts a superseded version tree back after a failed
@@ -370,17 +401,25 @@ func restoreBackup(versDir, backup string) {
 	_ = os.Rename(backup, versDir)
 }
 
-// linkDeclaredFiles resolves and symlinks each declared binary from the
-// install dir into the bin dir, returning the linked bin names. When
-// search is set the declared paths are guesses and a miss falls back to
-// finding the file in the tree (see InstallSpec.SearchFiles).
-func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search bool) ([]string, error) {
-	// The install dir IS the confinement boundary for every declared
-	// file, so the Root is constructed once here rather than at each
-	// check: pathinside/v2 buys its misuse-resistance at the
-	// construction site.
-	installRoot := pathinside.Root(versDir)
-	var bins []string
+// declaredBin is one declared executable located inside an extracted tree:
+// the name it is published under and its path relative to the tree root.
+// Relative because the tree is resolved as staging and linked after the
+// publish rename moved it.
+type declaredBin struct {
+	name string
+	rel  string
+}
+
+// resolveDeclaredFiles locates each declared binary inside tree, proves it
+// sits inside it and leaves it executable. When search is set the
+// declared paths are guesses and a miss falls back to finding the file in
+// the tree (see InstallSpec.SearchFiles).
+func (in *installer) resolveDeclaredFiles(tree string, files []AquaFile, search bool) ([]declaredBin, error) {
+	// The tree IS the confinement boundary for every declared file, so
+	// the Root is constructed once here rather than at each check:
+	// pathinside/v2 buys its misuse-resistance at the construction site.
+	installRoot := pathinside.Root(tree)
+	var bins []declaredBin
 	for _, f := range files {
 		src := cmp.Or(f.Src, f.Name)
 		target, err := safeJoin(installRoot, src)
@@ -388,7 +427,7 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 			return nil, err
 		}
 		if search {
-			found, ferr := searchInstallTree(versDir, target, path.Base(src))
+			found, ferr := searchInstallTree(tree, target, path.Base(src))
 			if ferr != nil {
 				// One name of a guessed set going missing is upstream's
 				// business, not a failure of this install: a registry
@@ -404,10 +443,11 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 		if err != nil {
 			return nil, err
 		}
-		if err := in.linkBin(f.Name, resolved); err != nil {
+		rel, err := filepath.Rel(tree, resolved)
+		if err != nil {
 			return nil, err
 		}
-		bins = append(bins, f.Name)
+		bins = append(bins, declaredBin{name: f.Name, rel: rel})
 	}
 	if len(bins) == 0 {
 		// Reachable only through the search path, where a miss is
@@ -417,6 +457,19 @@ func (in *installer) linkDeclaredFiles(versDir string, files []AquaFile, search 
 		return nil, fmt.Errorf("the artifact contains none of the %d declared executables", len(files))
 	}
 	return bins, nil
+}
+
+// linkDeclaredBins publishes each resolved executable as bin/<name> and
+// returns the names published.
+func (in *installer) linkDeclaredBins(versDir string, bins []declaredBin) ([]string, error) {
+	names := make([]string, 0, len(bins))
+	for _, b := range bins {
+		if err := in.linkBin(b.name, filepath.Join(versDir, b.rel)); err != nil {
+			return nil, err
+		}
+		names = append(names, b.name)
+	}
+	return names, nil
 }
 
 // resolveInsideInstall resolves one declared file to a real path proven

@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"maps"
@@ -14,12 +15,10 @@ import (
 	goversion "github.com/hashicorp/go-version"
 )
 
-// Aqua registry type/format string literals shared across the package.
+// Aqua registry type string literals shared across the package.
 const (
 	aquaTypeGitHubRelease = "github_release"
 	aquaTypeHTTP          = "http"
-	// formatRaw is the "no archive, plain binary" install format.
-	formatRaw = "raw"
 )
 
 // AquaPackage is the subset of an aqua-registry package definition the
@@ -99,8 +98,12 @@ type AquaChecksum struct {
 // version on this machine: a URL, an archive format, the binaries to
 // link, and an optional checksum source.
 type InstallSpec struct {
-	URL         string
-	Format      string // tar.gz | tar.xz | tar.zst | zip | gz | xz | raw
+	URL string
+	// Format is the canonical aqua format name (tar.gz, zip, gz, raw, ...):
+	// the definition's own when it declares one, a short spelling such as
+	// tgz mapped onto its long name (canonicalFormat), else read off the
+	// asset name's extension (splitAssetFormat). Never empty.
+	Format      string
 	ChecksumURL string // empty = nothing to fetch; see ChecksumDeclared
 	ChecksumAlg string
 	Files       []AquaFile
@@ -127,9 +130,9 @@ type templateVars struct {
 	OS      string
 	Arch    string
 	Format  string
-	// Asset is the artifact filename; AssetWithoutExt strips the
-	// format extension (used by files[].src on archives whose top
-	// directory matches the asset name, e.g. astral-sh/uv).
+	// Asset is the artifact filename; AssetWithoutExt strips its archive
+	// extension (used by files[].src on archives whose top directory
+	// matches the asset name, e.g. astral-sh/uv).
 	Asset           string
 	AssetWithoutExt string
 }
@@ -178,25 +181,22 @@ func (p *AquaPackage) resolveSpecFor(version, goarch string) (*InstallSpec, erro
 	}
 	d.applyOverride(goarch)
 
-	format := d.format
-	if format == "" {
-		format = formatRaw
-	}
 	vars := templateVars{
 		Version: version,
 		SemVer:  strings.TrimPrefix(strings.TrimPrefix(version, d.versionPrefix), "v"),
 		OS:      replaced(d.replacements, "linux"),
 		Arch:    replaced(d.replacements, goarch),
-		Format:  formatExt(format),
+		Format:  formatExt(d.format),
 	}
 
 	url, err := d.artifactURL(p, &vars)
 	if err != nil {
 		return nil, err
 	}
-	spec := &InstallSpec{URL: url, Format: format}
 	vars.Asset = lastPathSegment(url)
-	vars.AssetWithoutExt = strings.TrimSuffix(vars.Asset, "."+formatExt(format))
+	stem, inferred := splitAssetFormat(vars.Asset)
+	vars.AssetWithoutExt = stem
+	spec := &InstallSpec{URL: url, Format: cmp.Or(canonicalFormat(d.format), inferred)}
 
 	if err := d.resolveFiles(p, spec, &vars); err != nil {
 		return nil, err

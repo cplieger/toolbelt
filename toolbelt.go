@@ -272,15 +272,18 @@ func New(cfg *Config) (*Engine, error) {
 	return e, nil
 }
 
-// Close stops the catalog-refresh schedule, then the job worker
-// (cancelling any running job and draining the queued ones). Every job
-// it cancels reports CancelShutdown as its CancelCause, so a consumer
-// can tell an ordinary shutdown from an operator's deliberate cancel.
+// Close stops the catalog-refresh schedule and any apt-index refresh a
+// search started, then the job worker (cancelling any running job and
+// draining the queued ones), and returns once those three have exited.
+// Every job it cancels reports CancelShutdown as its CancelCause, so a
+// consumer can tell an ordinary shutdown from an operator's deliberate
+// cancel.
 func (e *Engine) Close() {
 	if e.stopRefresh != nil {
 		e.stopRefresh()
 	}
 	e.refreshWG.Wait()
+	e.aptIdx.Close()
 	e.queue.Close()
 }
 

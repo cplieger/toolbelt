@@ -34,17 +34,20 @@ import (
 type aptIndex struct {
 	log   *slog.Logger
 	names map[string]string // package name -> short description
-	err   error
+	// cancelRefresh stops the background refresh in flight; nil when none is.
+	cancelRefresh context.CancelFunc
 	// updateErr is the outcome of the one refresh updateOnce guards.
 	updateErr error
 
-	fetched time.Time
-	mu      sync.RWMutex
+	fetched    time.Time
+	mu         sync.RWMutex
+	refreshing sync.WaitGroup
 	// updateOnce guards the one `apt-get update` this process runs. Both
 	// the search corpus and the install path need an index on disk, and
 	// both images ship without one.
 	updateOnce sync.Once
 	loading    bool
+	closed     bool
 }
 
 // aptIndexTTL is how long a parsed index is considered current. It
@@ -285,41 +288,65 @@ func aptFallbackAllows(pkg string) error {
 	return nil
 }
 
-// refresh updates the package index, at most one refresh at a time.
+// refresh updates the package index on its own goroutine, at most one
+// refresh at a time, and never after Close.
 //
 // A caller never waits on another caller's refresh: a second concurrent
 // search gets the index as it stands (possibly empty, which Search
 // reports as unavailable) rather than blocking a request on a network
 // operation. This is a search surface, so a late-but-complete answer is
 // worth less than a prompt honest one.
-func (a *aptIndex) refresh(ctx context.Context) {
+func (a *aptIndex) refresh() {
 	if a == nil || !AptAvailable() {
 		return
 	}
 	a.mu.Lock()
-	if a.loading {
-		a.mu.Unlock()
+	defer a.mu.Unlock()
+	if a.loading || a.closed {
 		return
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	a.loading = true
-	a.mu.Unlock()
+	a.cancelRefresh = cancel
+	a.refreshing.Go(func() {
+		defer cancel()
+		names, err := a.load(ctx)
+		a.finishRefresh(names, err)
+	})
+}
 
-	names, err := a.load(ctx)
-
+// finishRefresh records a background refresh's outcome. A failed refresh
+// keeps whatever list is already parsed: stale rather than none, the same
+// keep-last-good posture the catalog refresh takes.
+func (a *aptIndex) finishRefresh(names map[string]string, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.loading = false
-	a.err = err
+	a.cancelRefresh = nil
 	if err != nil {
-		// Keep whatever list is already parsed. A failed refresh degrades
-		// to a stale list, never to no list, which is the same
-		// keep-last-good posture the catalog refresh takes.
-		a.log.Warn("toolbelt: apt package index refresh failed", "error", err)
+		if !a.closed {
+			a.log.Warn("toolbelt: apt package index refresh failed", "error", err)
+		}
 		return
 	}
 	a.names = names
 	a.fetched = time.Now()
 	a.log.Info("toolbelt: apt package index loaded", "packages", len(names))
+}
+
+// Close stops a background refresh in flight and waits for it, so no
+// goroutine this index started outlives the engine that owns it.
+func (a *aptIndex) Close() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.closed = true
+	if a.cancelRefresh != nil {
+		a.cancelRefresh()
+	}
+	a.mu.Unlock()
+	a.refreshing.Wait()
 }
 
 // load runs apt-get update and parses the available-package list.

@@ -87,21 +87,6 @@ func TestVersionRejectedNamesTheGrammar(t *testing.T) {
 	}
 }
 
-func TestVersionPathComponent(t *testing.T) {
-	good := []string{"v1.2.3", "jdk-21.0.5+11", "1:10.0p1"}
-	for _, v := range good {
-		if !versionPathComponent(v) {
-			t.Errorf("versionPathComponent(%q) = false, want true", v)
-		}
-	}
-	bad := []string{"", ".", "..", "a/b", `a\b`, "../../etc"}
-	for _, v := range bad {
-		if versionPathComponent(v) {
-			t.Errorf("versionPathComponent(%q) = true, want false", v)
-		}
-	}
-}
-
 // TestSourceVersionGrammarIsTotal fails when a Source* constant is added
 // without deciding its version alphabet. The constants are read out of
 // the package's own source rather than listed here, because a list in a

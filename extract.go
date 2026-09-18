@@ -14,29 +14,117 @@ import (
 	"github.com/cplieger/pathinside/v2"
 )
 
+// Aqua format names: what a definition's format field holds, what an asset
+// name's extension resolves to, and what extractArtifact switches on.
+// formatRaw is a plain binary, the one format aqua requires spelled out.
+const (
+	formatRaw    = "raw"
+	formatTarGz  = "tar.gz"
+	formatTarBz2 = "tar.bz2"
+	formatTarXz  = "tar.xz"
+	formatTarZst = "tar.zst"
+	formatTarLz4 = "tar.lz4"
+	formatTarSz  = "tar.sz"
+	formatTarBr  = "tar.br"
+	formatTar    = "tar"
+	formatZip    = "zip"
+	formatGz     = "gz"
+	formatBz2    = "bz2"
+	formatXz     = "xz"
+	formatZst    = "zst"
+	formatLz4    = "lz4"
+	formatSz     = "sz"
+	formatBr     = "br"
+)
+
+// assetFormats maps an asset name's extension onto aqua's format name, the
+// tar forms first so tar.gz is matched before gz. The table is aqua's own:
+// https://aquaproj.github.io/docs/reference/registry-config/format
+var assetFormats = []struct{ ext, format string }{
+	{formatTarGz, formatTarGz},
+	{"tgz", formatTarGz},
+	{formatTarBz2, formatTarBz2},
+	{"tbz2", formatTarBz2},
+	{"tbz", formatTarBz2},
+	{formatTarXz, formatTarXz},
+	{"txz", formatTarXz},
+	{formatTarZst, formatTarZst},
+	{formatTarLz4, formatTarLz4},
+	{"tlz4", formatTarLz4},
+	{formatTarSz, formatTarSz},
+	{"tsz", formatTarSz},
+	{formatTarBr, formatTarBr},
+	{"tbr", formatTarBr},
+	{formatTar, formatTar},
+	{formatZip, formatZip},
+	{formatGz, formatGz},
+	{formatBz2, formatBz2},
+	{formatXz, formatXz},
+	{formatZst, formatZst},
+	{formatLz4, formatLz4},
+	{formatSz, formatSz},
+	{formatBr, formatBr},
+}
+
+// splitAssetFormat returns an asset name without its archive extension and
+// the aqua format that extension names. A name carrying no archive or
+// compression extension is formatRaw: that is what an aqua definition with
+// no format field means, and raw is the only format aqua requires spelled out.
+func splitAssetFormat(asset string) (stem, format string) {
+	// Matched on a tail of the extension's own byte length rather than on
+	// a lowered copy: lowering can change the length (U+0130 lowers to an
+	// ASCII i) and the stem is sliced from the original.
+	for _, f := range assetFormats {
+		ext := "." + f.ext
+		if len(asset) >= len(ext) && strings.EqualFold(asset[len(asset)-len(ext):], ext) {
+			return asset[:len(asset)-len(ext)], f.format
+		}
+	}
+	return asset, formatRaw
+}
+
+// canonicalFormat maps a short tar spelling a definition may declare (tgz,
+// tbz, ...) onto the long name extractArtifact switches on. Any other value,
+// the empty one included, is returned unchanged.
+func canonicalFormat(format string) string {
+	for _, f := range assetFormats {
+		if f.ext == format {
+			return f.format
+		}
+	}
+	return format
+}
+
 // extractArtifact unpacks a downloaded artifact into destDir according
-// to the aqua format. Archive extraction shells out to the system tar
-// and unzip, which the consumer image must bake in (tar, xz-utils, unzip) — no Go
-// decompression dependencies. destDir must exist and be empty.
+// to the aqua format, canonical long names only (see canonicalFormat).
+// Archive extraction shells out to the system tar and unzip, which the
+// consumer image must bake in (tar, xz-utils, bzip2, zstd, unzip) — no Go
+// decompression dependencies. destDir must exist and be empty. A format
+// the image cannot extract is an error, never a raw install: an archive
+// written out as the binary passes every later check.
 func extractArtifact(ctx context.Context, artifact, format, destDir, binName string) error {
 	switch format {
-	case "tar.gz", "tgz":
+	case formatTarGz:
 		return runQuiet(ctx, "tar", "-xzf", artifact, "-C", destDir)
-	case "tar.xz", "txz":
+	case formatTarXz:
 		return runQuiet(ctx, "tar", "-xJf", artifact, "-C", destDir)
-	case "tar.bz2", "tbz2":
+	case formatTarBz2:
 		return runQuiet(ctx, "tar", "-xjf", artifact, "-C", destDir)
-	case "tar.zst":
+	case formatTarZst:
 		return runQuiet(ctx, "tar", "--zstd", "-xf", artifact, "-C", destDir)
-	case "tar":
+	case formatTar:
 		return runQuiet(ctx, "tar", "-xf", artifact, "-C", destDir)
-	case "zip":
+	case formatZip:
 		return runQuiet(ctx, "unzip", "-q", artifact, "-d", destDir)
-	case "gz":
+	case formatGz:
 		return decompressTo(ctx, filepath.Join(destDir, binName), "gunzip", "-c", artifact)
-	case "xz":
+	case formatBz2:
+		return decompressTo(ctx, filepath.Join(destDir, binName), "bzip2", "-dc", artifact)
+	case formatXz:
 		return decompressTo(ctx, filepath.Join(destDir, binName), "xz", "-dc", artifact)
-	case formatRaw, "":
+	case formatZst:
+		return decompressTo(ctx, filepath.Join(destDir, binName), "zstd", "-dc", artifact)
+	case formatRaw:
 		// filepath.Base strips directory components so binName cannot escape destDir.
 		out := filepath.Join(destDir, filepath.Base(binName))
 		if rerr := os.Rename(artifact, out); rerr != nil {
@@ -169,10 +257,10 @@ func runQuiet(ctx context.Context, name string, args ...string) error {
 //
 // pathinside.Root.Contains admits root as part of its own tree by
 // contract; the equality check here is this package's own rule, because
-// linkDeclaredFiles chmods the result and publishes bin/<name> as a
-// symlink to it, so a registry entry naming the version directory itself
-// must be refused. The judgment is LEXICAL — linkDeclaredFiles resolves
-// with filepath.EvalSymlinks first and tests the resolved path.
+// resolveDeclaredFiles chmods the result and it is published as bin/<name>,
+// so a registry entry naming the version directory itself must be
+// refused. The judgment is LEXICAL — resolveDeclaredFiles resolves with
+// filepath.EvalSymlinks first and tests the resolved path.
 func insideStrictly(root pathinside.Root, target string) bool {
 	return root.Contains(target) && filepath.Clean(target) != filepath.Clean(string(root))
 }

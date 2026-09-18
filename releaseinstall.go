@@ -83,9 +83,10 @@ func (in *installer) releaseSpec(rr releaseRef, name, version string, assets []s
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", name, version, err)
 	}
+	_, format := splitAssetFormat(choice.Asset)
 	spec := &InstallSpec{
 		URL:    releaseDownloadURL(rr, version, choice.Asset),
-		Format: releaseFormat(choice.Asset),
+		Format: format,
 		Files:  releaseFiles(name, hints),
 		// Nothing declared where the binary lives, so the Files entry is
 		// this source's best guess and a miss is searched for rather than
@@ -115,31 +116,6 @@ func releaseDownloadURL(rr releaseRef, version, asset string) string {
 	default:
 		return fmt.Sprintf("https://github.com/%s/%s/releases/download/%s/%s",
 			url.PathEscape(rr.Owner), url.PathEscape(rr.Repo), url.PathEscape(version), asset)
-	}
-}
-
-// releaseFormat maps an asset name onto the extractor's format vocabulary.
-func releaseFormat(asset string) string {
-	lower := strings.ToLower(asset)
-	switch {
-	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
-		return "tar.gz"
-	case strings.HasSuffix(lower, ".tar.xz"), strings.HasSuffix(lower, ".txz"):
-		return "tar.xz"
-	case strings.HasSuffix(lower, ".tar.bz2"), strings.HasSuffix(lower, ".tbz2"):
-		return "tar.bz2"
-	case strings.HasSuffix(lower, ".tar.zst"):
-		return "tar.zst"
-	case strings.HasSuffix(lower, ".tar"):
-		return "tar"
-	case strings.HasSuffix(lower, ".zip"):
-		return "zip"
-	case strings.HasSuffix(lower, ".gz"):
-		return "gz"
-	case strings.HasSuffix(lower, ".xz"):
-		return "xz"
-	default:
-		return formatRaw
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -95,10 +96,10 @@ func TestSafeJoin_Containment(t *testing.T) {
 // directory rather than to something inside it. Every input here is
 // lexically inside the base — "." IS the base.
 //
-// The refusal is load-bearing rather than tidy: linkDeclaredFiles chmods
-// the result 0o755 and publishes bin/<name> as a symlink to it, so
-// accepting the base would chmod the version directory and publish a bin
-// entry pointing at a directory, from a value the registry supplies.
+// The refusal is load-bearing rather than tidy: resolveDeclaredFiles chmods
+// the result 0o755 and it is published as bin/<name>, so accepting the base
+// would chmod the version directory and publish a bin entry pointing at a
+// directory, from a value the registry supplies.
 func TestSafeJoin_RefusesTheBaseItself(t *testing.T) {
 	for _, rel := range []string{".", "./", "a/..", "a/b/../..", "./a/../.", "bin/.."} {
 		t.Run(rel, func(t *testing.T) {
@@ -159,7 +160,7 @@ func TestInsideStrictly(t *testing.T) {
 	}
 }
 
-// TestLinkDeclaredFiles_RefusesSymlinkEscape drives the containment
+// TestResolveDeclaredFiles_RefusesSymlinkEscape drives the containment
 // boundary through the real call path, on the two shapes the lexical
 // check of files[].src alone cannot see: the declared file exists and its
 // name is perfectly well-formed, but the symlink it resolves through
@@ -168,8 +169,8 @@ func TestInsideStrictly(t *testing.T) {
 //
 // TestInstallAqua_SymlinkEscapeRejected already covers a symlink pointing
 // far outside the tree. Both cases here are near misses, and both must be
-// refused before the chmod and before bin/ publication.
-func TestLinkDeclaredFiles_RefusesSymlinkEscape(t *testing.T) {
+// refused before the chmod.
+func TestResolveDeclaredFiles_RefusesSymlinkEscape(t *testing.T) {
 	cases := map[string]struct {
 		// linkTarget is resolved against the version directory's parent.
 		linkTarget func(versDir string) string
@@ -206,15 +207,12 @@ func TestLinkDeclaredFiles_RefusesSymlinkEscape(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}}, false)
+			bins, err := in.resolveDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}}, false)
 			if err == nil {
-				t.Fatalf("linkDeclaredFiles = %v, want the symlink refused", bins)
+				t.Fatalf("resolveDeclaredFiles = %v, want the symlink refused", bins)
 			}
 			if !strings.Contains(err.Error(), "escapes the install dir via symlink") {
 				t.Errorf("error = %q, want the symlink-escape message", err)
-			}
-			if _, lerr := os.Lstat(filepath.Join(in.binDir(), "rg")); !os.IsNotExist(lerr) {
-				t.Error("a bin/ link was published for the refused declared file")
 			}
 			fi, err := os.Stat(victim)
 			if err != nil {
@@ -288,6 +286,118 @@ func FuzzSafeJoin(f *testing.F) {
 	})
 }
 
+// TestSplitAssetFormat pins aqua's format inference for a definition that
+// declares none: the extension decides, a tar form wins over the compression
+// suffix it ends in, the short tar spellings map onto the long names the
+// extractor switches on, and a name with no archive extension is raw — a
+// version-bearing one included, since a dot alone is not an extension. The
+// stem is what {{.AssetWithoutExt}} renders.
+func TestSplitAssetFormat(t *testing.T) {
+	cases := map[string]struct{ stem, format string }{
+		"tool.tar.gz":  {"tool", "tar.gz"},
+		"tool.tgz":     {"tool", "tar.gz"},
+		"tool.tar.bz2": {"tool", "tar.bz2"},
+		"tool.tbz2":    {"tool", "tar.bz2"},
+		"tool.tbz":     {"tool", "tar.bz2"},
+		"tool.tar.xz":  {"tool", "tar.xz"},
+		"tool.txz":     {"tool", "tar.xz"},
+		"tool.tar.zst": {"tool", "tar.zst"},
+		"tool.tar.lz4": {"tool", "tar.lz4"},
+		"tool.tlz4":    {"tool", "tar.lz4"},
+		"tool.tar.sz":  {"tool", "tar.sz"},
+		"tool.tsz":     {"tool", "tar.sz"},
+		"tool.tar.br":  {"tool", "tar.br"},
+		"tool.tbr":     {"tool", "tar.br"},
+		"tool.tar":     {"tool", "tar"},
+		"tool.zip":     {"tool", "zip"},
+		"tool.gz":      {"tool", "gz"},
+		"tool.bz2":     {"tool", "bz2"},
+		"tool.xz":      {"tool", "xz"},
+		"tool.zst":     {"tool", "zst"},
+		"tool.lz4":     {"tool", "lz4"},
+		"tool.sz":      {"tool", "sz"},
+		"tool.br":      {"tool", "br"},
+
+		"prometheus-3.14.0.linux-amd64.tar.gz": {"prometheus-3.14.0.linux-amd64", "tar.gz"},
+		"Tool-1.2.3.ZIP":                       {"Tool-1.2.3", "zip"},
+		// U+0130 lowers to an ASCII i, so a match on a lowered copy read
+		// this as .zip and sliced the stem one byte short.
+		"tool.z\u0130p": {"tool.z\u0130p", formatRaw},
+
+		"yt-dlp":     {"yt-dlp", formatRaw},
+		"tool.v2":    {"tool.v2", formatRaw},
+		"tool-1.2.3": {"tool-1.2.3", formatRaw},
+		"tool.exe":   {"tool.exe", formatRaw},
+	}
+	for asset, want := range cases {
+		t.Run(asset, func(t *testing.T) {
+			stem, format := splitAssetFormat(asset)
+			if stem != want.stem {
+				t.Errorf("splitAssetFormat(%q) stem = %q, want %q", asset, stem, want.stem)
+			}
+			if format != want.format {
+				t.Errorf("splitAssetFormat(%q) format = %q, want %q", asset, format, want.format)
+			}
+		})
+	}
+}
+
+// TestCanonicalFormat pins the one vocabulary the extractor switches on: a
+// declared short tar spelling lands on the long name, and everything else,
+// the empty format included, passes through untouched so cmp.Or can still
+// see an absent declaration.
+func TestCanonicalFormat(t *testing.T) {
+	cases := map[string]string{
+		"tgz": "tar.gz", "tbz2": "tar.bz2", "tbz": "tar.bz2", "txz": "tar.xz",
+		"tlz4": "tar.lz4", "tsz": "tar.sz", "tbr": "tar.br",
+		"tar.gz": "tar.gz", "tar": "tar", "zip": "zip", "gz": "gz", formatRaw: formatRaw,
+		"": "", "cab": "cab",
+	}
+	for in, want := range cases {
+		if got := canonicalFormat(in); got != want {
+			t.Errorf("canonicalFormat(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestExtractArtifact_RefusesAFormatItCannotExtract pins the fail-closed half
+// of inference. A format aqua names but this image has no decompressor for,
+// the empty format an earlier resolver could leave behind, and a short
+// spelling that never reached canonicalFormat must all stop here: a tarball
+// written out as the binary passes the declared-file check whenever the
+// declared name is the bare one, and installs an archive on PATH.
+func TestExtractArtifact_RefusesAFormatItCannotExtract(t *testing.T) {
+	t.Parallel()
+	for name, format := range map[string]string{"tar.lz4": "tar.lz4", "br": "br", "empty": "", "tgz": "tgz"} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			artifact := filepath.Join(base, "tool.tar.lz4")
+			if err := os.WriteFile(artifact, []byte("not really an archive"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			destDir := filepath.Join(base, "dest")
+			if err := os.Mkdir(destDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			err := extractArtifact(t.Context(), artifact, format, destDir, "tool")
+			if err == nil {
+				t.Fatalf("extractArtifact(format %q) = nil, want the unsupported-format refusal", format)
+			}
+			if want := "unsupported archive format " + strconv.Quote(format); !strings.Contains(err.Error(), want) {
+				t.Errorf("extractArtifact(format %q) error = %q, want it to contain %q", format, err, want)
+			}
+			entries, rerr := os.ReadDir(destDir)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if len(entries) != 0 {
+				t.Errorf("destDir holds %d entries after a refused format, want none: %v", len(entries), entries)
+			}
+		})
+	}
+}
+
 // TestExtractArtifact_RawEnforcesTheStoredExecutableMode pins that the mode of
 // a plain-binary artifact is what the filesystem STORED, not what the extract
 // asked for. os.Rename carries the artifact's own mode onto the installed
@@ -358,17 +468,17 @@ func TestExtractArtifact_RawEnforcesTheStoredExecutableMode(t *testing.T) {
 	}
 }
 
-// TestLinkDeclaredFiles_EnforcesTheStoredExecutableMode pins the same property
-// on the publish path, where the target's mode comes from the ARCHIVE: tar and
-// unzip restore a member's recorded mode, so an archive can hand toolbelt a
-// group-writable file and the old pathname chmod would have reported success
-// whatever the filesystem did with its request. The bin/<name> symlink that
-// follows puts the result on PATH, which is what makes 0775 rather than 0755 a
-// security outcome and not a cosmetic one.
+// TestResolveDeclaredFiles_EnforcesTheStoredExecutableMode pins the same
+// property on the publish path, where the target's mode comes from the
+// ARCHIVE: tar and unzip restore a member's recorded mode, so an archive can
+// hand toolbelt a group-writable file and the old pathname chmod would have
+// reported success whatever the filesystem did with its request. The
+// bin/<name> symlink that follows puts the result on PATH, which is what makes
+// 0775 rather than 0755 a security outcome and not a cosmetic one.
 //
 // The wider starting mode is REAL — set on disk before the call, asserted by
 // the witness — so enforcement is what brings it back.
-func TestLinkDeclaredFiles_EnforcesTheStoredExecutableMode(t *testing.T) {
+func TestResolveDeclaredFiles_EnforcesTheStoredExecutableMode(t *testing.T) {
 	t.Parallel()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -396,11 +506,18 @@ func TestLinkDeclaredFiles_EnforcesTheStoredExecutableMode(t *testing.T) {
 			"exists to correct is not present on this filesystem", wfi.Mode().Perm())
 	}
 
-	bins, err := in.linkDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}}, false)
+	resolved, err := in.resolveDeclaredFiles(versDir, []AquaFile{{Name: "rg", Src: "bin/rg"}}, false)
 	if err != nil {
-		t.Fatalf("linkDeclaredFiles: %v", err)
+		t.Fatalf("resolveDeclaredFiles: %v", err)
 	}
-	if len(bins) != 1 || bins[0] != "rg" {
+	if want := []declaredBin{{name: "rg", rel: "bin/rg"}}; !slices.Equal(resolved, want) {
+		t.Fatalf("resolveDeclaredFiles = %v, want %v", resolved, want)
+	}
+	bins, err := in.linkDeclaredBins(versDir, resolved)
+	if err != nil {
+		t.Fatalf("linkDeclaredBins: %v", err)
+	}
+	if !slices.Equal(bins, []string{"rg"}) {
 		t.Fatalf("linked bins = %v, want [rg]", bins)
 	}
 	fi, err := os.Lstat(declared)
@@ -457,8 +574,8 @@ func TestEnforceExecutable_RefusesASymlinkInsteadOfChmodingItsTarget(t *testing.
 	}
 }
 
-// TestLinkDeclaredFiles_SearchSkipsAbsentNames covers the best-effort half
-// of the release path. The registry's binary list and the release move
+// TestResolveDeclaredFiles_SearchSkipsAbsentNames covers the best-effort
+// half of the release path. The registry's binary list and the release move
 // independently, so a list that has outrun upstream must still install
 // what the artifact does contain — llama.cpp declares 22 executables and
 // which of them ship varies by release.
@@ -466,18 +583,18 @@ func TestEnforceExecutable_RefusesASymlinkInsteadOfChmodingItsTarget(t *testing.
 // The floor is the second half: an install that published NOTHING is a
 // failed install however many names it skipped, or the tool reads as
 // present with no way to run it.
-func TestLinkDeclaredFiles_SearchSkipsAbsentNames(t *testing.T) {
+func TestResolveDeclaredFiles_SearchSkipsAbsentNames(t *testing.T) {
 	declared := []AquaFile{{Name: "llama-cli"}, {Name: "llama-server"}, {Name: "llama-bench"}}
 
 	t.Run("some present", func(t *testing.T) {
 		in, versDir := searchFixture(t, []string{"llama-cli", "sub/llama-server"}, nil)
-		bins, err := in.linkDeclaredFiles(versDir, declared, true)
+		bins, err := in.resolveDeclaredFiles(versDir, declared, true)
 		if err != nil {
-			t.Fatalf("linkDeclaredFiles(3 declared, 2 present) = %v, want the present two linked", err)
+			t.Fatalf("resolveDeclaredFiles(3 declared, 2 present) = %v, want the present two resolved", err)
 		}
-		want := []string{"llama-cli", "llama-server"}
+		want := []declaredBin{{name: "llama-cli", rel: "llama-cli"}, {name: "llama-server", rel: "sub/llama-server"}}
 		if !slices.Equal(bins, want) {
-			t.Errorf("linkDeclaredFiles(3 declared, 2 present) = %v, want %v", bins, want)
+			t.Errorf("resolveDeclaredFiles(3 declared, 2 present) = %v, want %v", bins, want)
 		}
 	})
 
@@ -486,12 +603,12 @@ func TestLinkDeclaredFiles_SearchSkipsAbsentNames(t *testing.T) {
 		// to take either: with exactly one it would resolve every declared
 		// name onto it, which is the SwiftFormat shape, not this one.
 		in, versDir := searchFixture(t, nil, []string{"README.md", "LICENSE"})
-		bins, err := in.linkDeclaredFiles(versDir, declared, true)
+		bins, err := in.resolveDeclaredFiles(versDir, declared, true)
 		if err == nil {
-			t.Fatalf("linkDeclaredFiles(3 declared, 0 present) = %v, want an error", bins)
+			t.Fatalf("resolveDeclaredFiles(3 declared, 0 present) = %v, want an error", bins)
 		}
 		if !strings.Contains(err.Error(), "none of the 3 declared executables") {
-			t.Errorf("linkDeclaredFiles(3 declared, 0 present) error = %v, want it to name the count", err)
+			t.Errorf("resolveDeclaredFiles(3 declared, 0 present) error = %v, want it to name the count", err)
 		}
 	})
 
@@ -500,8 +617,8 @@ func TestLinkDeclaredFiles_SearchSkipsAbsentNames(t *testing.T) {
 	// would bury a registry bug, or link a same-named file from elsewhere.
 	t.Run("no search keeps a miss fatal", func(t *testing.T) {
 		in, versDir := searchFixture(t, []string{"sub/llama-cli"}, nil)
-		if bins, err := in.linkDeclaredFiles(versDir, declared[:1], false); err == nil {
-			t.Errorf("linkDeclaredFiles(declared but nested, search off) = %v, want an error", bins)
+		if bins, err := in.resolveDeclaredFiles(versDir, declared[:1], false); err == nil {
+			t.Errorf("resolveDeclaredFiles(declared but nested, search off) = %v, want an error", bins)
 		}
 	})
 }

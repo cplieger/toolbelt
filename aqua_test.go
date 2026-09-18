@@ -224,6 +224,61 @@ func TestEnvSupported(t *testing.T) {
 	}
 }
 
+// TestResolveSpec_InfersTheFormatFromTheAssetName pins aqua's rule for a
+// definition with no format field: the format is the asset name's
+// extension, never raw by default, and {{.AssetWithoutExt}} strips that
+// same extension. The catalog carries 25 such definitions (prometheus,
+// crictl, d2, gdu, ...) and every one of them installed its tarball as the
+// binary while the default was raw.
+func TestResolveSpec_InfersTheFormatFromTheAssetName(t *testing.T) {
+	p := &AquaPackage{
+		Type: aquaTypeGitHubRelease, RepoOwner: "astral-sh", RepoName: "uv",
+		Asset: "uv-{{.Arch}}-unknown-linux-gnu.tar.gz",
+		Files: []AquaFile{{Name: "uv", Src: "{{.AssetWithoutExt}}/uv"}},
+	}
+	spec := resolveOrFatal(t, p, "0.9.0", "amd64")
+	if spec.Format != "tar.gz" {
+		t.Errorf("Format = %q, want tar.gz inferred from the asset name", spec.Format)
+	}
+	if want := "uv-amd64-unknown-linux-gnu/uv"; spec.Files[0].Src != want {
+		t.Errorf("Files[0].Src = %q, want %q", spec.Files[0].Src, want)
+	}
+
+	// A declared format still wins over the name, whatever the name says.
+	p.Format = formatRaw
+	if got := resolveOrFatal(t, p, "0.9.0", "amd64").Format; got != formatRaw {
+		t.Errorf("Format with an explicit raw = %q, want %q", got, formatRaw)
+	}
+}
+
+// TestResolveSpec_CanonicalisesADeclaredShortFormat pins the split between
+// the two readers of a declared format: {{.Format}} renders the spelling the
+// definition chose, because that spelling is part of the asset name upstream
+// published, while InstallSpec.Format carries the long name the extractor
+// switches on, so an explicit tlz4 fails as tar.lz4 rather than as a spelling
+// the extractor has never heard of.
+func TestResolveSpec_CanonicalisesADeclaredShortFormat(t *testing.T) {
+	cases := map[string]string{
+		"tgz": "tar.gz", "tbz": "tar.bz2", "tbz2": "tar.bz2", "txz": "tar.xz", "tlz4": "tar.lz4",
+	}
+	for declared, want := range cases {
+		t.Run(declared, func(t *testing.T) {
+			p := &AquaPackage{
+				Type: aquaTypeHTTP, RepoOwner: "vendor", RepoName: "tool",
+				URL:    "https://example.test/tool-{{.Arch}}.{{.Format}}",
+				Format: declared,
+			}
+			spec := resolveOrFatal(t, p, "v1.0.0", "amd64")
+			if wantURL := "https://example.test/tool-amd64." + declared; spec.URL != wantURL {
+				t.Errorf("URL = %q, want %q ({{.Format}} renders the declared spelling)", spec.URL, wantURL)
+			}
+			if spec.Format != want {
+				t.Errorf("Format = %q, want %q", spec.Format, want)
+			}
+		})
+	}
+}
+
 // TestResolveSpec_ArchOverrideBelongsToItsOwnArch pins the goos/goarch
 // override match. Applying another architecture's override downloads a
 // binary that cannot run on this machine — the failure surfaces later, as
