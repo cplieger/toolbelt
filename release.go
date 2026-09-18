@@ -24,8 +24,8 @@ import (
 // installable does not.
 var releaseAssetExts = []string{
 	".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".tar.zst", ".zip",
-	// Single-file compression (one gzipped/xz'd binary, not an archive):
-	// extract.go already handles both, so omitting them made the
+	// Single-file compression (one compressed binary, not an archive):
+	// extractArtifact decompresses all four, and omitting them made the
 	// allow-list narrower than the engine and refused elm and workerd.
 	".gz", ".xz", ".bz2", ".zst",
 }
@@ -354,7 +354,7 @@ func releasePickBest(cands, names []string) string {
 // index of the name that produced it, so a caller can prefer an earlier
 // name at equal score.
 func releaseNameAffinity(asset string, names []string) (score, nameIdx int) {
-	stem := strings.ToLower(releaseStem(asset))
+	stem := releaseStem(asset)
 	nameIdx = len(names)
 	for i, name := range names {
 		if s := stemAffinity(stem, strings.ToLower(name)); s > score {
@@ -382,16 +382,11 @@ func stemAffinity(stem, t string) int {
 	return 0
 }
 
-// releaseStem strips the recognised archive extension from an asset
-// name. path.Ext is not enough: ".tar.gz" is two extensions.
+// releaseStem is the lowercased asset name without its archive extension:
+// the text the token and affinity matches read.
 func releaseStem(name string) string {
-	lower := strings.ToLower(name)
-	for _, ext := range releaseAssetExts {
-		if strings.HasSuffix(lower, ext) {
-			return name[:len(name)-len(ext)]
-		}
-	}
-	return name
+	stem, _ := splitAssetFormat(name)
+	return strings.ToLower(stem)
 }
 
 // releaseChecksumFor finds a digest source for the chosen asset: a
@@ -432,7 +427,7 @@ func releaseChecksumFor(assets []string, chosen string) (name string, isManifest
 // and 64 and "x86_64" can never match) — that alone lost mint on both
 // architectures.
 func hasAnyToken(name string, tokens []string) bool {
-	hay := strings.ToLower(releaseStem(name))
+	hay := releaseStem(name)
 	for _, t := range tokens {
 		if hasToken(hay, t) {
 			return true

@@ -1,7 +1,11 @@
 package toolbelt
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -149,7 +153,8 @@ func TestExtractAndSwap_verifiesTheStoredModeOfThePublishedVersionTree(t *testin
 		t.Fatal(err)
 	}
 
-	versDir, err := in.extractAndSwap(t.Context(), "rg", "1.0.0", &InstallSpec{Format: formatRaw}, artifact)
+	spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "rg"}}}
+	versDir, _, err := in.extractAndSwap(t.Context(), "rg", "1.0.0", spec, artifact)
 	if err != nil {
 		t.Fatalf("extractAndSwap: %v", err)
 	}
@@ -601,6 +606,271 @@ func TestUninstall_ToleratesButReportsAFailedUninstallCommand(t *testing.T) {
 	}
 }
 
+// tarGz builds a gzipped tarball whose members are the given paths, each an
+// executable holding its content.
+func tarGz(t *testing.T, members map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, name := range slices.Sorted(maps.Keys(members)) {
+		content := members[name]
+		hdr := &tar.Header{Name: name, Mode: 0o755, Size: int64(len(content))}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestInstallFromSpec_InfersTheFormatFromTheAssetName drives the real
+// download, extract and link path on the shape that failed on a live volume:
+// an aqua definition with no format field, a tar.gz asset, and declared files
+// nested under the archive's top directory. While an absent format meant raw,
+// the tarball was written out verbatim under the first declared name and the
+// declared-file check failed on the nested path.
+func TestInstallFromSpec_InfersTheFormatFromTheAssetName(t *testing.T) {
+	top := "prometheus-3.14.0.linux-" + runtime.GOARCH
+	tarball := tarGz(t, map[string]string{
+		top + "/prometheus": "#!/bin/sh\necho prometheus\n",
+		top + "/promtool":   "#!/bin/sh\necho promtool\n",
+	})
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(tarball)
+	}))
+	// Client() is what starts the server and fills in srv.URL.
+	in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: func(string) {}}
+	aq := &AquaPackage{
+		Type: aquaTypeHTTP, RepoOwner: "prometheus", RepoName: "prometheus",
+		URL: srv.URL + "/prometheus-{{trimV .Version}}.{{.OS}}-{{.Arch}}.tar.gz",
+		Files: []AquaFile{
+			{Name: "prometheus", Src: "prometheus-{{trimV .Version}}.{{.OS}}-{{.Arch}}/prometheus"},
+			{Name: "promtool", Src: "prometheus-{{trimV .Version}}.{{.OS}}-{{.Arch}}/promtool"},
+		},
+	}
+	spec, err := aq.ResolveSpec("v3.14.0")
+	if err != nil {
+		t.Fatalf("ResolveSpec: %v", err)
+	}
+	if spec.Format != "tar.gz" {
+		t.Errorf("ResolveSpec Format = %q, want tar.gz inferred from the asset name", spec.Format)
+	}
+
+	bins, _, err := in.installFromSpec(t.Context(), "promtool", "v3.14.0", spec)
+	if err != nil {
+		t.Fatalf("installFromSpec: %v", err)
+	}
+	if want := []string{"prometheus", "promtool"}; !slices.Equal(bins, want) {
+		t.Errorf("installFromSpec bins = %v, want %v", bins, want)
+	}
+	versDir := filepath.Join(in.optDir(), "promtool", "v3.14.0")
+	for _, f := range []string{"prometheus", "promtool"} {
+		if _, err := os.Stat(filepath.Join(versDir, top, f)); err != nil {
+			t.Errorf("declared file %s/%s missing after extract: %v", top, f, err)
+		}
+	}
+	body, err := os.ReadFile(filepath.Join(in.binDir(), "promtool"))
+	if err != nil {
+		t.Fatalf("bin/promtool does not resolve: %v", err)
+	}
+	if string(body) != "#!/bin/sh\necho promtool\n" {
+		t.Errorf("bin/promtool resolves to %q, want the extracted promtool", body)
+	}
+}
+
+// shortFormatPackage is an http definition declaring format and serving
+// body as its one asset, for the tests that drive a declared short spelling
+// through the whole install path.
+func shortFormatPackage(t *testing.T, format string, body []byte) (*installer, *AquaPackage) {
+	t.Helper()
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: func(string) {}}
+	return in, &AquaPackage{
+		Type: aquaTypeHTTP, RepoOwner: "vendor", RepoName: "tool",
+		URL:    srv.URL + "/tool-{{trimV .Version}}.{{.Format}}",
+		Format: format,
+		Files:  []AquaFile{{Name: "tool", Src: "tool-{{trimV .Version}}/tool"}},
+	}
+}
+
+// TestInstallFromSpec_ExtractsADeclaredShortFormat pins that a definition
+// declaring tgz still installs now that the extractor knows the long names
+// only: the canonical name is decided once, where the spec is built.
+func TestInstallFromSpec_ExtractsADeclaredShortFormat(t *testing.T) {
+	tarball := tarGz(t, map[string]string{"tool-1.0.0/tool": "#!/bin/sh\necho tool\n"})
+	in, aq := shortFormatPackage(t, "tgz", tarball)
+	spec, err := aq.ResolveSpec("v1.0.0")
+	if err != nil {
+		t.Fatalf("ResolveSpec: %v", err)
+	}
+	if !strings.HasSuffix(spec.URL, "/tool-1.0.0.tgz") {
+		t.Errorf("URL = %q, want the declared tgz spelling in the asset name", spec.URL)
+	}
+
+	bins, _, err := in.installFromSpec(t.Context(), "tool", "v1.0.0", spec)
+	if err != nil {
+		t.Fatalf("installFromSpec with a declared tgz: %v", err)
+	}
+	if want := []string{"tool"}; !slices.Equal(bins, want) {
+		t.Errorf("installFromSpec bins = %v, want %v", bins, want)
+	}
+	body, err := os.ReadFile(filepath.Join(in.binDir(), "tool"))
+	if err != nil {
+		t.Fatalf("bin/tool does not resolve: %v", err)
+	}
+	if string(body) != "#!/bin/sh\necho tool\n" {
+		t.Errorf("bin/tool resolves to %q, want the extracted tool", body)
+	}
+}
+
+// TestInstallFromSpec_RefusesADeclaredShortFormatByItsLongName pins the
+// error a definition declaring tlz4 produces on an image with no lz4: it
+// names tar.lz4, the format aqua documents, not the spelling.
+func TestInstallFromSpec_RefusesADeclaredShortFormatByItsLongName(t *testing.T) {
+	in, aq := shortFormatPackage(t, "tlz4", []byte("not really an archive"))
+	spec, err := aq.ResolveSpec("v1.0.0")
+	if err != nil {
+		t.Fatalf("ResolveSpec: %v", err)
+	}
+
+	_, _, err = in.installFromSpec(t.Context(), "tool", "v1.0.0", spec)
+	if err == nil || !strings.Contains(err.Error(), `unsupported archive format "tar.lz4"`) {
+		t.Fatalf("installFromSpec with a declared tlz4 = %v, want the refusal to name tar.lz4", err)
+	}
+	if got := dirNames(t, filepath.Join(in.optDir(), "tool")); len(got) != 0 {
+		t.Errorf("opt/tool holds %v after a refused format, want nothing", got)
+	}
+}
+
+// TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing
+// pins where the declared-file check runs: on the staging tree, before the
+// swap. An artifact lacking a declared file therefore never displaces the
+// live version and leaves nothing on disk — measured on a 107 MB tarball
+// that a post-publish check had left under the version directory.
+func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t *testing.T) {
+	// The declared path names a top directory the archive does not have.
+	defective := tarGz(t, map[string]string{"elsewhere/tool": "#!/bin/sh\necho defective\n"})
+	spec := &InstallSpec{Format: "tar.gz", Files: []AquaFile{{Name: "tool", Src: "tool-1.0.0/tool"}}}
+
+	t.Run("a same-version reinstall keeps the live tree", func(t *testing.T) {
+		base := t.TempDir()
+		in := &installer{toolsDir: filepath.Join(base, "tools"), output: func(string) {}}
+		live := filepath.Join(base, "live-download")
+		if err := os.WriteFile(live, []byte("#!/bin/sh\necho live\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		liveSpec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "tool"}}}
+		versDir, declared, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", liveSpec, live)
+		if err != nil {
+			t.Fatalf("baseline publish: %v", err)
+		}
+		if _, err := in.linkDeclaredBins(versDir, declared); err != nil {
+			t.Fatalf("baseline link: %v", err)
+		}
+		artifact := filepath.Join(base, "tool.tar.gz")
+		if err := os.WriteFile(artifact, defective, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+		if err == nil || !strings.Contains(err.Error(), "missing after extract") {
+			t.Fatalf("reinstall from a defective artifact = %v, want the missing declared file refused", err)
+		}
+		body, rerr := os.ReadFile(filepath.Join(versDir, "tool"))
+		if rerr != nil {
+			t.Fatalf("the live version tree was displaced: %v", rerr)
+		}
+		if string(body) != "#!/bin/sh\necho live\n" {
+			t.Errorf("version tree holds %q, want the version that was live", body)
+		}
+		if got := dirNames(t, filepath.Join(in.optDir(), "tool")); !slices.Equal(got, []string{"1.0.0"}) {
+			t.Errorf("opt/tool holds %v, want only the live 1.0.0: the refused artifact left residue", got)
+		}
+		onPath, perr := os.ReadFile(filepath.Join(in.binDir(), "tool"))
+		if perr != nil {
+			t.Fatalf("bin/tool no longer resolves: %v", perr)
+		}
+		if string(onPath) != "#!/bin/sh\necho live\n" {
+			t.Errorf("bin/tool resolves to %q, want the live version", onPath)
+		}
+	})
+
+	t.Run("a first install leaves nothing on disk", func(t *testing.T) {
+		base := t.TempDir()
+		in := &installer{toolsDir: filepath.Join(base, "tools"), output: func(string) {}}
+		artifact := filepath.Join(base, "tool.tar.gz")
+		if err := os.WriteFile(artifact, defective, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+		if err == nil || !strings.Contains(err.Error(), "missing after extract") {
+			t.Fatalf("install from a defective artifact = %v, want the missing declared file refused", err)
+		}
+		if got := dirNames(t, filepath.Join(in.optDir(), "tool")); len(got) != 0 {
+			t.Errorf("opt/tool holds %v after a refused first install, want nothing", got)
+		}
+	})
+}
+
+// dirNames returns dir's entry names, sorted; a missing dir reads as empty.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// TestExtractAndSwap_RefusesADeclaredNameThatIsNotAPathComponent pins the
+// grammar of files[].name, which the registry supplies and which becomes
+// bin/<name>: the publish removes whatever sits at that path before linking,
+// and the single-file formats write the artifact to staging/<name>, so a name
+// carrying a separator reaches outside both. Refused before anything is
+// extracted, so not even the tool's opt dir exists afterwards.
+func TestExtractAndSwap_RefusesADeclaredNameThatIsNotAPathComponent(t *testing.T) {
+	names := map[string]string{
+		"empty": "", "dot": ".", "dotdot": "..",
+		"traversal": "../escape", "nested": "bin/tool", "absolute": "/tool",
+		"backslash": `bin\tool`,
+	}
+	for desc, name := range names {
+		t.Run(desc, func(t *testing.T) {
+			base := t.TempDir()
+			in := &installer{toolsDir: filepath.Join(base, "tools"), output: func(string) {}}
+			artifact := filepath.Join(base, "download")
+			if err := os.WriteFile(artifact, []byte("#!/bin/sh\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: name}}}
+
+			_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+			if err == nil || !strings.Contains(err.Error(), "not a path component") {
+				t.Fatalf("extractAndSwap(name %q) = %v, want the name refused", name, err)
+			}
+			if _, serr := os.Stat(in.optDir()); !errors.Is(serr, os.ErrNotExist) {
+				t.Errorf("stat opt after refusing name %q = %v, want it never created", name, serr)
+			}
+		})
+	}
+}
+
 // TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails pins the
 // same-version reinstall window. The publish renames the live tree aside before
 // moving the new one in, so between those two renames the tool exists only under
@@ -610,12 +880,12 @@ func TestUninstall_ToleratesButReportsAFailedUninstallCommand(t *testing.T) {
 func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *testing.T) {
 	base := t.TempDir()
 	in := &installer{toolsDir: filepath.Join(base, "tools"), output: func(string) {}}
-	spec := &InstallSpec{Format: formatRaw}
+	spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "tool"}}}
 	first := filepath.Join(base, "first-download")
 	if err := os.WriteFile(first, []byte("#!/bin/sh\necho live\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	versDir, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, first)
+	versDir, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, first)
 	if err != nil {
 		t.Fatalf("baseline publish: %v", err)
 	}
@@ -633,7 +903,7 @@ func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *test
 		t.Fatal(err)
 	}
 
-	_, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, second)
+	_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, second)
 	if err == nil || !strings.Contains(err.Error(), "commit install") {
 		t.Fatalf("reinstall = %v, want the commit barrier failure", err)
 	}

@@ -110,12 +110,3 @@ func versionRejected(source, v string) error {
 		return fmt.Errorf("version %q is not a release tag (letters, digits, '.', '-', '_', '+')", v)
 	}
 }
-
-// versionPathComponent reports whether v is usable as a single path
-// component. grammarTag already excludes every separator; this is the
-// assertion that keeps that true at the site which depends on it, so a
-// source kind wired to extraction later cannot reach the join carrying a
-// wider grammar's value.
-func versionPathComponent(v string) bool {
-	return v != "" && v != "." && v != ".." && !strings.ContainsAny(v, `/\`)
-}

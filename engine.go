@@ -350,7 +350,7 @@ func (e *Engine) searchApt(query string) (hits []AptHit, matched int, state AptS
 		return nil, 0, AptStateUnavailable
 	}
 	if e.aptIdx.stale() {
-		go e.aptIdx.refresh(context.WithoutCancel(context.Background()))
+		e.aptIdx.refresh()
 	}
 	hits, matched, consulted := e.aptIdx.Search(query)
 	if !consulted {

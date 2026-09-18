@@ -314,6 +314,36 @@ func TestAptIndexSearch_DistinguishesUnavailableFromEmpty(t *testing.T) {
 	}
 }
 
+// TestAptIndexClose_WaitsForTheRefreshItStarted pins the shutdown contract
+// for the one goroutine a search can start: Close returns only once the
+// refresh has finished, and a refresh asked for afterwards never starts. A
+// refresh that outlives Close reads package state the next test rewrites,
+// which the race detector reports against whichever test runs next.
+func TestAptIndexClose_WaitsForTheRefreshItStarted(t *testing.T) {
+	if !AptAvailable() {
+		t.Skip("apt is not usable here, so no refresh can start")
+	}
+	refreshing := func(idx *aptIndex) (loading, cancellable bool) {
+		idx.mu.RLock()
+		defer idx.mu.RUnlock()
+		return idx.loading, idx.cancelRefresh != nil
+	}
+	idx := newAptIndex(slog.Default())
+	idx.refresh()
+	if loading, cancellable := refreshing(idx); !loading || !cancellable {
+		t.Fatalf("refresh() left loading=%v cancellable=%v, want a refresh in flight", loading, cancellable)
+	}
+
+	idx.Close()
+	if loading, cancellable := refreshing(idx); loading || cancellable {
+		t.Errorf("after Close: loading=%v cancellable=%v, want the refresh finished", loading, cancellable)
+	}
+	idx.refresh()
+	if loading, cancellable := refreshing(idx); loading || cancellable {
+		t.Errorf("refresh() after Close left loading=%v cancellable=%v, want nothing started", loading, cancellable)
+	}
+}
+
 // TestSearchApt_ReportsUnavailableRatherThanEmpty covers the engine's
 // SearchApt surface for the unavailable-vs-empty distinction Search's
 // doc comment explains.
