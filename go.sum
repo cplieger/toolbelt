@@ -4,8 +4,8 @@ github.com/cplieger/atomicfile/v3 v3.1.0 h1:jcDzYnT6nvhIqbo3w9g0Wnkeca8r0ofs0hy6
 github.com/cplieger/atomicfile/v3 v3.1.0/go.mod h1:jhxOw5RQn5pYB0eAo5SLRPXKYChRxT/bW/TnTcLZa78=
 github.com/cplieger/httpx/v5 v5.0.3 h1:bMtqn9nQXCD/0AdS2eEsl4K7QjYdANyM3ZyksDxKSug=
 github.com/cplieger/httpx/v5 v5.0.3/go.mod h1:3LKMRNjhTYJM9lwDfGpyjtpL4umH6wSMpeD2vanUYlk=
-github.com/cplieger/keyenc v1.0.7 h1:WlTRDm84eHjWqhiNVlT7mmVcNLIehMAzFFHSU05zz1w=
-github.com/cplieger/keyenc v1.0.7/go.mod h1:7T7DG6yK2b+DJWmQxXfbMADV5h3fWLFTnbXpAWVaKa4=
+github.com/cplieger/keyenc v1.0.8 h1:qQGKaLBcFySAmjALux1gyuVDZAUXhLn2HEBj2xjo1Vs=
+github.com/cplieger/keyenc v1.0.8/go.mod h1:7T7DG6yK2b+DJWmQxXfbMADV5h3fWLFTnbXpAWVaKa4=
 github.com/cplieger/pathinside/v2 v2.0.1 h1:tsCGs+7/U1v/c2q7lcHK9UYUbiyYrvjUxL2h46awO2A=
 github.com/cplieger/pathinside/v2 v2.0.1/go.mod h1:M+uGHbsTS0Zb1hqRMbkoMI/3RkryUZRnJ+P0gxhBjyE=
 github.com/cplieger/runesafe/v2 v2.1.0 h1:MTFMH5VDk9+bhbUces9LweBAO9Bsayy/hKLFBOqewj8=
