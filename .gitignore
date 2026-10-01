@@ -27,3 +27,6 @@ go.work.sum
 
 # Compiled lane binary
 cmd/toolcatalog/toolcatalog
+
+# Agent workflow scratch
+.agents/
