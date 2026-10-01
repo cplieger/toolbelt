@@ -11,28 +11,28 @@
 # every API symbol whose production callers live in a consumer module is
 # reported EU1002 (no reference) or EU1001 (referenced only from this repo's
 # _test.go files). Consumer evidence below was taken against the two modules
-# whose go.mod requires this one (vibekit v2.2.12, web-terminal-kiro v2.2.8);
+# whose go.mod requires this one (marotte v2.2.12, web-terminal-kiro v2.2.8);
 # consumer line numbers are the snapshot at adjudication time, the file and
 # call shape are the durable part. Cross-checked: `deadcode -test ./...` and
 # `staticcheck -checks U1000 ./...` both report nothing in this module, so no
 # finding below is dead code hiding behind a published name.
 #
 # Engine lifecycle, the four calls a consumer app makes to own a tools engine.
-# New is the only constructor (toolbelt.go:227): vibekit
+# New is the only constructor (toolbelt.go:227): marotte
 # internal/composition/composition.go:477, web-terminal-kiro main.go:1144.
-# Close is the shutdown half (toolbelt.go:277): vibekit composition.go:288
+# Close is the shutdown half (toolbelt.go:277): marotte composition.go:288
 # (`a.tools.Close()`, field typed *toolbelt.Engine at composition.go:45),
 # web-terminal-kiro main.go:1007. Wait blocks on a job id (engine.go:165):
 # web-terminal-kiro main.go:1131 inside awaitBootConvergence, launched at
 # main.go:1108. Reconcile enqueues the convergence job (engine.go:590):
-# vibekit composition.go:505, web-terminal-kiro main.go:1089.
+# marotte composition.go:505, web-terminal-kiro main.go:1089.
 function New
 method (*Engine).Close
 method (*Engine).Wait
 method (*Engine).Reconcile
 #
 # EnsureInstalled (engine.go:616) is the synchronous "a product action needs
-# this binary now" path. vibekit assigns it as a method VALUE rather than
+# this binary now" path. marotte assigns it as a method VALUE rather than
 # calling it -- `forgesPkg.EnsureTool = toolsEngine.EnsureInstalled`,
 # internal/composition/composition.go:156 -- so even an in-module reference
 # search for a call expression would miss it; the forge login path invokes it
@@ -40,7 +40,7 @@ method (*Engine).Reconcile
 method (*Engine).EnsureInstalled
 #
 # DefaultSeed (toolbelt.go:295) is the shared starter manifest every consumer
-# passes as Config.Seed: vibekit composition.go:483, web-terminal-kiro
+# passes as Config.Seed: marotte composition.go:483, web-terminal-kiro
 # main.go:1149. Deleting it would leave both apps with no manifest seed and
 # duplicate the language-server starter set into each of them.
 function DefaultSeed
@@ -54,12 +54,12 @@ constant ReconcileMissing
 #
 # The three consumer-contract helpers, each with two call sites and no
 # in-module production caller by design (they exist FOR the consumer):
-# ParseRequireList (catalog.go:222) -- vibekit main.go:67, web-terminal-kiro
+# ParseRequireList (catalog.go:222) -- marotte main.go:67, web-terminal-kiro
 # main.go:1049, both feeding CatalogRefresh.Require from an embedded
 # required-tools.txt; DefaultCatalogURL (catalogrefresh.go:51) -- the env
-# default at vibekit internal/composition/config.go:96 and web-terminal-kiro
+# default at marotte internal/composition/config.go:96 and web-terminal-kiro
 # main.go:340, the one place a publisher move stays a one-line change;
-# ParseCatalogRefresh (catalogrefresh.go:71) -- vibekit config.go:97,
+# ParseCatalogRefresh (catalogrefresh.go:71) -- marotte config.go:97,
 # web-terminal-kiro main.go:203, which owns the clamp policy both apps apply
 # to their refresh env var.
 function ParseRequireList
@@ -68,7 +68,7 @@ function ParseCatalogRefresh
 #
 # httpapi.Handler (httpapi/httpapi.go:148) is the entire purpose of the
 # httpapi package: the REST projection a consumer mounts on its own mux.
-# vibekit internal/server/server.go:224 (`httpapi.Handler(s.tools,
+# marotte internal/server/server.go:224 (`httpapi.Handler(s.tools,
 # "/api/tools")`, field typed *toolbelt.Engine at server.go:43),
 # web-terminal-kiro routes.go:177 behind loopbackOnly. Nothing in this module
 # mounts a mux, so an in-module reference can only ever come from a test.
@@ -107,7 +107,7 @@ method (*DependentsError).Is
 # CLASS before it reads the per-path findings with errors.As.
 # The adoptions land SEPARATELY: as of this entry neither consumer sets the
 # field, so the call sites the check will gate are their existing New literals —
-# vibekit internal/composition/composition.go:477 and web-terminal-kiro
+# marotte internal/composition/composition.go:477 and web-terminal-kiro
 # main.go:1144. Test-covered in rootintegrity_test.go, so deleting it fails the
 # suite rather than silently, but it is not dead: it is the only reason the
 # sentinel comparison this package documents works at all.
@@ -138,7 +138,7 @@ method (*cappedBuffer).Write
 # The three list-returning search projections (engine.go) are the published
 # surface httpapi used until SearchWithCounts replaced it, and every in-module
 # production caller moved with the route. Neither consumer calls them directly
-# (vibekit and web-terminal-kiro both mount httpapi.Handler; grep 2026-09-13),
+# (marotte and web-terminal-kiro both mount httpapi.Handler; grep 2026-09-13),
 # so this is genuine test-only reach, not a gopls blind spot. They stay because
 # removing an exported method is a breaking change: gorelease would demand a
 # major, and a major on this module is a /v4 import-path migration in both

@@ -55,7 +55,7 @@ type CatalogEntry struct {
 	// Essential marks a tool the PRODUCT depends on: removing it breaks a
 	// feature the user did not ask to lose, so the engine refuses (
 	// ErrEssential). Declared by a consumer's BUNDLED TOOLS file, never
-	// by registry data — "vibekit needs gh" is a fact about vibekit, not
+	// by registry data — "marotte needs gh" is a fact about marotte, not
 	// gh. Not a lock on version or install state: an essential tool can
 	// still be updated or DISABLED, only deletion is refused. Companion
 	// to Featured: Essential is NECESSARY, Featured is RECOMMENDED.

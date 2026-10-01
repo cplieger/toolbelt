@@ -1003,7 +1003,7 @@ func cancelActiveContext(t *testing.T, e *Engine, _, _ *Job) {
 // goroutine, and the line emitted in the job's final moments has no tick
 // left to carry it — only that goroutine's closing flush. Signalling the
 // goroutine and finalizing without waiting for it left the flush racing the
-// terminal notification, so vibekit's tools panel could render a finished
+// terminal notification, so marotte's tools panel could render a finished
 // job and then receive more of its output. The queue is driven directly
 // here because the ordering is the queue's, not the engine's.
 func TestRunOne_FlushesOutputBeforeTheTerminalState(t *testing.T) {
