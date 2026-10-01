@@ -113,7 +113,7 @@ type jobQueue struct {
 	// onChanged receives every state transition. It is called under the
 	// queue lock so transitions arrive in strict order — it MUST NOT
 	// block (a fan-out to slow consumers belongs behind a ring/buffer
-	// on the consumer side; vibekit's SSE hub append is non-blocking).
+	// on the consumer side; marotte's SSE hub append is non-blocking).
 	onChanged func(*Job)
 	onOutput  func(jobID string, lines []string)
 	log       *slog.Logger
