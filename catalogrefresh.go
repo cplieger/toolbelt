@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/atomicfile/v4"
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/scheduler/v4"
 )
