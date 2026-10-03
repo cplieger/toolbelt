@@ -369,7 +369,7 @@ func (e *Engine) runCatalogRefresh(ctx context.Context, output func(string)) (er
 		return fmt.Errorf("reject fetched catalog (keeping current): %w", err)
 	}
 	if _, err := atomicfile.WriteFile(ctx, e.cachedCatalogPath(), body,
-		atomicfile.WithMode(0o644), atomicfile.WithMkdirMode(0o755)); err != nil {
+		atomicfile.WithMode(engineFileMode), atomicfile.WithMkdirMode(engineDirMode)); err != nil {
 		// The prepared catalog is good; a cache-write failure only costs
 		// restart persistence, and the next refresh repairs it (the
 		// content short-circuit above misses on a divergent cache).
