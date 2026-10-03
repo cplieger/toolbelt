@@ -194,14 +194,13 @@ func newEngineClient() *http.Client {
 }
 
 // New constructs and starts an Engine: initializes the manifest files
-// (seeding when absent; a manifest of any other schema version is an
-// error) and launches the job worker.
+// (seeding when absent; another schema version is an error), refuses a
+// ConfigDir that fails a probe write, and launches the job worker.
 //
 // With Config.VerifyRootIntegrity set, the managed roots are inspected
 // FIRST — before any file is written or directory created — and an
 // unfit root refuses construction with ErrRootIntegrity. New is the
-// seam on purpose: Inventory and EnsureInstalled probe synchronously
-// too, so gating only the reconcile queue would leave those paths open.
+// seam because Inventory and EnsureInstalled probe synchronously too.
 func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
@@ -225,6 +224,9 @@ func New(cfg *Config) (*Engine, error) {
 	st := newStore(cfg.ConfigDir, cfg.Seed, log)
 	if err := st.initFiles(); err != nil {
 		return nil, fmt.Errorf("toolbelt: init manifest: %w", err)
+	}
+	if err := verifyConfigWritable(log, cfg.ConfigDir); err != nil {
+		return nil, fmt.Errorf("toolbelt: %w", err)
 	}
 	client := newEngineClient()
 	e := &Engine{

@@ -244,8 +244,47 @@ var atomicWrite = realAtomicWrite
 // rename.
 func realAtomicWrite(path string, data []byte) (durable bool, err error) {
 	res, err := atomicfile.WriteFile(context.Background(), path, data,
-		atomicfile.WithMode(0o644), atomicfile.WithMkdirMode(0o755))
+		atomicfile.WithMode(engineFileMode), atomicfile.WithMkdirMode(engineDirMode))
 	return res.Durable, err
+}
+
+// engineFileMode and engineDirMode are enforced on everything the engine
+// writes under ConfigDir. The manifest and the catalog cache decide what gets
+// installed and run, so a copy another account could rewrite is the exposure
+// VerifyRootIntegrity refuses on a root: keep the mode enforced, not requested.
+const (
+	engineFileMode os.FileMode = 0o644
+	engineDirMode  os.FileMode = 0o755
+)
+
+// probeWritable is a package var so tests can stand in for a read-only
+// volume, which a test running as root cannot stage.
+var probeWritable = atomicfile.ProbeWritable
+
+// verifyConfigWritable proves configDir can stage a private file and publish
+// it by rename, the steps every store write takes. New writes nothing over an
+// existing manifest, so without it a read-only or mode-widening volume first
+// fails at an install's state commit, after the tool is on disk with no
+// recorded owner. A teardown-only failure is a Warn: the store's writes
+// rename the temp away and never unlink it.
+func verifyConfigWritable(log *slog.Logger, configDir string) error {
+	res, err := probeWritable(context.Background(), configDir, atomicfile.WithMode(engineFileMode))
+	if err != nil {
+		return err
+	}
+	if res.OK() {
+		return nil
+	}
+	if res.Writable() {
+		log.Warn("toolbelt: config dir accepted a probe write but its teardown failed",
+			"dir", res.Dir, "stage", res.Stage.String(), "name", res.Name, "leaked", res.Leaked, "err", res.Err)
+		return nil
+	}
+	if errors.Is(res.Err, atomicfile.ErrModeNotStored) {
+		return fmt.Errorf("config dir %s cannot keep an owner-only staging file, typically because an inherited ACL widens new files: %w",
+			res.Dir, res.Err)
+	}
+	return fmt.Errorf("config dir %s is not writable (%s failed): %w", res.Dir, res.Stage, res.Err)
 }
 
 // LoadManifest reads the manifest file under the store lock and returns a
