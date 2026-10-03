@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile/v3"
+	"github.com/cplieger/atomicfile/v4"
 )
 
 // Tool is one manifest entry: the user's intent for a single tool.
