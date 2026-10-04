@@ -2,14 +2,11 @@ package toolbelt
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"path"
 	"runtime"
 	"strings"
-
-	"github.com/cplieger/httpx/v5"
 )
 
 // The release source's install path. Selection is release.go's job;
@@ -48,7 +45,7 @@ func parseReleaseRef(ref string) (releaseRef, error) {
 	}
 	host, owner, repo := parts[0], parts[1], parts[2]
 	if host != releaseHostGitHub && host != releaseHostGitLab {
-		return releaseRef{}, fmt.Errorf("unknown release host %q (want %s or %s)", host, releaseHostGitHub, releaseHostGitLab)
+		return releaseRef{}, fmt.Errorf("unknown release host %q, want %s or %s", host, releaseHostGitHub, releaseHostGitLab)
 	}
 	if owner == "" || repo == "" {
 		return releaseRef{}, fmt.Errorf("release source %q names no owner or repository", ref)
@@ -208,22 +205,8 @@ func (in *installer) listGitLabAssets(ctx context.Context, rr releaseRef, versio
 	return names, nil
 }
 
-// getJSON fetches and decodes a small JSON document through the
-// installer's own client, so a release listing inherits the same
-// SSRF-guarded transport and retry policy every other fetch here uses.
-// GitHub API calls carry the shared token when one is available: the
-// anonymous ceiling is 60 requests an hour for the whole process and a
-// release install spends two of them.
 func (in *installer) getJSON(ctx context.Context, rawURL string, out any) error {
-	opts := append([]httpx.GetOption{
-		httpx.WithMaxAttempts(3),
-		httpx.WithMaxBodyBytes(releaseListingCap),
-	}, githubAuth(rawURL, in.tokens)...)
-	body, err := httpx.GetBytes(ctx, in.client, rawURL, opts...)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(body, out)
+	return fetchJSON(ctx, in.client, rawURL, releaseListingCap, out)
 }
 
 // releaseListingCap bounds a release listing. A release with hundreds of

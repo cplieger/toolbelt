@@ -42,11 +42,7 @@ type installer struct {
 	// oracle before any apt-get install (see installer.aptKnownName).
 	// Nil, or not yet loaded, degrades to the expansion-character
 	// fallback rather than to no check at all.
-	aptIdx *aptIndex
-	// tokens authenticates the release source's asset listing against the
-	// GitHub API, the same credential the version resolver uses. Nil means
-	// anonymous, which works until the 60/hour ceiling.
-	tokens   *githubTokenCache
+	aptIdx   *aptIndex
 	toolsDir string
 }
 
@@ -254,7 +250,7 @@ func (in *installer) installFromSpec(ctx context.Context, name, version string, 
 
 func (in *installer) installAqua(ctx context.Context, name, version string, aq *AquaPackage) (bins []string, checksum string, err error) {
 	if aq == nil {
-		return nil, "", fmt.Errorf("no aqua definition for %s (catalog missing?)", name)
+		return nil, "", fmt.Errorf("no aqua definition for %s, the catalog may be missing", name)
 	}
 	spec, err := aq.ResolveSpec(version)
 	if err != nil {
@@ -285,7 +281,7 @@ func (in *installer) verifyArtifact(ctx context.Context, name, version, artifact
 	default:
 		in.logger().Warn("toolbelt: installing UNVERIFIED artifact: the definition declares no checksum source",
 			"tool", name, "version", version, "url", spec.URL)
-		in.logf("WARNING: no checksum source declared for %s %s; installing UNVERIFIED from %s",
+		in.logf("No checksum source is declared for %s %s, so it is installed without verification from %s",
 			name, version, spec.URL)
 		return checksumUnverified, nil
 	}
@@ -1129,22 +1125,22 @@ func (in *installer) uninstall(ctx context.Context, name string, t *Tool, st *To
 		// engine's bin/opt), and removing the package could take an
 		// image dependency with it. Dropping the entry stops it being
 		// reinstalled; a container recreate removes the rest.
-		in.logf("dropped the %s entry; the Debian package stays until the container is recreated (apt packages are not on the persistent volume)", name)
+		in.logf("dropped the %s entry. The Debian package stays until the container is recreated, because apt packages are not on the persistent volume", name)
 		return nil
 	}
 	switch kind {
 	case SourceNpm:
 		if err := in.runPM(ctx, "npm", "uninstall", "-g", "--prefix", in.npmDir(), ref); err != nil {
-			in.logf("npm uninstall failed (continuing): %v", err)
+			in.logf("npm uninstall failed with %v, and the removal continues", err)
 		}
 	case SourcePip:
 		if err := in.runPM(ctx, "uv", "tool", "uninstall", ref); err != nil {
-			in.logf("uv tool uninstall failed (continuing): %v", err)
+			in.logf("uv tool uninstall failed with %v, and the removal continues", err)
 		}
 	case SourceManual:
 		if strings.TrimSpace(t.Uninstall) != "" {
 			if err := in.runShell(ctx, t.Uninstall, t.Version, filepath.Join(in.optDir(), name)); err != nil {
-				in.logf("uninstall command failed (continuing): %v", err)
+				in.logf("The uninstall command failed with %v, and the removal continues", err)
 			}
 		}
 	}

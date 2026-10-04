@@ -113,6 +113,14 @@ method (*DependentsError).Is
 # sentinel comparison this package documents works at all.
 method (*RootIntegrityError).Is
 #
+# errors.Unwrap contract: (*dependencyError).Unwrap (engine.go) is the method
+# errors.Is and errors.As reach through their `interface{ Unwrap() error }`
+# assertion, the same runtime dispatch as the two entries above. It keeps the
+# dependency's own cause (a *githubRateLimitError, a context cancellation)
+# reachable from the dependent's error, which the fmt.Errorf("%w") it replaced
+# also did.
+method (*dependencyError).Unwrap
+#
 # The change that added the above introduced four other exported symbols with no
 # entry here, deliberately: ErrRootIntegrity, RootIntegrityError,
 # RootIntegrityFinding and Config.VerifyRootIntegrity. Measured against the

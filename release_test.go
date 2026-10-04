@@ -3,15 +3,12 @@ package toolbelt
 import (
 	"bufio"
 	"cmp"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 )
 
 // fixtureAssets reads one testdata/release-assets/<tool>.txt: leading
@@ -328,6 +325,64 @@ func TestChooseReleaseAsset_PrefersTheToolOverThingsShippedBeside(t *testing.T) 
 			}
 			if got.Asset != tc.want {
 				t.Errorf("chose %q, want %q", got.Asset, tc.want)
+			}
+		})
+	}
+}
+
+// TestChooseReleaseAsset_TieBreakIgnoresListingOrder pins the last two
+// tie-breaks, shorter name then lexical order, as independent of the order
+// the forge lists assets in: the listing order is upload order, so a choice
+// that followed it would change between two releases of the same tool.
+func TestChooseReleaseAsset_TieBreakIgnoresListingOrder(t *testing.T) {
+	cases := map[string]struct {
+		assets []string
+		want   string
+	}{
+		"the shorter name wins an equal score": {
+			assets: []string{"foo-linux-amd64-full.tar.gz", "foo-linux-amd64.tar.gz"},
+			want:   "foo-linux-amd64.tar.gz",
+		},
+		"equal lengths break lexically": {
+			assets: []string{"foo-y-linux-amd64.tar.gz", "foo-x-linux-amd64.tar.gz"},
+			want:   "foo-x-linux-amd64.tar.gz",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			reversed := slices.Clone(tc.assets)
+			slices.Reverse(reversed)
+			for _, assets := range [][]string{tc.assets, reversed} {
+				got, err := chooseReleaseAsset(assets, "foo", "amd64")
+				if err != nil {
+					t.Fatalf("chooseReleaseAsset(%v) = %v", assets, err)
+				}
+				if got.Asset != tc.want {
+					t.Errorf("chooseReleaseAsset(%v) chose %q, want %q", assets, got.Asset, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestReleaseHints_IsZero pins the predicate the catalog compiler uses to
+// omit an empty hints object: any single field set must keep it.
+func TestReleaseHints_IsZero(t *testing.T) {
+	cases := map[string]struct {
+		hints *ReleaseHints
+		want  bool
+	}{
+		"nil":            {hints: nil, want: true},
+		"no field set":   {hints: &ReleaseHints{}, want: true},
+		"matching set":   {hints: &ReleaseHints{Matching: "linux"}, want: false},
+		"bin set":        {hints: &ReleaseHints{Bin: "solc"}, want: false},
+		"bin path set":   {hints: &ReleaseHints{BinPath: "kotlinc/bin"}, want: false},
+		"bins non-empty": {hints: &ReleaseHints{Bins: []string{"q"}}, want: false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := tc.hints.IsZero(); got != tc.want {
+				t.Errorf("(%+v).IsZero() = %v, want %v", tc.hints, got, tc.want)
 			}
 		})
 	}
@@ -952,55 +1007,5 @@ func TestReleaseArchTokens_UnknownSpellingIsNotNeutral(t *testing.T) {
 	}
 	if got, err := chooseReleaseAsset(elm, "elm", "amd64"); err != nil || got.Asset != "elm-0.19.2-linux-x64.gz" {
 		t.Errorf("chooseReleaseAsset(elm, amd64) = %q, %v, want elm-0.19.2-linux-x64.gz", got.Asset, err)
-	}
-}
-
-// TestListReleaseAssets_CarriesTheGitHubCredential pins the fix for a
-// defect the live check found. The GitHub anonymous rate limit is 60
-// requests an hour for the whole PROCESS, and a release install spends two
-// of them: one resolving the tag, one listing the assets. While only the
-// version resolver held the token, the tag resolved and the listing came
-// back HTTP 403 on a repository whose release was public — a failure that
-// reads like a missing release.
-//
-// The second half is the fence: the credential must not travel to the
-// download URL, which is a different origin and needs none.
-func TestListReleaseAssets_CarriesTheGitHubCredential(t *testing.T) {
-	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		_, _ = w.Write([]byte(`{"assets":[{"name":"tool-linux-amd64"}]}`))
-	}))
-	defer srv.Close()
-
-	tokens := &githubTokenCache{token: "s3cret", checked: time.Now()}
-	in := &installer{client: srv.Client(), output: func(string) {}, tokens: tokens}
-
-	// The API host is what earns the header, and the test server is not it,
-	// so drive both cases through githubAuth directly: it is the predicate
-	// that decides, and a test server cannot be api.github.com.
-	if opts := githubAuth("https://api.github.com/repos/o/r/releases/tags/v1", tokens); len(opts) != 1 {
-		t.Errorf("githubAuth(api.github.com) returned %d options, want 1", len(opts))
-	}
-	if opts := githubAuth("https://github.com/o/r/releases/download/v1/tool", tokens); opts != nil {
-		t.Errorf("githubAuth(a download URL) returned %d options, want none: the token must not "+
-			"travel to another origin", len(opts))
-	}
-	if opts := githubAuth("https://api.github.com/repos/o/r", &githubTokenCache{checked: time.Now()}); opts != nil {
-		t.Errorf("githubAuth with no token returned %d options, want none", len(opts))
-	}
-
-	// And the listing itself decodes what the API returns.
-	var doc struct {
-		Assets []struct{ Name string } `json:"assets"`
-	}
-	if err := in.getJSON(t.Context(), srv.URL, &doc); err != nil {
-		t.Fatalf("getJSON = %v", err)
-	}
-	if len(doc.Assets) != 1 || doc.Assets[0].Name != "tool-linux-amd64" {
-		t.Errorf("getJSON decoded %+v, want one asset named tool-linux-amd64", doc.Assets)
-	}
-	if gotAuth != "" {
-		t.Errorf("getJSON sent Authorization %q to a non-GitHub host, want none", gotAuth)
 	}
 }

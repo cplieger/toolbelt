@@ -706,16 +706,20 @@ func TestCatalogSwapIsRaceSafe(t *testing.T) {
 // non-443, and private targets before any dial, and the redirect
 // policy must accept the GitHub release-download hop chain.
 func TestEngineClientPolicyComposition(t *testing.T) {
-	client := newEngineClient()
+	client := newEngineClient(&githubTokenCache{})
 	// A per-attempt timeout of zero is no timeout at all: a stalled
 	// release download would hold the single-flight job worker (and any
 	// boot gate waiting on it) forever.
 	if client.Timeout <= 0 {
 		t.Errorf("client.Timeout = %s, want a positive per-attempt bound", client.Timeout)
 	}
-	tr, ok := client.Transport.(urlPolicyTransport)
+	gh, ok := client.Transport.(githubAPITransport)
 	if !ok {
-		t.Fatalf("transport is %T, want urlPolicyTransport", client.Transport)
+		t.Fatalf("transport is %T, want githubAPITransport outermost", client.Transport)
+	}
+	tr, ok := gh.next.(urlPolicyTransport)
+	if !ok {
+		t.Fatalf("GitHub transport wraps %T, want urlPolicyTransport", gh.next)
 	}
 	cases := []struct {
 		url  string

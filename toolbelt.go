@@ -176,15 +176,15 @@ func (t urlPolicyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // newEngineClient builds the engine's outbound HTTP client. Downloads
 // and version checks go to registry-defined public URLs: validate every
 // initial target and redirect before SafeTransport enforces public
-// resolved and connected IPs at the dial boundary. Extracted so the
-// composition (URL policy + redirect policy + hardened transport) has
-// offline test coverage; the dial-time behavior stays covered by the
-// ssrf library's own suite.
-func newEngineClient() *http.Client {
+// resolved and connected IPs at the dial boundary.
+func newEngineClient(tokens *githubTokenCache) *http.Client {
 	return &http.Client{
-		Transport: urlPolicyTransport{
-			next:   ssrf.SafeTransport(ssrf.WithAllowedPorts(443)),
-			policy: ssrf.NewURLPolicy(),
+		Transport: githubAPITransport{
+			next: urlPolicyTransport{
+				next:   ssrf.SafeTransport(ssrf.WithAllowedPorts(443)),
+				policy: ssrf.NewURLPolicy(),
+			},
+			tokens: tokens,
 		},
 		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
 		// Per-attempt bound: retry loops (httpx.GetBytes / httpx.Do) sit
@@ -228,7 +228,7 @@ func New(cfg *Config) (*Engine, error) {
 	if err := verifyConfigWritable(log, cfg.ConfigDir); err != nil {
 		return nil, fmt.Errorf("toolbelt: %w", err)
 	}
-	client := newEngineClient()
+	client := newEngineClient(&githubTokenCache{})
 	e := &Engine{
 		store:           st,
 		refresh:         cfg.Refresh,
@@ -248,18 +248,13 @@ func New(cfg *Config) (*Engine, error) {
 	// hold a nil one.
 	e.aptIdx = newAptIndex(log)
 	e.aptSeen = &aptDiscovery{}
-	// One token cache too, for the same reason: the version resolver and
-	// the release installer each spend a GitHub API call per install, and
-	// the anonymous rate limit is per PROCESS, not per caller.
-	tokens := &githubTokenCache{}
-	e.versions = newVersionResolver(client, e.aptIdx, tokens)
+	e.versions = newVersionResolver(client, e.aptIdx)
 	e.inst = &installer{
 		toolsDir: cfg.ToolsDir,
 		client:   client,
 		log:      log,
 		output:   func(string) {},
 		aptIdx:   e.aptIdx,
-		tokens:   tokens,
 	}
 	// ensureManagedDir, not MkdirAll: this is where bin/ is normally BORN,
 	// so it is the only place the mode the filesystem stored for it can

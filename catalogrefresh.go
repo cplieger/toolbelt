@@ -196,7 +196,7 @@ func (e *Engine) cachedCatalogPath() string {
 // required-name verification. c itself is never modified.
 func (e *Engine) prepareCatalog(c *Catalog) (*Catalog, error) {
 	if len(c.Entries) < minCatalogEntries {
-		return nil, fmt.Errorf("catalog has %d entries (floor %d)", len(c.Entries), minCatalogEntries)
+		return nil, fmt.Errorf("catalog has %d entries, below the floor of %d", len(c.Entries), minCatalogEntries)
 	}
 	prepared, err := e.overlaidCopy(c)
 	if err != nil {
@@ -361,12 +361,12 @@ func (e *Engine) runCatalogRefresh(ctx context.Context, output func(string)) (er
 	// cache falls through to the full pipeline, which re-persists it.
 	if cached, cerr := os.ReadFile(e.cachedCatalogPath()); cerr == nil && bytes.Equal(cached, body) {
 		e.catState.set(func(s *catalogState) { s.fetchedAt = time.Now() })
-		output(fmt.Sprintf("already current (generated %s, %d entries)", cur.Generated, len(cur.Entries)))
+		output(fmt.Sprintf("already current, generated %s with %d entries", cur.Generated, len(cur.Entries)))
 		return nil
 	}
 	prepared, err := e.prepareCatalog(fetched)
 	if err != nil {
-		return fmt.Errorf("reject fetched catalog (keeping current): %w", err)
+		return fmt.Errorf("rejected the fetched catalog and kept the current one: %w", err)
 	}
 	if _, err := atomicfile.WriteFile(ctx, e.cachedCatalogPath(), body,
 		atomicfile.WithMode(engineFileMode), atomicfile.WithMkdirMode(engineDirMode)); err != nil {
@@ -382,8 +382,8 @@ func (e *Engine) runCatalogRefresh(ctx context.Context, output func(string)) (er
 		s.source = CatalogSourceRemote
 		s.fetchedAt = time.Now()
 	})
-	output(fmt.Sprintf("catalog refreshed: %d entries, refs %v (was %d entries, refs %v)",
-		len(prepared.Entries), prepared.Refs, len(cur.Entries), cur.Refs))
+	output(fmt.Sprintf("catalog refreshed from %d entries, refs %v, to %d entries, refs %v",
+		len(cur.Entries), cur.Refs, len(prepared.Entries), prepared.Refs))
 	e.log.Info("toolbelt: catalog refreshed",
 		"entries", len(prepared.Entries), "refs", prepared.Refs, "generated", prepared.Generated)
 	return nil

@@ -389,9 +389,9 @@ func TestInstallOrder_DisabledDependencyEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.LoadManifest()
-	plan, err := e.installOrder(t.Context(), m, []string{"dep"})
-	if err != nil {
-		t.Fatalf("installOrder through disabled dep = %v, want the dep enabled", err)
+	plan := e.installOrder(t.Context(), m, []string{"dep"})
+	if len(plan.unplanned) != 0 {
+		t.Fatalf("installOrder through disabled dep: unplanned %v, want the dep enabled", plan.unplanned)
 	}
 	if got := plan.ordered; len(got) != 2 || got[0] != "base" || got[1] != "dep" {
 		t.Fatalf("ordered = %v, want [base dep]", got)
@@ -423,9 +423,9 @@ func TestInstallOrder_DisabledRootIsNotEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.LoadManifest()
-	plan, err := e.installOrder(t.Context(), m, []string{"base"})
-	if err != nil {
-		t.Fatal(err)
+	plan := e.installOrder(t.Context(), m, []string{"base"})
+	if len(plan.unplanned) != 0 {
+		t.Fatalf("installOrder(base) unplanned = %v, want none", plan.unplanned)
 	}
 	if len(plan.enabled) != 0 {
 		t.Fatalf("enabled = %v, want none for a directly named tool", plan.enabled)
@@ -651,6 +651,9 @@ func TestFindChecksum(t *testing.T) {
 		want  string
 	}{
 		{"bare digest", sha256hex + "\n", "x.tar.gz", "sha256", sha256hex},
+		// Verification compares case-insensitively, so an upper-case digest
+		// file must be read rather than fail closed as unverifiable.
+		{"upper-case digest", strings.Repeat("AF", 32) + "  x.tar.gz\n", "x.tar.gz", "sha256", strings.Repeat("AF", 32)},
 		{"bare digest wrong length for alg", sha256hex + "\n", "x.tar.gz", "sha512", ""},
 		{"coreutils table", sha256hex + "  x.tar.gz\nffff  other.tar.gz\n", "x.tar.gz", "sha256", sha256hex},
 		{"coreutils binary-mode star", sha256hex + " *x.tar.gz\n", "x.tar.gz", "sha256", sha256hex},

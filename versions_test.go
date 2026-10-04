@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -171,50 +169,47 @@ func TestLatestAqua_LatestReleaseFailingTheFilterFallsBackToTags(t *testing.T) {
 	}
 }
 
-// TestGitHubToken_AttachedOnlyWhenDiscoverable pins both halves of the
-// bearer-token rule. A discoverable token must reach the API call or every
-// version lookup shares the 60/hour anonymous limit; and when no token is
-// discoverable the header must be ABSENT, because an empty bearer is a
-// 401 where no header at all is a served anonymous request.
-func TestGitHubToken_AttachedOnlyWhenDiscoverable(t *testing.T) {
+func TestLatestAqua_RuntimeResolvesFromItsOwnIndex(t *testing.T) {
 	cases := []struct {
-		name   string
-		script string
-		want   string // the Authorization header the API call must carry
+		name, source, host, path, body, want string
+		aq                                   *AquaPackage
 	}{
 		{
-			name:   "a token the gh CLI can produce is attached",
-			script: "echo tok-abc",
-			want:   "Bearer tok-abc",
+			name: "node", source: "aqua:nodejs/node",
+			host: "nodejs.org", path: "/dist/index.json",
+			body: `[{"version":"v8.0.0"},{"version":"v26.10.0"},{"version":"v24.21.0"},{"version":"v26.9.0"}]`,
+			aq:   &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "nodejs", RepoName: "node"},
+			want: "v26.10.0",
 		},
 		{
-			name:   "no token means no header at all",
-			script: "exit 1",
-			want:   "",
+			name: "go", source: "aqua:golang/go",
+			host: "go.dev", path: "/dl/",
+			body: `[{"version":"go1.26.8"},{"version":"go1.28rc1"},{"version":"go1.27.1"}]`,
+			aq: &AquaPackage{
+				Type: aquaTypeHTTP, RepoOwner: "golang", RepoName: "go", VersionSource: "github_tag",
+				VersionFilter: `Version startsWith "go" and not (Version contains "rc" or Version contains "beta")`,
+			},
+			want: "go1.27.1",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			bin := t.TempDir()
-			if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\n"+tc.script+"\n"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin)
-
-			var got string
 			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got = r.Header.Get("Authorization")
-				fmt.Fprint(w, `{"tag_name":"v1.0.0"}`)
+				if r.Host == tc.host && r.URL.Path == tc.path {
+					fmt.Fprint(w, tc.body)
+					return
+				}
+				t.Errorf("request to %s%s, want only %s%s", r.Host, r.URL.Path, tc.host, tc.path)
+				http.NotFound(w, r)
 			}))
-			// This case is ABOUT the credential, so it holds a real cache
-			// rather than the test helper's empty one.
-			v := newVersionResolver(srv.Client(), nil, &githubTokenCache{})
+			v := newTestVersionResolver(srv.Client())
 
-			if _, err := v.Latest(t.Context(), "aqua:owner/repo", nil); err != nil {
-				t.Fatalf("Latest: %v", err)
+			got, err := v.Latest(t.Context(), tc.source, tc.aq)
+			if err != nil {
+				t.Fatalf("Latest(%s) = %v", tc.source, err)
 			}
 			if got != tc.want {
-				t.Errorf("Authorization = %q, want %q", got, tc.want)
+				t.Errorf("Latest(%s) = %q, want %q", tc.source, got, tc.want)
 			}
 		})
 	}
@@ -238,6 +233,12 @@ func TestMaxVersionTag(t *testing.T) {
 		// not 1). Either slip inverts the comparison.
 		{[]string{"jq-0.9", "jq-1.2"}, "", "jq-1.2"},
 		{[]string{"go9.1", "go2.0"}, "", "go9.1"},
+		// A tag that does not parse as a version never outranks one that
+		// does, in either listing order; two that do not parse fall back
+		// to lexicographic order.
+		{[]string{"latest", "v1.0.0"}, "", "v1.0.0"},
+		{[]string{"v1.0.0", "latest"}, "", "v1.0.0"},
+		{[]string{"nightly", "stable"}, "", "stable"},
 	}
 	for _, c := range cases {
 		if got := maxVersionTag(c.candidates, c.prefix); got != c.want {
@@ -305,10 +306,8 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 	}
 }
 
-// newTestVersionResolver builds a resolver with no apt index and no
-// GitHub credential: a test drives httptest servers, so neither
-// collaborator has anything to contribute and passing them at every call
-// site would only be noise.
+// newTestVersionResolver builds a resolver with no apt index: a test drives
+// httptest servers, so the index has nothing to contribute.
 func newTestVersionResolver(client *http.Client) *versionResolver {
-	return newVersionResolver(client, nil, nil)
+	return newVersionResolver(client, nil)
 }

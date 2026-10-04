@@ -107,6 +107,6 @@ func versionRejected(source, v string) error {
 	case grammarPEP440:
 		return fmt.Errorf("version %q is not a PEP 440 version", v)
 	default:
-		return fmt.Errorf("version %q is not a release tag (letters, digits, '.', '-', '_', '+')", v)
+		return fmt.Errorf("version %q is not a release tag, which allows only letters, digits, '.', '-', '_' and '+'", v)
 	}
 }

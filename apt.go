@@ -53,7 +53,7 @@ const aptExpansionChars = ".+"
 
 // ErrAptUnavailable marks an apt operation attempted where apt cannot
 // work: a non-Debian host, or a process that is not root.
-var ErrAptUnavailable = errors.New("apt is not available (needs a Debian-derived host and root)")
+var ErrAptUnavailable = errors.New("apt is not available without a Debian-derived host and root")
 
 // aptValidName reports whether s is shaped like a Debian package name
 // and cannot be read by apt-get as anything other than a name.
@@ -264,7 +264,7 @@ func (in *installer) aptGetInstall(ctx context.Context, pkgs []string) error {
 		if !aptArchivesLockBusy(out) {
 			return err
 		}
-		in.output(fmt.Sprintf("apt: the archives lock is held (attempt %d/%d), waiting %s",
+		in.output(fmt.Sprintf("apt: the archives lock is held, attempt %d of %d, waiting %s",
 			attempt, aptArchivesLockRetries, aptArchivesLockBackoff))
 		select {
 		case <-ctx.Done():

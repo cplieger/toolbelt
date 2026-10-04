@@ -27,8 +27,6 @@ const versionLookupBudget = 45 * time.Second
 type versionResolver struct {
 	client *http.Client
 	cache  map[string]string // source -> latest version
-	// tokens is the shared GitHub API credential (see githubTokenCache).
-	tokens *githubTokenCache
 	// aptIdx guarantees a package index exists before apt-cache is asked
 	// anything. Both consumer images ship with /var/lib/apt/lists empty,
 	// and apt-cache answers "no Candidate line" rather than erroring on a
@@ -39,8 +37,8 @@ type versionResolver struct {
 	mu sync.Mutex
 }
 
-func newVersionResolver(client *http.Client, aptIdx *aptIndex, tokens *githubTokenCache) *versionResolver {
-	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx, tokens: tokens}
+func newVersionResolver(client *http.Client, aptIdx *aptIndex) *versionResolver {
+	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx}
 }
 
 // Cached returns the cached latest version for a source, if any.
@@ -92,11 +90,9 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 // latestRelease resolves the newest release tag of a forge repository.
 //
 // A release-backed tool's version IS the tag, so this reuses the same
-// GitHub paths the aqua source already uses, including the token read
-// that keeps a sweep over 147 repositories inside the rate limit. The
-// registry's version_prefix hint is not applied here: the tag is what
-// the download URL needs, and stripping a prefix would produce a version
-// that names no release.
+// GitHub paths the aqua source already uses. The registry's version_prefix
+// hint is not applied here: the tag is what the download URL needs, and
+// stripping a prefix would produce a version that names no release.
 func (v *versionResolver) latestRelease(ctx context.Context, ref string) (string, error) {
 	rr, err := parseReleaseRef(ref)
 	if err != nil {
@@ -170,14 +166,17 @@ func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, er
 	return cand, nil
 }
 
-// latestAqua resolves a GitHub-hosted package's latest version: the
-// releases/latest endpoint for github_release types, or the tag list
-// (filtered by version_filter/version_prefix) when the definition asks
-// for github_tag versioning.
+// latestAqua resolves a package's latest version: the runtime's own
+// release index when it publishes one; the tag list (filtered by
+// version_filter/version_prefix) for github_tag versioning and for http
+// and github_content types; else the GitHub releases/latest endpoint.
 func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPackage) (string, error) {
 	owner, repo, ok := strings.Cut(ref, "/")
 	if !ok {
 		return "", fmt.Errorf("bad aqua ref %q", ref)
+	}
+	if feed, ok := runtimeVersionFeeds[ref]; ok {
+		return v.latestFromFeed(ctx, feed, aq)
 	}
 	if aq != nil && (aq.VersionSource == "github_tag" || aq.Type == aquaTypeHTTP || aq.Type == "github_content") {
 		return v.latestGitHubTag(ctx, owner, repo, aq)
@@ -197,6 +196,38 @@ func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPa
 		return v.latestGitHubTag(ctx, owner, repo, aq)
 	}
 	return rel.TagName, nil
+}
+
+// runtimeVersionFeeds maps an aqua ref to the project's first-party release
+// index, which costs no GitHub API quota (a tag walk of nodejs/node is ten
+// requests). A feed failure is not retried as a tag walk, which would spend
+// the quota the feed exists to avoid.
+var runtimeVersionFeeds = map[string]string{
+	"nodejs/node": "https://nodejs.org/dist/index.json",
+	"golang/go":   "https://go.dev/dl/?mode=json",
+}
+
+func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq *AquaPackage) (string, error) {
+	prefix, filter := "", ""
+	if aq != nil {
+		prefix, filter = aq.VersionPrefix, aq.VersionFilter
+	}
+	var releases []struct {
+		Version string `json:"version"`
+	}
+	if err := v.getJSON(ctx, feedURL, &releases); err != nil {
+		return "", err
+	}
+	var candidates []string
+	for _, r := range releases {
+		if r.Version != "" && tagPasses(r.Version, prefix, filter) {
+			candidates = append(candidates, r.Version)
+		}
+	}
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("no version in %s passes the version filter", feedURL)
+	}
+	return maxVersionTag(candidates, prefix), nil
 }
 
 // tagPageCap bounds the GitHub tag pagination walk. golang/go needs
@@ -361,18 +392,17 @@ func (v *versionResolver) latestGoModule(ctx context.Context, modPath string) (s
 	return doc.Version, nil
 }
 
-// getJSON fetches a URL through httpx (bounded body, transient-error
-// backoff, 429 Retry-After honored, redaction-safe errors) and decodes
-// the JSON body. GitHub API calls attach a bearer token when one is
-// available (gh auth token) to dodge the 60/hour anonymous rate limit.
 func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
 	defer cancel()
-	opts := append([]httpx.GetOption{
+	return fetchJSON(ctx, v.client, rawURL, 4<<20, out)
+}
+
+func fetchJSON(ctx context.Context, client *http.Client, rawURL string, maxBytes int64, out any) error {
+	body, err := httpx.GetBytes(ctx, client, rawURL,
 		httpx.WithMaxAttempts(3),
-		httpx.WithMaxBodyBytes(4 << 20),
-	}, githubAuth(rawURL, v.tokens)...)
-	body, err := httpx.GetBytes(ctx, v.client, rawURL, opts...)
+		httpx.WithMaxBodyBytes(maxBytes),
+	)
 	if err != nil {
 		return err
 	}

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -148,6 +149,76 @@ func TestAptArchivesLockBusy(t *testing.T) {
 		if aptArchivesLockBusy(out) {
 			t.Errorf("aptArchivesLockBusy(%q) = true, want false", out)
 		}
+	}
+}
+
+// TestAptGetInstall_RetriesOnlyTheArchivesLock pins the retry the lock
+// timeout option cannot provide (see aptGetArgs): an archives-lock failure is
+// retried with a wait between attempts up to the bound, any other failure is
+// reported at once, and the lock is recognised however long the output before
+// it is. The fake clock carries the backoff, so the case costs no real wait.
+func TestAptGetInstall_RetriesOnlyTheArchivesLock(t *testing.T) {
+	const lockMsg = "E: Could not get lock /var/cache/apt/archives/lock. It is held by process 123"
+	// 2^17 characters: longer than a scanner's default line limit, so a lock
+	// message after it is only seen if the whole output is read.
+	const longLine = "s=x; i=0; while [ $i -lt 17 ]; do s=$s$s; i=$((i+1)); done; echo \"$s\"\n"
+	cases := map[string]struct {
+		script   string
+		wantErr  bool
+		wantRuns int
+		minWait  time.Duration
+		wantLine string
+	}{
+		"the archives lock is retried up to the bound": {
+			script: "echo '" + lockMsg + "'\nexit 100\n", wantErr: true, wantRuns: 3, minWait: 6 * time.Second,
+			wantLine: lockMsg,
+		},
+		"a lock message after a long line is still recognised": {
+			script: longLine + "echo '" + lockMsg + "'\nexit 100\n", wantErr: true, wantRuns: 3, minWait: 6 * time.Second,
+			wantLine: lockMsg,
+		},
+		"any other failure is reported at once": {
+			script: "echo 'E: Unable to locate package jq'\nexit 100\n", wantErr: true, wantRuns: 1,
+			wantLine: "E: Unable to locate package jq",
+		},
+		"a success runs once": {
+			script: "echo\necho '  Setting up jq (1.7.1-3) ...'\n", wantRuns: 1,
+			wantLine: "Setting up jq (1.7.1-3) ...",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			runs := filepath.Join(t.TempDir(), "runs")
+			stubSystemBin(t, "apt-get", "#!/bin/sh\necho run >> "+runs+"\n"+tc.script)
+
+			synctest.Test(t, func(t *testing.T) {
+				var lines []string
+				in := &installer{output: func(l string) { lines = append(lines, l) }}
+				start := time.Now()
+				err := in.aptGetInstall(t.Context(), []string{"jq"})
+				waited := time.Since(start)
+
+				if (err != nil) != tc.wantErr {
+					t.Errorf("aptGetInstall = %v, want error %v", err, tc.wantErr)
+				}
+				if waited < tc.minWait {
+					t.Errorf("aptGetInstall waited %s across its attempts, want at least %s", waited, tc.minWait)
+				}
+				if !slices.Contains(lines, tc.wantLine) {
+					t.Errorf("streamed output %q does not carry %q", lines, tc.wantLine)
+				}
+				if slices.Contains(lines, "") {
+					t.Errorf("streamed output %q carries a blank line", lines)
+				}
+			})
+			got, err := os.ReadFile(runs)
+			if err != nil {
+				t.Fatalf("Setup: read run count: %v", err)
+			}
+			if n := strings.Count(string(got), "run\n"); n != tc.wantRuns {
+				t.Errorf("apt-get ran %d times, want %d", n, tc.wantRuns)
+			}
+		})
 	}
 }
 
