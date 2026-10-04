@@ -80,7 +80,7 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/too
 - A newer catalog replaces the current one only after it passes the same checks as `toolcatalog verify`. A bad fetch changes nothing.
 - Asking for a tool also installs every tool it depends on, first. A removal that would break an enabled tool is refused and names it.
 
-[Security](docs/security.md) covers checksums, downloads, archives and the binaries the engine runs.
+[Security](docs/security-model.md) covers checksums, downloads, archives and the binaries the engine runs.
 
 ## Unsupported by design
 
@@ -95,7 +95,7 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/too
 - [Configuration](docs/configuration.md) lists every `Config` field and manifest field.
 - [The catalog](docs/catalog.md) covers runtime refresh and the `toolcatalog` compiler.
 - [The REST handler](docs/http-api.md) lists the routes, the refusal codes and the cache policy.
-- [Security](docs/security.md) describes what the engine checks and what it trusts.
+- [Security](docs/security-model.md) describes what the engine checks and what it trusts.
 
 ## Credits
 
