@@ -2,52 +2,39 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/toolbelt/v3.svg)](https://pkg.go.dev/github.com/cplieger/toolbelt/v3) [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/toolbelt)](https://github.com/cplieger/toolbelt/blob/main/go.mod) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/toolbelt/badges/mutation.json)](https://github.com/cplieger/toolbelt/issues?q=label%3Agremlins-tracker)
 
-> Declarative dev-tool provisioning for container dev boxes: manifest + catalog + reconciler engine
+toolbelt lets your Go server install, update and remove the developer tools its users ask for, on a persistent volume, while it runs.
 
-A standalone Go library that provisions developer tools (language servers, CLIs, runtimes, linters) onto a persistent volume, declaratively. A JSON manifest records intent: which tools, at which versions, enabled or disabled. A compiled catalog carries install knowledge for ~700 tools, sourced from the [mise](https://github.com/jdx/mise) and [aqua](https://github.com/aquaproj/aqua-registry) registries plus curated overlays. The engine reconciles installed state against intent through a single-flight job queue: enabled-but-missing tools are installed (checksum-verified when the registry definition declares a source), disabled-but-installed tools are uninstalled with their template kept, and unmanaged files are never touched.
+It replaces the image rebuild or install script a web IDE or agent sandbox would otherwise need for every new CLI, language server or runtime. It runs on Linux amd64 and arm64, needs Go 1.27.1 or later and is licensed under Apache-2.0. At run time it depends on `expr-lang/expr`, `hashicorp/go-version`, `golang.org/x/mod` and eight libraries by the same author.
 
-Built for headless and UI consumers alike: everything is driven through the Go API, an optional REST projection (`toolbelt/httpapi`), or hand edits of the manifest file itself, which the engine picks up on its next operation.
+## Why use it
 
-## The model
+toolbelt is built for a containerized dev environment whose users add tools from a settings page, a config file or an agent.
 
-Three data artifacts, all on the consumer's persistent volume:
+- A JSON manifest records each tool, its version and whether it is pinned or disabled. The engine installs what is missing, uninstalls what is disabled and never touches files it did not install.
+- A catalog of about 900 tools, compiled from the mise and aqua registries, gives each tool's source, version and dependencies, so users add tools by name.
+- It installs from eight sources, `aqua:`, `release:`, `apt:`, `npm:`, `pip:`, `cargo:`, `go:` and `manual`, and adds the runtime a language source needs, such as `node` for `npm:`. A `manual` entry runs your own bash script, with the trust of a manifest edit.
+- Installs run one at a time as jobs you can watch, wait on and cancel, through Go or a REST handler.
 
-| File | Owner | Purpose |
-| --- | --- | --- |
-| `tools.json` | user intent (engine-written, hand-editable) | which tools exist, versions, `pin`, `disabled` |
-| `tools-state.json` | engine | what is actually installed, owned bin names, last error |
-| `tool-catalog.json` | image build (baked fallback) + runtime refresh (`tool-catalog.cached.json` under `ConfigDir`) | install knowledge: sources, artifact templates, checksum locations, dependencies, registry license texts |
-
-Tool lifecycle is a three-state machine the reconciler enforces in both directions:
-
-- **absent**: not in the manifest. Unmanaged files under the tools dir are never touched.
-- **disabled** (`"disabled": true`): a template. Recorded intent, nothing on disk; the engine uninstalls its owned footprint if present.
-- **enabled** (present, no flag): installed; updated when unpinned.
-
-Sources: `aqua:owner/repo` (binary artifacts with upstream checksum verification), `release:github/owner/repo` or `release:gitlab/owner/repo` (a forge release asset, chosen from the release's file names), `apt:package` (a Debian package), `npm:pkg`, `pip:pkg` (via uv), `cargo:crate`, `go:module`, and a `manual` bash escape hatch. Ecosystem backends are themselves tools: an `npm:` install pulls `node` from the catalog automatically, `go:` pulls the Go toolchain, and so on.
-
-Dependencies are obligatory, so asking for a tool is asking for what it cannot run without. Installing one adopts every dependency the catalog names, enables any that is currently a template, and installs the whole set dependency-first; the job log names each row it switched on and what asked for it. Enabling stays explicit for a tool named DIRECTLY: `Install` on a template is refused (`409 disabled`), because enabling is a policy change and only the dependency edge carries it implicitly.
-
-Each row also reports its `dependents`: the enabled entries that require it, through `requires` or as the backend their source kind implies. It is what a client needs to ask the disable question before sending a request the engine would refuse. It is advisory: the engine re-derives the set under the manifest lock, so acting on a stale inventory is still refused.
-
-An overlay entry may also mark a tool `essential`, which is the consumer's statement about its own product — a feature stops working without that binary — and never something registry data can say. The engine reads the flag off the live catalog when a removal is requested and refuses (`ErrEssential`, `409 essential`); `force` does not override it, and a cascade whose dependent set holds an essential row is refused whole. Disabling stays available and is the intended escape hatch, since it uninstalls the footprint and keeps the entry. `Inventory` reports the flag per row, so a client can withhold a delete control rather than offering one the engine will refuse.
+Consider [aqua](https://github.com/aquaproj/aqua) if you want a command-line tool that pins versions per project for teams and CI, kept current by Renovate.
 
 ## Install
 
-`go get github.com/cplieger/toolbelt/v3@latest`
+```sh
+go get github.com/cplieger/toolbelt/v3@latest
+```
 
 ## Usage
 
 ```go
 engine, err := toolbelt.New(&toolbelt.Config{
-    ConfigDir:   "/config",                        // tools.json + tools-state.json
-    ToolsDir:    "/config/tools",                  // bin/, opt/, npm/, python/
-    CatalogPath: "/opt/app/tool-catalog.json",     // baked fallback (image build)
-    Seed:        toolbelt.DefaultSeed(),           // LSP templates, disabled
-    Refresh: &toolbelt.CatalogRefresh{             // optional: runtime catalog refresh
-        URL:      "https://example.com/tool-catalog.json",
-        Interval: 24 * time.Hour,                  // 0 = on-demand only
-        Require:  []string{"gopls", "gh"},         // verified before every swap
+    ConfigDir:   "/config",                    // tools.json and tools-state.json
+    ToolsDir:    "/config/tools",              // bin/, opt/, npm/, python/
+    CatalogPath: "/opt/app/tool-catalog.json", // the catalog baked into your image
+    Seed:        toolbelt.DefaultSeed(),       // five disabled templates
+    Refresh: &toolbelt.CatalogRefresh{         // optional: fetch newer catalogs
+        URL:      toolbelt.DefaultCatalogURL,
+        Interval: 24 * time.Hour, // 0 = on demand only
+        Require:  []string{"gopls", "gh"},
     },
 })
 if err != nil {
@@ -55,143 +42,70 @@ if err != nil {
 }
 defer engine.Close()
 
-// Boot: converge disk to intent, then gate whatever needs tools on the job.
-// enqueued is false on a fresh volume: nothing to converge, and no job.
+// At boot, install what the manifest asks for and wait for it.
+// enqueued is false when the manifest is empty and nothing is installed.
 if job, enqueued, _ := engine.Reconcile(toolbelt.ReconcileMissing); enqueued {
     _, _ = engine.Wait(ctx, job.ID)
 }
 
-// Add a tool by name; the catalog supplies source, version, deps.
+// Then fetch a newer catalog. New never fetches on its own.
+_, _ = engine.RefreshCatalog()
+
+// Add a tool by name. The catalog supplies its source, version and dependencies.
 job, err := engine.Add(ctx, &toolbelt.AddRequest{Name: "gopls"})
 
-// The enable/disable toggle: disabling uninstalls, the template stays.
-on := true
-job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &on})
+// Disable it. The binary is uninstalled and the entry stays as a template.
+disabled := true
+job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &disabled})
 ```
 
-`DefaultSeed()` ships five disabled templates: the officially supported language servers plus the GitHub CLI (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`, `gh`). Nothing downloads until a template is enabled; install knowledge hydrates from the catalog at enable time, so the seed never goes stale. Backend runtimes (`node`, `go`) and required packages (`typescript`) are not seeded, because the engine adopts a missing dependency at install time and a seeded row would only be a second place for its version to drift.
-
-### The REST projection
-
-`toolbelt/httpapi` serves the engine over HTTP: inventory, catalog search, add, patch (the toggle verb), install, update, remove, jobs, cancel. It is a pure projection: no auth, and the only middleware it carries is its own cache policy (below); wrap it in your own stack (an origin-checked chain, a loopback-only gate).
-
-```go
-h := httpapi.Handler(engine, "/api/tools")
-mux.Handle("/api/tools", h)
-mux.Handle("/api/tools/", h)
-```
-
-Mutations return `202 {"job": ...}`; refusals are `409` with a coded envelope (`has_dependents` names the blockers, `essential` marks a tool the product declares it needs, `disabled` marks install-on-a-template, `not_configured` marks a catalog refresh without `Config.Refresh`). Stream job progress via the `Config` callbacks or poll `GET .../jobs`.
-
-**The handler owns its cache policy.** Every response it produces carries `Cache-Control: no-store`: success bodies, decode rejections, engine errors, and the router's own 404/405/redirects alike, so a consumer needs no no-store middleware of its own. A `Cache-Control` your own stack has already set on the response is left untouched, on the same rule `webhttp.JSONHeaders` applies to `X-Content-Type-Options`, so a stricter policy (`no-store, no-cache, must-revalidate`) or a deliberately weaker one stays yours to set.
-
-### Runtime catalog refresh
-
-The catalog is data on its own cadence. With `Config.Refresh` set, the engine fetches the published catalog on the configured interval and on demand via `RefreshCatalog` or the httpapi route. There is deliberately no fetch at construction: call `RefreshCatalog` once your boot work is enqueued. Each fetch is verified (a structural entry floor plus your `Require` list, the same offline checks as `toolcatalog verify`), re-overlaid with any `Config.CatalogOverlays` patches, persisted raw under `ConfigDir` (`tool-catalog.cached.json`; at the next boot the newer of cache and baked wins), and swapped in atomically. The last good catalog stands on any failure: a bad fetch changes nothing. `CatalogInfo()` reports what is loaded and where it came from (`baked`, `cached`, `remote`, or `none`), the registry refs, the generation timestamp, and the last refresh error.
-
-Consumer defaults ship with the library. `DefaultCatalogURL` is the published catalog's latest-download URL. `ParseCatalogRefresh(RefreshEnv(raw), RefreshEnvName(name))` turns a refresh env value into the `Interval` under the canonical policy: default 24h, clamped to 1h–30d, and `off`/`disabled`/`0` disables the schedule while keeping on-demand refresh available. `ParseRequireList(raw)` parses a one-name-per-line requirements list (`#` comments and blank lines ignored) for `Require`.
-
-### The catalog compiler
-
-`cmd/toolcatalog` compiles the catalog and verifies it against a required tool set. The compiler versions with the engine in one module, so a catalog is always compiled under the schema and verification semantics of the engine release that consumes it. [tool-catalog](https://github.com/cplieger/tool-catalog) runs it on every registry bump and publishes the artifact consumers fetch; images run `verify` against their own required list at build. Importing the library never pulls the compiler's TOML/YAML registry parsers into your build or binary (Go's module graph pruning); they cost consumers a few `go.sum` metadata lines only:
-
-```sh
-go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
-    -mise mise-checkout/registry -aqua aqua-registry-checkout/pkgs \
-    -overlay overlays.json -refs mise=<ref>,aqua=<ref> -out tool-catalog.json
-
-go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@latest \
-    verify -catalog tool-catalog.json -require required-tools.txt
-```
-
-`verify` fails the build when a required name is missing from the catalog or its definition is unusable (no source, unparseable templates, no linux amd64/arm64 support), so registry drift surfaces at publish or image build instead of in a boot job. The command ships a base overlay set covering runtimes, forge CLIs, and the officially supported language servers (`gopls`, `typescript-language-server`, `pyright`, `rust-analyzer`); it stamps a `generated` timestamp and embeds both registries' MIT license texts into the artifact, so the notice travels with every copy. Overlay merge semantics are the root module's `ApplyOverlay`, shared with the runtime refresh.
+`DefaultSeed` writes five disabled templates on a fresh volume: `gopls`, `typescript-language-server`, `pyright`, `rust-analyzer` and `gh`. Nothing downloads until one is enabled. Installed tools are linked into `bin/` under `ToolsDir`, so put that directory on the `PATH` of whatever runs them. [The catalog](docs/catalog.md) explains when the engine fetches a newer catalog. To serve the engine over HTTP, mount `httpapi.Handler(engine, "/api/tools")` behind your own authentication. [The REST handler](docs/http-api.md) lists its routes.
 
 ## API
 
-### Engine
+- `New` and `Close` start and stop an engine. `Inventory`, `Search` and `SearchWithCounts` read the manifest, the install state and the catalog.
+- `Add`, `Patch`, `Install`, `Update`, `Remove`, `RemoveWithDependents` and `Reconcile` change the manifest or the disk, each through a job. `EnsureInstalled` installs a tool and waits for it.
+- `Jobs`, `Wait` and `CancelJob` follow the job queue. `RefreshCatalog` and `CatalogInfo` refresh and describe the catalog.
+- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured` and `ErrRootIntegrity` match with `errors.Is`.
+- `httpapi.Handler` serves the engine over HTTP, and `cmd/toolcatalog` compiles and checks a catalog.
 
-- `New(cfg *Config) (*Engine, error)`: construct and start (seed the manifest when absent, launch the job worker; a manifest of any other schema version is an error). `Close()` stops the worker.
-- `Inventory() (*Inventory, error)`: the full read-side snapshot (every manifest entry joined with install state, the system group, the active job).
-- `Search(q string) []CatalogEntry`: catalog lookup (empty query = the featured set), hiding names already in the manifest.
-- `SearchWithCounts(q string) SearchCounts`: one query answered from every corpus at once — `Search`, `SearchUnavailable` and `SearchApt` are its projections — carrying each block's pre-cut match count plus `AptState` (`unavailable` / `indexing` / `available`). The state is what lets a consumer say "still indexing" instead of asserting an absence the corpus has not been read for yet; `SearchApt`'s own bool collapses the first two.
-- `Add(ctx, *AddRequest) (*Job, error)`: record a new tool and enqueue its install; present-and-enabled is the default intent. `Disabled: true` adds a template instead (no job, returns nil).
-- `Patch(name, PatchRequest) (*Job, error)`: merge fields. `Disabled` is the enable/disable toggle (false→true uninstalls and keeps the template, true→false installs), a version change enqueues a reinstall, and `Force` permits disabling a tool enabled entries require, which disables those dependents too (one level, as `RemoveWithDependents`).
-- `Install(name) (*Job, error)`: retry an existing, enabled entry. Refuses templates with `ErrDisabled` (install is policy-neutral).
-- `Update(names ...string) (*Job, error)`: refresh unpinned entries (or the named set).
-- `Remove(name) (*Job, []string, error)`: uninstall + delete the entry. A tool enabled entries require is refused, with the dependents returned. `RemoveWithDependents(name)` is the cascading sibling that removes them too. The cascade is one level, the direct requirers of the named tool, so a longer chain leaves its outer tool declaring a dependency that is gone.
-- `Reconcile(mode) (*Job, bool, error)`: converge disk to intent. `ReconcileMissing` installs missing enabled entries and uninstalls disabled-but-owned ones (zero network when converged); `ReconcileFull` also enqueues an update pass. The bool is `enqueued`: false with a nil job and a nil error when there is nothing to converge (an empty manifest and no state row).
-- `Wait(ctx, jobID) (*Job, error)`: block until a job settles (boot gates, synchronous flows).
-- `EnsureInstalled(ctx, name) error`: synchronous "a product action needs this binary now" path (creates from the catalog, enables a disabled template, installs, waits).
-- `Jobs() (active *Job, recent []*Job)` / `CancelJob(id) bool`: queue introspection and cancellation.
-- `RefreshCatalog() (*Job, error)`: enqueue an on-demand catalog refresh (`ErrRefreshNotConfigured` without `Config.Refresh`).
-- `CatalogInfo() CatalogInfo`: the live catalog's provenance (refs, generation timestamp, entry count, source, last refresh outcome, schedule state).
+The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/toolbelt/v3).
 
-### Types and errors
+## What it guarantees
 
-`Tool` (manifest entry), `Manifest`, `ToolStatus`/`State` (machine state), `CatalogEntry`/`Catalog` (+ `VerifyCatalog`), `Inventory`/`ToolInfo`/`SystemTool`/`Job` (result shapes; also the httpapi wire shapes), `SearchCounts`/`AptState` (search result shapes), `CancelCause` (`CancelShutdown`/`CancelCaller`, zero value `CancelUnknown`), `DefaultSeed()`. Sentinels: `ErrNotFound`, `ErrDisabled`, `ErrHasDependents` (match with `errors.Is`; `*DependentsError` carries the blocking names for `errors.As`), `ErrEssential` (a removal the live catalog forbids; disabling still works), `ErrUnknownJob` (a `Wait` on a job id the queue no longer holds), `ErrRefreshNotConfigured`, `ErrRootIntegrity` (+ `*RootIntegrityError`).
+- Uninstalls remove only the files the engine recorded when it installed the tool. A binary of the same name that it did not install stays.
+- A download whose aqua registry definition declares a checksum installs only when that checksum matches. A tool with no declared checksum installs unverified, and its state says so.
+- A tool counts as installed only when its binary runs. A binary the system cannot start fails the install, and the error carries the system's reason, such as a missing library.
+- A new version is written in full and flushed to disk before it replaces the old one. A failed install leaves the previous version in place.
+- A newer catalog replaces the current one only after it passes the same checks as `toolcatalog verify`. A bad fetch changes nothing.
+- Asking for a tool also installs every tool it depends on, first. A removal that would break an enabled tool is refused and names it.
 
-### httpapi routes
+[Security](docs/security.md) covers checksums, downloads, archives and the binaries the engine runs.
 
-| Route | Engine call | Notes |
-| --- | --- | --- |
-| `GET {prefix}` | `Inventory` | |
-| `GET {prefix}/search?q=` | `SearchWithCounts` | results omit embedded install definitions; `truncated` is true when a block was cut to its cap and `matched` is how many rows the query found before the cuts; `apt_state` is `unavailable`, `indexing` or `available` (`apt_available` is the same verdict as a bool) |
-| `POST {prefix}` | `Add` | 202 `{job}` (null for template adds) |
-| `PATCH {prefix}/{name}` | `Patch` | the toggle verb; 409 `has_dependents` + names |
-| `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on templates |
-| `POST {prefix}/update` | `Update` | optional `{"names": [...]}` body |
-| `DELETE {prefix}/{name}?force=1` | `Remove` / `RemoveWithDependents` | 202 `{job, dependents}`; 409 without `force`; 409 `essential` whatever `force` says, and a cascade holding an essential row is refused whole |
-| `GET {prefix}/jobs` | `Jobs` | active job carries the output tail; a cancelled job carries `cancel_cause` |
-| `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | the job reports `cancel_cause: caller` |
-| `GET {prefix}/catalog` | `CatalogInfo` | provenance + freshness of the live catalog |
-| `POST {prefix}/catalog/refresh` | `RefreshCatalog` | 202 `{job}`; 409 `not_configured` without `Config.Refresh` |
+## Unsupported by design
 
-### toolcatalog (catalog compiler command)
+- Windows and macOS.
+- Removing a Debian package. Removing an `apt:` entry leaves the package installed, because other packages may need it.
+- Two processes sharing one data directory. Run one engine per directory and send other processes through your server.
+- Authentication in the REST handler. Wrap it in your own middleware.
 
-`compile` (default): `-mise <dir> -aqua <dir> [-overlay file]... [-no-base-overlays] -refs k=v,... -out tool-catalog.json`. `verify`: `-catalog <file> -require <names-file>`; exits non-zero when a required name does not resolve to usable linux amd64+arm64 install knowledge. Versioned with the module (`go run github.com/cplieger/toolbelt/v3/cmd/toolcatalog@vX.Y.Z`); the historical `cmd/toolcatalog/vX.Y.Z` lane tags (≤ v2.2.0) remain resolvable for old builds.
+## Documentation
 
-## Configuration reference
+- [How toolbelt works](docs/how-it-works.md) explains the manifest, the tool lifecycle, dependencies and every engine call.
+- [Configuration](docs/configuration.md) lists every `Config` field and manifest field.
+- [The catalog](docs/catalog.md) covers runtime refresh and the `toolcatalog` compiler.
+- [The REST handler](docs/http-api.md) lists the routes, the refusal codes and the cache policy.
+- [Security](docs/security.md) describes what the engine checks and what it trusts.
 
-| `Config` field | Purpose |
-| --- | --- |
-| `ConfigDir` | directory holding `tools.json` + `tools-state.json` (required) |
-| `ToolsDir` | install tree root: `bin/` (the single PATH dir), `opt/<name>/<version>/`, `npm/`, `python/` (required) |
-| `CatalogPath` | baked catalog path (the first-boot/offline fallback with `Refresh` set); missing degrades to manual/ecosystem sources with named errors for catalog-dependent entries |
-| `Refresh` | runtime catalog refresh: the published-catalog URL, the schedule interval (0 = on-demand only), and the required names verified before every swap; nil keeps the baked catalog static |
-| `CatalogOverlays` | consumer overlay files re-applied to every loaded catalog (the patches survive refreshes); a patch carries display fields and `essential`, which makes the engine refuse to remove that row; entries they add must embed any aqua definition inline |
-| `Seed` | manifest written when none exists (fresh volume); nil seeds empty |
-| `System` | image-baked binaries reported read-only in `Inventory` |
-| `KeepVersions` | how many superseded versions to retain under `opt/<name>/` for rollback (0 = the default 1; negative = keep none) |
-| `VerifyRootIntegrity` | opt-in prerequisite check (off by default): refuses `New` when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `python/`, `python/bin` exists and is a symlink, is not a directory, is group- or other-writable, cannot be inspected, or resolves outside the tool tree. A path that does not exist yet is skipped. Report only: nothing is chmodded, created or repaired; the failure is `ErrRootIntegrity` (`errors.Is`) as a `*RootIntegrityError` naming every offending path (`errors.As`) |
-| `OnJobChanged` / `OnJobOutput` | job lifecycle + coalesced output callbacks (must not block); nil is silent |
-| `Logger` | `slog` logger; nil uses the default |
+## Credits
 
-Manifest entry fields: `source`, `version`, `pin` (freeze version), `disabled` (template), `requires`, `version_args` (the arguments that make the tool print its version, for example `["--version"]`, which makes the install probe verify the reported version), and `install`/`uninstall`/`probe` for manual sources. Every field except the name is optional; the catalog completes the rest. A `_comment` array survives engine rewrites. The engine accepts only manifest schema version 2; any other version fails `New` (it never rewrites or backs up an unrecognized manifest).
-
-## Security model
-
-- Aqua-sourced artifacts verify against the checksum source their registry definition declares (upstream `checksums.txt` and equivalents). A declared checksum that cannot be fetched, parsed, or matched REFUSES the install: there is no downgrade to unverified. Only a definition that declares none (or whose upstream disabled checksums) installs unverified, and that install is warned about on the engine logger and recorded as `"checksum": "unverified"` in `tools-state.json`.
-- Installs are probed by execution, not by file presence: the recorded bins must exist and the tool must answer when run (with `version_args`, the answer must carry the recorded version). A binary that is truncated, of the wrong architecture, or at the wrong version reads as not installed and is reinstalled; a recorded bin that cannot be executed at all falls back to presence and is warned about.
-- The same probe runs as the install's own verification, and a binary the OS refuses to enter FAILS the install rather than being recorded at its version. Exit status 127 counts as such a refusal, and the loader's own diagnostic is carried into the recorded error so it names the missing library. Every other non-zero exit stays an answer: a tool that does not understand `--version` still proved it can run. Verification sits after the state record and before pruning, so a failed one leaves the retained predecessor in place.
-- Published trees are durable: every extracted file and the staging directory are flushed before the rename that publishes a version, the parent directory after it, and the state record before any superseded version is pruned. A flush failure (a full disk included) fails the install and leaves the previous version live.
-- Cancelled jobs are attributed: a `cancelled` job carries `cancel_cause` naming who stopped it, either `shutdown` (`Close`, the engine going down, including the running job's cancelled context) or `caller` (`CancelJob`, which is also the `POST {prefix}/jobs/{id}/cancel` route). The field is additive and omitted when a cancellation path names no cause, so an unknown cause is never reported as shutdown. Consumer contract: a shutdown cancellation is routine and should not alert; a caller cancellation is deliberate and may.
-- Fetches ride an SSRF-guarded client (public-IP enforcement at the dial boundary, redirect policy, port allowlist) with transient-failure retry and rate-limit handling via [`cplieger/httpx`](https://github.com/cplieger/httpx).
-- Downloads are size-capped (1 GiB); archive extraction rejects symlink members that escape the install tree; installs land in versioned directories swapped atomically.
-- The `manual` source runs arbitrary bash by design: it is an operator escape hatch for single-principal volumes, equivalent in trust to editing the manifest itself.
-- A binary the consumer image bakes in is spawned by absolute path from a fixed set of `/usr/bin` and `/bin`, never resolved through `PATH`: `tar`, `unzip`, `gzip`, `bzip2`, `xz` and `zstd` for archives, `bash` for `manual` scripts, and `apt-get`, `apt-cache`, `apt-mark` and `dpkg-query` for `apt:` entries. A missing one fails the install that needs it. The engine's own link directory sits on `PATH` ahead of the system directories and lives on the volume, so a `PATH` lookup would let anything written there shadow those binaries on paths the engine runs unattended, and as root for the apt family. What this buys is bounded: the engine runs as root and the system directories are root's too, so a pinned path is not unforgeable. What changes is that a file placed in the system directories dies with the container, while one placed in the managed tree persists on the volume and runs again on every boot reconcile.
-- The apt family's children get the trusted directories prepended to their inherited `PATH`, so a `dpkg` maintainer script can still rely on `/usr/sbin`. Decompressors get the trusted set alone. A `manual` script keeps the managed tree first, because reaching it is what the escape hatch is for.
-- A binary the engine installs (`gh`, `npm`, `uv`, `cargo`, `go`) still resolves through the managed tree, necessarily: publishing it there is the point, and an absolute path would name the same writable file. `VerifyRootIntegrity` bounds which other principals can reach that tree, but it cannot separate the engine from a shell command running beside it at the same uid. On a volume where another principal holds a shell at that uid, those binaries are that principal's to replace. Single-principal volumes are the stated posture.
-
-## Scope notes
-
-- Linux only (amd64, arm64). The aqua evaluator resolves definitions for linux and ignores other platforms.
-- OS packages are manifest intent like anything else: an `apt:` entry installs a Debian package, and `AptPackages` reports the ones present on the host that no entry owns. Removing an `apt:` entry is a logged no-op rather than an uninstall, because apt packages are shared and the engine will not remove one it cannot prove nothing else needs.
-- The manifest store's single-writer guarantee is in-process. Run one engine per data directory; other processes go through the consumer's server.
+- The catalog is compiled from the [mise registry](https://github.com/jdx/mise) and the [aqua registry](https://github.com/aquaproj/aqua-registry). The `aqua:` source reads aqua's package definitions directly, templates and expressions included.
+- The `release:` source picks a release asset in the order [ubi](https://github.com/houseabsolute/ubi) uses, a GitHub and GitLab release installer.
+- [tool-catalog](https://github.com/cplieger/tool-catalog), by the same author, publishes the compiled catalog that `DefaultCatalogURL` points at.
 
 ## Contributing
 
-Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
-conventions and how to run the checks locally.
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the conventions and how to run the checks locally.
 
 ## Disclaimer
 
