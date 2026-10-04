@@ -38,7 +38,7 @@ A language source is a tool too. An `npm:` install adds `node` from the catalog,
 
 ## Dependencies
 
-A tool's dependencies are installed whenever the tool is. Installing a tool adds every dependency the catalog names, enables any that is a template, and installs the whole set with the dependencies first. The job log names each entry it enabled and which tool asked for it.
+A tool's dependencies are installed whenever the tool is. Installing a tool adds every dependency the catalog names, enables any that is a template, and installs the whole set with the dependencies first. The job log names each entry it enabled and which tool asked for it. When one dependency cannot be resolved, the tool that needs it fails with `dependency "<name>" failed` and the reason. That attempt adds no dependency and enables no template, and the tools in the same job that do not need it still install.
 
 Enabling a tool you name yourself stays explicit. `Install` on a template returns `ErrDisabled`, which the REST handler sends as `409 disabled`, because enabling changes the user's intent, and only a dependency enables a tool on its own.
 
