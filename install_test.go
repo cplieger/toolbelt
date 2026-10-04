@@ -598,7 +598,7 @@ func TestUninstall_ToleratesButReportsAFailedUninstallCommand(t *testing.T) {
 	if err := in.uninstall(t.Context(), "tool", tool, &ToolStatus{}); err != nil {
 		t.Fatalf("uninstall = %v, want a failing uninstall command tolerated", err)
 	}
-	if !strings.Contains(out.joined(), "uninstall command failed (continuing)") {
+	if !strings.Contains(out.joined(), "uninstall command failed with") {
 		t.Errorf("uninstall report = %q, want the failed command reported", out.joined())
 	}
 	if !strings.Contains(out.joined(), "uninstalled tool") {

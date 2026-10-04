@@ -492,8 +492,8 @@ func TestInstall_DoomedDependentIsBlockedNotBlamed(t *testing.T) {
 	// Both victims name the root cause and neither claims a fault of its
 	// own. "tail" is two edges away, so this also pins the propagation.
 	for _, n := range []string{"middle", "tail"} {
-		if got := byName[n].LastError; !strings.Contains(got, "runtime") {
-			t.Errorf("%s last_error = %q, want it to name runtime", n, got)
+		if got := byName[n].LastError; !strings.Contains(got, `dependency "runtime" failed: `) {
+			t.Errorf("%s last_error = %q, want it to say dependency \"runtime\" failed with its cause", n, got)
 		}
 	}
 	// An unrelated name in the same plan is not collateral damage.
@@ -538,6 +538,110 @@ func TestInstall_UnrelatedToolsStillInstall(t *testing.T) {
 		if row.Name == "fine" && !row.Installed {
 			t.Errorf("fine was not installed: %q", row.LastError)
 		}
+	}
+}
+
+func unresolvableNodeEngine(t *testing.T) *Engine {
+	t.Helper()
+	cat := &Catalog{Entries: map[string]CatalogEntry{
+		"node": {Name: "node", Source: "aqua:nodejs/node"},
+	}}
+	e := newTestEngineClient(t, cat, offlineClient(), nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["pyright"] = Tool{Source: "npm:pyright", Version: "1.0.0"}
+		m.Tools["fine"] = manualEntry("fine")
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func inventoryByName(t *testing.T, e *Engine) map[string]ToolInfo {
+	t.Helper()
+	inv, err := e.Inventory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]ToolInfo{}
+	for _, row := range inv.Tools {
+		byName[row.Name] = row
+	}
+	return byName
+}
+
+func TestInstall_UnresolvableDependencyFailsTheDependentRow(t *testing.T) {
+	e := unresolvableNodeEngine(t)
+
+	job, err := e.Install("pyright")
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if final.State != JobFailed {
+		t.Errorf("Install(pyright) job state = %s, want failed", final.State)
+	}
+	if !strings.Contains(final.Error, `dependency "node" failed`) {
+		t.Errorf("Install(pyright) job error = %q, want it to say dependency \"node\" failed", final.Error)
+	}
+	row := inventoryByName(t, e)["pyright"]
+	if row.Installed {
+		t.Error("pyright reported installed without its backend")
+	}
+	for _, want := range []string{`dependency "node" failed`, "resolve latest version", "network touched"} {
+		if !strings.Contains(row.LastError, want) {
+			t.Errorf("pyright last_error = %q, want it to contain %q", row.LastError, want)
+		}
+	}
+}
+
+func TestInstall_UnplannableDependencyFailsEveryRowOnItsPath(t *testing.T) {
+	e := unresolvableNodeEngine(t)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		dep := m.Tools["pyright"]
+		dep.Disabled = true
+		m.Tools["pyright"] = dep
+		root := manualEntry("tsls")
+		root.Requires = []string{"pyright"}
+		m.Tools["tsls"] = root
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("tsls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobFailed {
+		t.Errorf("Install(tsls) job state = %s, want failed", final.State)
+	}
+	byName := inventoryByName(t, e)
+	for _, name := range []string{"tsls", "pyright"} {
+		if got := byName[name].LastError; !strings.Contains(got, `dependency "node" failed`) {
+			t.Errorf("%s last_error = %q, want it to say dependency \"node\" failed", name, got)
+		}
+	}
+}
+
+func TestInstall_UnplannableRootDoesNotSinkSiblings(t *testing.T) {
+	e := unresolvableNodeEngine(t)
+
+	job, err := e.queue.Enqueue(JobKindInstall, []string{"pyright", "fine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobFailed {
+		t.Errorf("install [pyright fine] job state = %s, want failed", final.State)
+	}
+	byName := inventoryByName(t, e)
+	if !byName["fine"].Installed {
+		t.Errorf("fine was not installed: last_error %q", byName["fine"].LastError)
+	}
+	if got := byName["pyright"].LastError; !strings.Contains(got, `dependency "node" failed`) {
+		t.Errorf("pyright last_error = %q, want it to say dependency \"node\" failed", got)
 	}
 }
 
@@ -748,9 +852,9 @@ func TestInstallOrder_BackendDepFromCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.LoadManifest()
-	plan, err := e.installOrder(t.Context(), m, []string{"pyright"})
-	if err != nil {
-		t.Fatal(err)
+	plan := e.installOrder(t.Context(), m, []string{"pyright"})
+	if len(plan.unplanned) != 0 {
+		t.Fatalf("installOrder(pyright) unplanned = %v, want none", plan.unplanned)
 	}
 	ordered := plan.ordered
 	if len(ordered) != 2 || ordered[0] != "node" || ordered[1] != "pyright" {
@@ -774,8 +878,13 @@ func TestInstallOrder_CycleDetected(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ := e.store.LoadManifest()
-	if _, err := e.installOrder(t.Context(), m, []string{"a"}); err == nil {
-		t.Error("want cycle error")
+	plan := e.installOrder(t.Context(), m, []string{"a"})
+	if len(plan.unplanned) != 1 || plan.unplanned[0].name != "a" ||
+		!strings.Contains(plan.unplanned[0].err.Error(), "cycle") {
+		t.Errorf("installOrder(a) unplanned = %v, want the cycle recorded against a", plan.unplanned)
+	}
+	if len(plan.ordered) != 0 {
+		t.Errorf("installOrder(a) ordered = %v, want nothing from the cyclic chain", plan.ordered)
 	}
 }
 
@@ -1517,6 +1626,17 @@ func TestValidToolName_ScopedEdgeCases(t *testing.T) {
 
 // longName returns a name of exactly n allowed characters.
 func longName(n int) string { return strings.Repeat("a", n) }
+
+// TestValidToolName_AcceptsEveryAlphanumericRangeEnd pins the inclusive ends
+// of the three character ranges: a name like "JDK-21" or "Z3-9" is ordinary,
+// and an off-by-one at a range end refuses it as an invalid name.
+func TestValidToolName_AcceptsEveryAlphanumericRangeEnd(t *testing.T) {
+	for _, name := range []string{"a", "z", "A", "Z", "0", "9"} {
+		if !validToolName(name) {
+			t.Errorf("validToolName(%q) = false, want true", name)
+		}
+	}
+}
 
 // TestValidToolName_PathComponents pins the half of the rule the charset
 // alone cannot express: the name becomes a path component under opt/, and

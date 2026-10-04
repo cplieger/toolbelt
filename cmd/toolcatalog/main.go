@@ -50,10 +50,10 @@ func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func runCompile(args []string) {
 	fl := flag.NewFlagSet("compile", flag.ExitOnError)
-	miseDir := fl.String("mise", "", "path to the mise registry dir (registry/*.toml)")
+	miseDir := fl.String("mise", "", "path to the mise registry dir that holds registry/*.toml")
 	aquaDir := fl.String("aqua", "", "path to the aqua-registry pkgs dir")
 	var overlays multiFlag
-	fl.Var(&overlays, "overlay", "bundled-tools JSON path (repeatable; merged in order over the registry data)")
+	fl.Var(&overlays, "overlay", "bundled-tools JSON path, repeatable, merged in order over the registry data")
 	refsFlag := fl.String("refs", "", "comma-separated name=ref pairs recorded in the catalog")
 	outPath := fl.String("out", "tool-catalog.json", "output path")
 	_ = fl.Parse(args)
@@ -105,9 +105,9 @@ func loadRegistryLicenses(miseDir, aquaDir string) map[string]string {
 func runVerify(args []string) {
 	fl := flag.NewFlagSet("verify", flag.ExitOnError)
 	catalogPath := fl.String("catalog", "tool-catalog.json", "compiled catalog to verify")
-	requirePath := fl.String("require", "", "requirements file (one tool name per line, # comments)")
+	requirePath := fl.String("require", "", "requirements file with one tool name per line and # comments")
 	var overlays multiFlag
-	fl.Var(&overlays, "overlay", "bundled-tools JSON to merge before verifying (repeatable)")
+	fl.Var(&overlays, "overlay", "bundled-tools JSON to merge before verifying, repeatable")
 	_ = fl.Parse(args)
 	if *requirePath == "" {
 		log.Fatal("toolcatalog verify: -require is required")
@@ -132,7 +132,7 @@ func runVerify(args []string) {
 		}
 		os.Exit(1)
 	}
-	fmt.Printf("toolcatalog verify: %d required tools resolve in %s (%d entries)\n",
+	fmt.Printf("toolcatalog verify: %d required tools resolve in %s, which has %d entries\n",
 		len(names), *catalogPath, len(catalog.Entries))
 }
 
@@ -273,7 +273,7 @@ func writeCatalog(catalog *toolbelt.Catalog, outPath string, stats compileStats)
 	if err := os.WriteFile(outPath, data, 0o600); err != nil {
 		log.Fatalf("toolcatalog: write: %v", err)
 	}
-	fmt.Printf("toolcatalog: %d tools (%d aqua-backed), %d unavailable, %d non-linux -> %s (%d KB)\n",
+	fmt.Printf("toolcatalog: %d tools, %d of them aqua-backed, %d unavailable, %d non-linux, written to %s (%d KB)\n",
 		stats.tools, stats.aquaBacked, stats.unavailable, stats.foreign, outPath, len(data)/1024)
 }
 

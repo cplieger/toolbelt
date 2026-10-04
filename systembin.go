@@ -44,7 +44,7 @@ func resolveSystemBin(name string) (string, error) {
 		}
 		return candidate, nil
 	}
-	return "", fmt.Errorf("%w: %s is not in %s (the consumer image must bake it in)",
+	return "", fmt.Errorf("%w. %s is not in %s, and the consumer image must bake it in",
 		errSystemBin, name, strings.Join(systemBinDirs, " or "))
 }
 

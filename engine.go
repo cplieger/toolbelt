@@ -544,11 +544,11 @@ func (e *Engine) noSourceError(name string) error {
 	u, ok := e.cat().Unavailable[name]
 	switch {
 	case !ok:
-		return fmt.Errorf("unknown tool %q: pick a source (npm:/pip:/cargo:/go:/aqua:/manual)", name)
+		return fmt.Errorf("unknown tool %q: pick a source from npm:, pip:, cargo:, go:, aqua: or manual", name)
 	case u.Reason != "":
-		return fmt.Errorf("%q has no install source in the catalog (%s): install it in a shell, or add it with an explicit source", name, u.Reason)
+		return fmt.Errorf("%q has no install source in the catalog, which gives the reason %q. Install it in a shell, or add it with an explicit source", name, u.Reason)
 	default:
-		return fmt.Errorf("%q has no install source in the catalog: install it in a shell, or add it with an explicit source", name)
+		return fmt.Errorf("%q has no install source in the catalog. Install it in a shell, or add it with an explicit source", name)
 	}
 }
 
@@ -1177,16 +1177,15 @@ func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output 
 	if err != nil {
 		return err
 	}
-	p, err := e.installOrder(ctx, m, names)
-	if err != nil {
-		return err
+	p := e.installOrder(ctx, m, names)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	e.queue.setCovers(j, p.ordered)
 	for _, n := range p.enabled {
-		output(fmt.Sprintf("enabling %s (required by %s)", n, strings.Join(names, ", ")))
+		output(fmt.Sprintf("enabling %s, required by %s", n, strings.Join(names, ", ")))
 	}
-	var failed []string
-	var firstErr error
+	failed, firstErr := e.recordUnplanned(m, p.unplanned, output)
 	blockers := installBlockers{}
 	// Resolved once for the whole plan: a catalog swap mid-job must not
 	// change what counts as a dependency edge partway through.
@@ -1205,7 +1204,7 @@ func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output 
 			if firstErr == nil {
 				firstErr = err
 			}
-			blockers[n] = ""
+			blockers[n] = blocker{err: err}
 			output(fmt.Sprintf("ERROR %s: %v", n, err))
 		}
 	}
@@ -1219,60 +1218,106 @@ func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output 
 	}
 }
 
-// installBlockers records why a job could not install a tool: the empty
-// string for one that failed on its own, or the name of the dependency
-// that stopped it.
-type installBlockers map[string]string
+func (e *Engine) recordUnplanned(m *Manifest, unplanned []planFailure, output func(string)) (failed []string, firstErr error) {
+	for _, u := range unplanned {
+		failed = append(failed, u.name)
+		if firstErr == nil {
+			firstErr = u.err
+		}
+		output(fmt.Sprintf("ERROR %s: %v", u.name, u.err))
+		rows := u.stranded
+		if !slices.Contains(rows, u.name) {
+			rows = append(rows, u.name)
+		}
+		for _, n := range rows {
+			if _, ok := m.Tools[n]; !ok {
+				continue
+			}
+			if serr := e.recordFailure(n, u.err); serr != nil {
+				e.log.Error("toolbelt: planning error not recorded", "tool", n, "error", serr)
+			}
+		}
+	}
+	return failed, firstErr
+}
+
+type dependencyError struct {
+	err  error
+	name string
+}
+
+func (e *dependencyError) Error() string {
+	return fmt.Sprintf("dependency %q failed: %v", e.name, e.err)
+}
+
+func (e *dependencyError) Unwrap() error { return e.err }
+
+type installBlockers map[string]blocker
+
+// blocker is one tool the job could not install. root names the dependency
+// that stopped it, empty for a tool that failed on its own; err is the root
+// failure's cause either way, so a blocked row can carry it.
+type blocker struct {
+	err  error
+	root string
+}
 
 // cause names the tool that makes installing n pointless — a dependency
 // that failed in this job, or the ROOT failure behind a dependency that
 // was itself blocked. The plan is dependency-first, so one pass
 // propagates a failure through the whole chain behind it.
 //
-// Attempting a doomed dependent is what produced the misleading report
-// this replaces: with node unable to run, `pyright` was installed anyway
-// and failed with `npm failed: exit status 127` about ITSELF, so three
-// rows accused themselves of a fault none of them had.
-func (b installBlockers) cause(m *Manifest, n string, backends map[string]string) (string, bool) {
+// Attempting a doomed dependent would make it blame itself: with node
+// unable to run, pyright fails with `npm failed: exit status 127`.
+func (b installBlockers) cause(m *Manifest, n string, backends map[string]string) (blocker, bool) {
 	t, ok := m.Tools[n]
 	if !ok {
-		return "", false
+		return blocker{}, false
 	}
 	for _, dep := range depsOf(n, &t, backends) {
-		root, stopped := b[dep]
+		stop, stopped := b[dep]
 		if !stopped {
 			continue
 		}
-		if root != "" {
-			return root, true
+		if stop.root != "" {
+			return stop, true
 		}
-		return dep, true
+		return blocker{root: dep, err: stop.err}, true
 	}
-	return "", false
+	return blocker{}, false
 }
 
 // recordBlocked reports a tool the job skipped and puts the reason on its
 // status row, so the row names the tool that actually broke instead of
 // keeping whatever error a previous attempt left there.
-func (e *Engine) recordBlocked(name, cause string, output func(string)) {
-	output(fmt.Sprintf("%s: skipped, %s failed", name, cause))
-	err := fmt.Errorf("not installed: %s failed in the same job", cause)
-	if serr := e.recordFailure(name, err); serr != nil {
+func (e *Engine) recordBlocked(name string, cause blocker, output func(string)) {
+	output(fmt.Sprintf("%s: skipped, %s failed", name, cause.root))
+	if serr := e.recordFailure(name, &dependencyError{name: cause.root, err: cause.err}); serr != nil {
 		e.log.Error("toolbelt: blocked reason not recorded", "tool", name, "error", serr)
 	}
 }
 
 // installOrder expands names with backend deps + Requires (creating
 // manifest entries from the catalog for missing deps, enabling disabled
-// ones) and returns them dependency-first.
-func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) (*installPlan, error) {
+// ones) and returns them dependency-first. Each root is planned on its own:
+// one whose chain cannot be planned lands in unplanned, the entries its
+// walk added to the order are rolled back, and the other roots still
+// install. Adoptions and enables persist as the walk goes, so a rolled-back
+// dependency stays in the manifest, uninstalled, until a later job plans it.
+func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) *installPlan {
 	p := &installPlan{e: e, m: m, seen: map[string]bool{}}
 	for _, n := range names {
+		mark := len(p.ordered)
 		if err := p.visit(ctx, n, nil); err != nil {
-			return nil, err
+			for _, planned := range p.ordered[mark:] {
+				delete(p.seen, planned)
+			}
+			p.ordered = p.ordered[:mark]
+			p.unplanned = append(p.unplanned, planFailure{name: n, err: err, stranded: p.stranded})
 		}
+		p.stranded = nil
 	}
-	return p, nil
+	return p
 }
 
 // installPlan carries the shared state of the dependency-first DFS
@@ -1284,7 +1329,17 @@ type installPlan struct {
 	ordered []string
 	// enabled records the disabled templates this plan switched on as
 	// obligatory dependencies, for the job log.
-	enabled []string
+	enabled   []string
+	unplanned []planFailure
+	stranded  []string
+}
+
+type planFailure struct {
+	err  error
+	name string
+	// stranded is the failed path's tools whose dependency could not be
+	// planned; one adopted or enabled on the way is already in the manifest.
+	stranded []string
 }
 
 // visit walks a tool's dependencies depth-first, appending each to the
@@ -1321,6 +1376,7 @@ func (p *installPlan) visit(ctx context.Context, n string, stack []string) error
 	stack = append(stack, n)
 	for _, dep := range depsOf(n, &t, p.e.backends()) {
 		if err := p.visit(ctx, dep, stack); err != nil {
+			p.stranded = append(p.stranded, n)
 			return err
 		}
 	}
@@ -1354,7 +1410,7 @@ func (e *Engine) enableDependency(m *Manifest, n string) (Tool, error) {
 func (e *Engine) adoptDependency(ctx context.Context, m *Manifest, n string) (Tool, error) {
 	nt, err := e.resolveNewTool(ctx, n, &AddRequest{Name: n})
 	if err != nil {
-		return Tool{}, fmt.Errorf("dependency %q: %w", n, err)
+		return Tool{}, &dependencyError{name: n, err: err}
 	}
 	if err := e.store.MutateManifest(func(mm *Manifest) error {
 		if _, exists := mm.Tools[n]; !exists {
@@ -1409,7 +1465,7 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		output(fmt.Sprintf("%s %s already installed", name, t.Version))
 		return nil
 	}
-	output(fmt.Sprintf("installing %s %s (%s)", name, t.Version, t.Source))
+	output(fmt.Sprintf("installing %s %s from %s", name, t.Version, t.Source))
 	res, err := e.inst.install(ctx, name, t, e.aquaDef(t.Source), &st)
 	if err != nil {
 		if serr := e.recordFailure(name, err); serr != nil {
@@ -1443,11 +1499,11 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 		return nil, ErrNotFound
 	}
 	if t.Disabled {
-		output(fmt.Sprintf("%s is disabled; skipping", name))
+		output(fmt.Sprintf("%s is disabled, so it was skipped", name))
 		return nil, nil
 	}
 	if t.Source == "" {
-		return nil, fmt.Errorf("no install knowledge for %q: not in the catalog and no source given", name)
+		return nil, fmt.Errorf("no install knowledge exists for %q because it is not in the catalog and no source was given", name)
 	}
 	if t.Version != "" {
 		return &t, nil
@@ -1509,7 +1565,7 @@ func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) erro
 		}
 		return err
 	case !v.OK:
-		output(fmt.Sprintf("%s: install not verified (%s)", name, v.Reason))
+		output(fmt.Sprintf("The %s install was not verified. %s", name, v.Reason))
 	}
 	return nil
 }
@@ -1588,14 +1644,14 @@ func (e *Engine) runDisable(ctx context.Context, names []string, output func(str
 		}
 		status := st.Tools[n]
 		if !status.owned() {
-			output(fmt.Sprintf("%s has no engine-owned install; template kept", n))
+			output(fmt.Sprintf("%s has no engine-owned install, so the template was kept", n))
 			continue
 		}
 		t, ok := m.Tools[n]
 		if !ok {
 			t = Tool{Source: SourceManual}
 		}
-		output(fmt.Sprintf("disabling %s (uninstalling, template kept)", n))
+		output(fmt.Sprintf("disabling %s, uninstalling it and keeping the template", n))
 		if err := e.inst.uninstall(ctx, n, &t, &status); err != nil {
 			return err
 		}
@@ -1665,7 +1721,7 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 		output(reason)
 		return false, nil
 	}
-	output(fmt.Sprintf("%s: %s -> %s", n, t.Version, latest))
+	output(fmt.Sprintf("updating %s from %s to %s", n, t.Version, latest))
 	if err := e.store.MutateManifest(func(mm *Manifest) error {
 		cur, ok := mm.Tools[n]
 		if !ok {

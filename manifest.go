@@ -185,7 +185,7 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 		return nil, fmt.Errorf("parse %s: %w", s.manifestPath, err)
 	}
 	if m.Version != ManifestVersion {
-		return &m, fmt.Errorf("%s: manifest version %d (want %d)", s.manifestPath, m.Version, ManifestVersion)
+		return &m, fmt.Errorf("%s: manifest version %d, want %d", s.manifestPath, m.Version, ManifestVersion)
 	}
 	if m.Tools == nil {
 		m.Tools = map[string]Tool{}
