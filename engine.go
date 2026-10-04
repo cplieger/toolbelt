@@ -1299,16 +1299,22 @@ func (e *Engine) recordBlocked(name string, cause blocker, output func(string)) 
 
 // installOrder expands names with backend deps + Requires (creating
 // manifest entries from the catalog for missing deps, enabling disabled
-// ones) and returns them dependency-first. Each root is planned on its own:
-// one whose chain cannot be planned lands in unplanned, the entries its
-// walk added to the order are rolled back, and the other roots still
-// install. Adoptions and enables persist as the walk goes, so a rolled-back
-// dependency stays in the manifest, uninstalled, until a later job plans it.
+// ones) and returns them dependency-first, updating m to match tools.json.
+// Each root is planned on its own and is all-or-nothing: its adoptions and
+// enables are staged, then committed to tools.json and m in one write only
+// when its whole chain plans. A root that fails lands in unplanned with its
+// staging and its order entries discarded, so a later root adopts a shared
+// new dependency for itself, and the other roots still install.
 func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) *installPlan {
 	p := &installPlan{e: e, m: m, seen: map[string]bool{}}
 	for _, n := range names {
 		mark := len(p.ordered)
-		if err := p.visit(ctx, n, nil); err != nil {
+		p.stage = rootStage{tools: map[string]Tool{}, via: map[string][]string{}}
+		err := p.visit(ctx, n, nil)
+		if err == nil {
+			err = p.commit()
+		}
+		if err != nil {
 			for _, planned := range p.ordered[mark:] {
 				delete(p.seen, planned)
 			}
@@ -1321,25 +1327,106 @@ func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) 
 }
 
 // installPlan carries the shared state of the dependency-first DFS
-// installOrder runs.
+// installOrder runs. m holds only committed entries; the root being
+// walked sees its own staged ones through lookup.
 type installPlan struct {
 	e       *Engine
 	m       *Manifest
 	seen    map[string]bool
 	ordered []string
 	// enabled records the disabled templates this plan switched on as
-	// obligatory dependencies, for the job log.
+	// obligatory dependencies, for the job log. Committed roots only.
 	enabled   []string
 	unplanned []planFailure
 	stranded  []string
+	stage     rootStage
+}
+
+type rootStage struct {
+	tools map[string]Tool
+	// via is each staged enable's ancestor path, so a commit that fails on
+	// the enable can strand the same rows a planning failure there would.
+	via     map[string][]string
+	adopted []string
+	enabled []string
 }
 
 type planFailure struct {
 	err  error
 	name string
-	// stranded is the failed path's tools whose dependency could not be
-	// planned; one adopted or enabled on the way is already in the manifest.
+	// stranded is the failed path's committed tools whose dependency could
+	// not be planned. Staged entries are absent: nothing of them persists.
 	stranded []string
+}
+
+func (p *installPlan) lookup(n string) (Tool, bool) {
+	if t, ok := p.stage.tools[n]; ok {
+		return t, true
+	}
+	t, ok := p.m.Tools[n]
+	return t, ok
+}
+
+// commit writes the root's staged changes in one manifest mutation and
+// copies the rows as written into m. An adoption yields to a row that
+// appeared on disk meanwhile; an enable whose row vanished fails the root,
+// strands the committed rows on its path, and the aborted mutation writes
+// nothing.
+func (p *installPlan) commit() error {
+	s := &p.stage
+	if len(s.tools) == 0 {
+		return nil
+	}
+	written := make(map[string]Tool, len(s.tools))
+	err := p.e.store.MutateManifest(func(mm *Manifest) error {
+		if vanished := s.apply(mm); vanished != "" {
+			p.stranded = append(p.stranded, s.committedPath(mm, vanished)...)
+			return &dependencyError{name: vanished, err: ErrNotFound}
+		}
+		for n := range s.tools {
+			written[n] = mm.Tools[n]
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	maps.Copy(p.m.Tools, written)
+	p.enabled = append(p.enabled, s.enabled...)
+	return nil
+}
+
+// apply must run inside an abortable manifest mutation: a missing enable
+// can follow adoptions it already wrote into mm.
+func (s *rootStage) apply(mm *Manifest) (vanished string) {
+	for _, n := range s.adopted {
+		if _, exists := mm.Tools[n]; !exists {
+			mm.Tools[n] = s.tools[n]
+		}
+	}
+	for _, n := range s.enabled {
+		t, ok := mm.Tools[n]
+		if !ok {
+			return n
+		}
+		t.Disabled = false
+		mm.Tools[n] = t
+	}
+	return ""
+}
+
+// committedPath is the vanished enable's ancestors that still have a row
+// in mm. It reads mm, not the plan's manifest, because the same hand edit
+// can delete an ancestor, and a status row needs a manifest row.
+func (s *rootStage) committedPath(mm *Manifest, vanished string) []string {
+	var rows []string
+	for _, a := range s.via[vanished] {
+		_, staged := s.tools[a]
+		if _, onDisk := mm.Tools[a]; onDisk && !staged {
+			rows = append(rows, a)
+		}
+	}
+	return rows
 }
 
 // visit walks a tool's dependencies depth-first, appending each to the
@@ -1348,8 +1435,8 @@ type planFailure struct {
 // A DISABLED dependency is ENABLED rather than refused: asking for a
 // tool is asking for what it cannot run without (typescript-language-server
 // with no typescript is a launcher with nothing to launch). The enable is
-// recorded in the job log, and mirrors the force-disable cascade's edge
-// walk in the other direction.
+// staged like an adoption (installOrder owns when it persists), and mirrors
+// the force-disable cascade's edge walk in the other direction.
 func (p *installPlan) visit(ctx context.Context, n string, stack []string) error {
 	if p.seen[n] {
 		return nil
@@ -1357,26 +1444,16 @@ func (p *installPlan) visit(ctx context.Context, n string, stack []string) error
 	if slices.Contains(stack, n) {
 		return fmt.Errorf("requires cycle through %q", n)
 	}
-	t, ok := p.m.Tools[n]
-	if !ok {
-		adopted, err := p.e.adoptDependency(ctx, p.m, n)
-		if err != nil {
-			return err
-		}
-		t = adopted
-	}
-	if t.Disabled && len(stack) > 0 {
-		enabled, err := p.e.enableDependency(p.m, n)
-		if err != nil {
-			return err
-		}
-		t = enabled
-		p.enabled = append(p.enabled, n)
+	t, err := p.entry(ctx, n, stack)
+	if err != nil {
+		return err
 	}
 	stack = append(stack, n)
 	for _, dep := range depsOf(n, &t, p.e.backends()) {
 		if err := p.visit(ctx, dep, stack); err != nil {
-			p.stranded = append(p.stranded, n)
+			if _, staged := p.stage.tools[n]; !staged {
+				p.stranded = append(p.stranded, n)
+			}
 			return err
 		}
 	}
@@ -1385,43 +1462,24 @@ func (p *installPlan) visit(ctx context.Context, n string, stack []string) error
 	return nil
 }
 
-// enableDependency clears the Disabled flag on a template another tool
-// requires, and returns the entry as the plan should now see it.
-func (e *Engine) enableDependency(m *Manifest, n string) (Tool, error) {
-	if err := e.store.MutateManifest(func(mm *Manifest) error {
-		t, ok := mm.Tools[n]
-		if !ok {
-			return fmt.Errorf("dependency %q: %w", n, ErrNotFound)
+func (p *installPlan) entry(ctx context.Context, n string, stack []string) (Tool, error) {
+	t, ok := p.lookup(n)
+	if !ok {
+		nt, err := p.e.resolveNewTool(ctx, n, &AddRequest{Name: n})
+		if err != nil {
+			return Tool{}, &dependencyError{name: n, err: err}
 		}
+		t = nt
+		p.stage.tools[n] = t
+		p.stage.adopted = append(p.stage.adopted, n)
+	}
+	if t.Disabled && len(stack) > 0 {
 		t.Disabled = false
-		mm.Tools[n] = t
-		return nil
-	}); err != nil {
-		return Tool{}, err
+		p.stage.tools[n] = t
+		p.stage.enabled = append(p.stage.enabled, n)
+		p.stage.via[n] = slices.Clone(stack)
 	}
-	t := m.Tools[n]
-	t.Disabled = false
-	m.Tools[n] = t
 	return t, nil
-}
-
-// adoptDependency pulls a not-yet-manifested dependency into the
-// manifest from the catalog at its latest version.
-func (e *Engine) adoptDependency(ctx context.Context, m *Manifest, n string) (Tool, error) {
-	nt, err := e.resolveNewTool(ctx, n, &AddRequest{Name: n})
-	if err != nil {
-		return Tool{}, &dependencyError{name: n, err: err}
-	}
-	if err := e.store.MutateManifest(func(mm *Manifest) error {
-		if _, exists := mm.Tools[n]; !exists {
-			mm.Tools[n] = nt
-		}
-		return nil
-	}); err != nil {
-		return Tool{}, err
-	}
-	m.Tools[n] = nt
-	return nt, nil
 }
 
 // depsOf merges backend-implied deps with the entry's Requires. It is

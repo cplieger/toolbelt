@@ -599,9 +599,6 @@ func TestInstall_UnresolvableDependencyFailsTheDependentRow(t *testing.T) {
 func TestInstall_UnplannableDependencyFailsEveryRowOnItsPath(t *testing.T) {
 	e := unresolvableNodeEngine(t)
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		dep := m.Tools["pyright"]
-		dep.Disabled = true
-		m.Tools["pyright"] = dep
 		root := manualEntry("tsls")
 		root.Requires = []string{"pyright"}
 		m.Tools["tsls"] = root
