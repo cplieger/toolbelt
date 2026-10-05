@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -483,10 +485,13 @@ func TestSeed_InitFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"gopls", "typescript-language-server", "pyright", "rust-analyzer", "gh"} {
-			tl, ok := m.Tools[name]
-			if !ok || !tl.Disabled {
-				t.Errorf("seed template %s missing or enabled: %+v", name, tl)
+		want := []string{"gopls", "pyright", "rust-analyzer", "typescript-language-server"}
+		if got := slices.Sorted(maps.Keys(m.Tools)); !slices.Equal(got, want) {
+			t.Errorf("seed templates = %v, want exactly %v (no forge CLI is seeded)", got, want)
+		}
+		for _, name := range want {
+			if tl := m.Tools[name]; !tl.Disabled {
+				t.Errorf("seed template %s is enabled: %+v", name, tl)
 			}
 		}
 		if len(m.Comment) == 0 {

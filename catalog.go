@@ -55,8 +55,8 @@ type CatalogEntry struct {
 	// Essential marks a tool the PRODUCT depends on: removing it breaks a
 	// feature the user did not ask to lose, so the engine refuses (
 	// ErrEssential). Declared by a consumer's BUNDLED TOOLS file, never
-	// by registry data — "marotte needs gh" is a fact about marotte, not
-	// gh. Not a lock on version or install state: an essential tool can
+	// by registry data: "this app needs X" is a fact about the app, not
+	// about X. Not a lock on version or install state: an essential tool can
 	// still be updated or DISABLED, only deletion is refused. Companion
 	// to Featured: Essential is NECESSARY, Featured is RECOMMENDED.
 	Essential bool `json:"essential,omitempty"`

@@ -1,23 +1,16 @@
-// Package httpapi is the HTTP projection of a toolbelt Engine: a REST
-// surface over the Engine's Go API, one route per method, JSON in and
-// out. No auth, no SSE; consumers wrap the handler in their own stack
-// and stream job progress via the Engine's Config callbacks or by
-// polling the jobs route.
+// Package httpapi is the HTTP projection of a toolbelt Engine: one REST
+// route per Engine method, JSON in and out, no auth and no SSE. Consumers
+// wrap the handler in their own stack and follow jobs through the Engine's
+// Config callbacks or the jobs route.
 //
-// Mutations return 202 with the enqueued job (null when none was
-// needed). A refusal is 409 under a code naming it: has_dependents,
-// essential, disabled, not_configured.
+// Mutations return 202 with the enqueued job (null when none was needed).
+// A refusal is 409 coded has_dependents, essential, disabled or
+// not_configured. A GitHub API rate limit is 503 coded github_rate_limited
+// with a rate_limit object; a job it failed carries error_code and rate_limit.
 //
-// GET /search?q=<query> returns installable hits, and, with
-// &unavailable=1, the catalog entries no install source exists for
-// (opt-in: a UI offering installs has no use for a row it cannot act
-// on). See [SearchResponse].
-//
-// Every response carries Cache-Control: no-store, since this is a
-// mutable JSON control plane where a stored response is always wrong.
-// A value already set when the handler runs is left as-is, treated as
-// deliberate — the escape hatch for a consumer that wants a route
-// cached.
+// GET /search returns installable hits, and with &unavailable=1 the catalog
+// entries nothing can install (see [SearchResponse]). Every response carries
+// Cache-Control: no-store; a value already set is left as deliberate.
 package httpapi
 
 import (
@@ -129,6 +122,14 @@ type dependentsResponse struct {
 	Error      string   `json:"error"`
 	Code       string   `json:"code"`
 	Dependents []string `json:"dependents"`
+}
+
+// rateLimitResponse is the 503 envelope for a request GitHub's API rate
+// limit refused: the standard error envelope plus the limit's detail.
+type rateLimitResponse struct {
+	Error     string                   `json:"error"`
+	Code      string                   `json:"code"`
+	RateLimit toolbelt.GitHubRateLimit `json:"rate_limit"`
 }
 
 // RemoveResponse rides a 409-free DELETE alongside the job (dependents
@@ -427,12 +428,19 @@ func postCancel(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 // writeEngineError maps engine sentinels onto wire responses.
 func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var dep *toolbelt.DependentsError
+	var rl *toolbelt.GitHubRateLimitError
 	switch {
 	case errors.As(err, &dep):
 		webhttp.WriteJSONStatus(w, http.StatusConflict, dependentsResponse{
 			Error:      dep.Error(),
 			Code:       "has_dependents",
 			Dependents: dep.Dependents,
+		})
+	case errors.As(err, &rl):
+		webhttp.WriteJSONStatus(w, http.StatusServiceUnavailable, rateLimitResponse{
+			Error:     err.Error(),
+			Code:      toolbelt.ErrorCodeGitHubRateLimited,
+			RateLimit: rl.Wire(),
 		})
 	case errors.Is(err, toolbelt.ErrEssential):
 		webhttp.WriteError(w, r, http.StatusConflict, "essential", err.Error())

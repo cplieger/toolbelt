@@ -19,6 +19,7 @@ This page lists every `Config` field, the helpers that fill `Config.Refresh` fro
 | `VerifyRootIntegrity` | Refuse to start over an unsafe tools tree. Off by default. See below |
 | `OnJobChanged` | Receives every job state change. Must not block. Nil is silent |
 | `OnJobOutput` | Receives a running job's output lines in batches. Must not block. Nil is silent |
+| `GitHubToken` | Returns the token for each `api.github.com` request, the engine's only token source. Nil or `""` sends none. An error fails the request. See [Security](security-model.md#network) |
 | `Logger` | The `slog` logger. Nil uses `slog.Default()` |
 
 When `CatalogPath` is missing, an entry with complete install data can still install. An entry that relies on the catalog for its source or definition fails with an error that names the missing knowledge.
@@ -55,6 +56,6 @@ A `_comment` array at the top of `tools.json` survives the engine's rewrites.
 
 ## The default seed
 
-`DefaultSeed()` returns five disabled templates, the language servers `gopls`, `typescript-language-server`, `pyright` and `rust-analyzer`, plus the GitHub CLI `gh`. Nothing downloads until a template is enabled. Install knowledge comes from the catalog at that moment, so the seed never goes stale.
+`DefaultSeed()` returns four disabled templates, the language servers `gopls`, `typescript-language-server`, `pyright` and `rust-analyzer`. Nothing downloads until a template is enabled. Install knowledge comes from the catalog at that moment, so the seed never goes stale.
 
 Language runtimes such as `node` and `go`, and required packages such as `typescript`, are left out of the seed. The engine adds a missing dependency when it installs, and a seeded row would only be a second place for its version to drift.

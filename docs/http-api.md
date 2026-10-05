@@ -25,7 +25,7 @@ The handler has no authentication and adds no middleware except its own cache po
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on a template |
 | `POST {prefix}/update` | `Update` | Optional `{"names": [...]}` body |
 | `DELETE {prefix}/{name}?force=1` | `Remove` or `RemoveWithDependents` | 202 `{job, dependents}`. 409 without `force`. 409 `essential` whatever `force` says |
-| `GET {prefix}/jobs` | `Jobs` | The active job carries its output tail. A cancelled job carries `cancel_cause` |
+| `GET {prefix}/jobs` | `Jobs` | The active job carries its output tail. A cancelled job carries `cancel_cause`. A job a GitHub rate limit failed carries `error_code` and `rate_limit` |
 | `POST {prefix}/jobs/{id}/cancel` | `CancelJob` | The job reports `cancel_cause: caller` |
 | `GET {prefix}/catalog` | `CatalogInfo` | Where the live catalog came from and how fresh it is |
 | `POST {prefix}/catalog/refresh` | `RefreshCatalog` | 202 `{job}`. 409 `not_configured` without `Config.Refresh` |
@@ -42,6 +42,14 @@ A change returns `202 {"job": ...}`, with a null job when nothing needed doing. 
 - `essential` marks a tool your product declares it needs.
 - `disabled` marks an install sent to a template.
 - `not_configured` marks a catalog refresh on an engine without `Config.Refresh`.
+
+A request that a GitHub rate limit stops before any job starts gets a `503` reply with the code `github_rate_limited`. That happens, for example, when `POST {prefix}` looks up the latest version. A job that fails for the same reason carries `error_code: github_rate_limited`. Both carry a `rate_limit` object:
+
+```json
+{"reset_at": 1791192600000, "limit": 60, "authenticated": false}
+```
+
+`reset_at` is in Unix milliseconds. For a limit on bursts of requests that names no time, it is one minute after the refusal. `limit` is the hourly limit, left out when GitHub did not send it. `authenticated` is false when the request carried no token. `secondary` is true when GitHub refused under its limit on bursts of requests rather than its hourly limit. `authenticated` is false when the request carried no token. `secondary` is true when GitHub refused under its limit on bursts of requests rather than its hourly limit.
 
 To follow job progress, use the `Config` callbacks or poll `GET {prefix}/jobs`.
 

@@ -59,7 +59,7 @@ Disabling an essential tool still works. It uninstalls the files and keeps the e
 - `Add(ctx, *AddRequest) (*Job, error)` records a new tool and starts its install. With `Disabled: true` it adds a template instead, starts no job and returns a nil job.
 - `Patch(name, PatchRequest) (*Job, error)` merges fields into an entry. Setting `Disabled` to true uninstalls the tool and keeps the template, and setting it to false installs it. A version change starts a reinstall. `Force` allows disabling a tool that enabled entries need, and disables those entries too, one level deep.
 - `Install(name) (*Job, error)` retries an existing, enabled entry. It refuses a template with `ErrDisabled`.
-- `Update(names ...string) (*Job, error)` updates every unpinned, enabled entry, or only the named ones.
+- `Update(names ...string) (*Job, error)` updates every unpinned, enabled entry, or only the named ones. A version check that fails is skipped, except one GitHub refused for a rate limit. That fails the job once the other entries are checked and updated.
 - `Remove(name) (*Job, []string, error)` uninstalls a tool and deletes its entry. A tool that enabled entries need is refused, and the call returns their names. `RemoveWithDependents(name)` removes those entries too. The cascade is one level deep, the tools that need the named one directly, so a longer chain leaves its outer tool depending on a tool that is gone.
 - `Reconcile(mode) (*Job, bool, error)` brings the disk in line with the manifest. `ReconcileMissing` installs missing enabled entries and uninstalls disabled ones the engine owns, with no network traffic when nothing has changed. `ReconcileFull` also starts an update pass. The bool reports whether a job was started. It is false, with a nil job and a nil error, when the manifest is empty and no tool is installed.
 - `Wait(ctx, jobID) (*Job, error)` blocks until a job finishes. A job id the queue no longer holds returns `ErrUnknownJob`.
@@ -67,7 +67,7 @@ Disabling an essential tool still works. It uninstalls the files and keeps the e
 - `Jobs() (active *Job, recent []*Job)` and `CancelJob(id) bool` show the queue and cancel a job.
 - `RefreshCatalog() (*Job, error)` starts a catalog refresh, and returns `ErrRefreshNotConfigured` when `Config.Refresh` is unset. `CatalogInfo() CatalogInfo` describes the live catalog. [The catalog](catalog.md) has both.
 
-`*DependentsError` carries the names behind `ErrHasDependents` for `errors.As`, and `*RootIntegrityError` carries every path behind `ErrRootIntegrity`. The result types `Inventory`, `ToolInfo`, `SystemTool` and `Job` are also what the REST handler sends.
+`*DependentsError` carries the names behind `ErrHasDependents` for `errors.As`, `*RootIntegrityError` carries every path behind `ErrRootIntegrity`, and `*GitHubRateLimitError` carries the detail behind `ErrGitHubRateLimited`. The result types `Inventory`, `ToolInfo`, `SystemTool` and `Job` are also what the REST handler sends.
 
 The other types are `Tool` and `Manifest` for the manifest, `ToolStatus` and `State` for the install state, and `Catalog` and `CatalogEntry`, checked with `VerifyCatalog`, for the catalog. `SearchCounts` and `AptState` shape a search. `CancelCause` is `CancelShutdown`, `CancelCaller` or its zero value `CancelUnknown`.
 
@@ -76,6 +76,10 @@ The other types are `Tool` and `Manifest` for the manifest, `ToolStatus` and `St
 Every change runs as a job on one queue, one job at a time. The queue holds up to 8 waiting jobs and refuses more, so a bulk install sends one job, waits for it, then sends the next. A job may run for 30 minutes, keeps its last 500 output lines, and the queue remembers the last 10 finished jobs.
 
 `Config.OnJobChanged` receives every state change, and `Config.OnJobOutput` receives output lines in batches about every 150 ms. Neither callback may block.
+
+A failed job carries its message in `error`, and `Job.Err()` returns the error behind it for `errors.As`. When a GitHub rate limit failed the job, `error_code` is `github_rate_limited`. Its `rate_limit` field says whether the request carried a token, when the limit resets and what hourly limit GitHub reported. Your app decides what to tell the user, for example to set a token when `authenticated` is false.
+
+The engine does not retry a rate-limited request or wait for the reset. Until the limit resets, and for at least one minute, the engine sends no more GitHub API requests with the same token. Each one fails at once with the same error. Requests with no token are held back the same way. Requests with a different token are sent as usual, so a token your app sets after an anonymous limit takes effect at once.
 
 A cancelled job carries `cancel_cause`. It is `shutdown` when `Close` stopped it, including the running job's cancelled context, and `caller` when `CancelJob` or the cancel route stopped it. The field is left out when a cancellation names no cause, so an unknown cause never reads as a shutdown. A shutdown cancel is routine and need not alert. A caller cancel is deliberate.
 

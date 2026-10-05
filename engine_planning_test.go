@@ -253,7 +253,7 @@ func TestInstallOrder_VanishedTemplateFailsTheWholeRoot(t *testing.T) {
 	if len(p.unplanned) != 1 || !errors.Is(p.unplanned[0].err, ErrNotFound) {
 		t.Fatalf("installOrder([r]) unplanned = %+v, want r alone failing with ErrNotFound", p.unplanned)
 	}
-	_, _ = e.recordUnplanned(m, p.unplanned, func(string) {})
+	_ = e.recordUnplanned(m, p.unplanned, func(string) {})
 	if _, ok := loadManifest(t, e).Tools["d"]; ok {
 		t.Error("installOrder([r]) that failed on a vanished template still wrote adoption d to tools.json")
 	}
@@ -282,7 +282,7 @@ func TestInstallOrder_VanishedTemplateFailsEveryCommittedRowOnItsPath(t *testing
 	}
 
 	p := e.installOrder(t.Context(), m, []string{"r"})
-	_, _ = e.recordUnplanned(m, p.unplanned, func(string) {})
+	_ = e.recordUnplanned(m, p.unplanned, func(string) {})
 
 	byName := inventoryByName(t, e)
 	want := `dependency "gone" failed: tool not found`
@@ -315,7 +315,7 @@ func TestInstallOrder_VanishedTemplateLeavesNoStatusOnAncestorDeletedWithIt(t *t
 	}
 
 	p := e.installOrder(t.Context(), m, []string{"r"})
-	_, _ = e.recordUnplanned(m, p.unplanned, func(string) {})
+	_ = e.recordUnplanned(m, p.unplanned, func(string) {})
 
 	if got, want := inventoryByName(t, e)["r"].LastError, `dependency "gone" failed: tool not found`; got != want {
 		t.Errorf("installOrder([r]) after one edit removed mid and gone: r last_error = %q, want %q", got, want)
@@ -345,7 +345,7 @@ func TestInstallOrder_VanishedTemplateLeavesNoStatusOnTemplateOnItsPath(t *testi
 	}
 
 	p := e.installOrder(t.Context(), m, []string{"r"})
-	_, _ = e.recordUnplanned(m, p.unplanned, func(string) {})
+	_ = e.recordUnplanned(m, p.unplanned, func(string) {})
 
 	if got, want := inventoryByName(t, e)["r"].LastError, `dependency "gone" failed: tool not found`; got != want {
 		t.Errorf("installOrder([r]) on a vanished template under tmpl: r last_error = %q, want %q", got, want)
