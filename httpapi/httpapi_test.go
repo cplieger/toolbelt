@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -1007,5 +1008,95 @@ func TestMergeSearchHits_KeepsTheFeaturedOrderForAnEmptyQuery(t *testing.T) {
 	}
 	if got[0].Match != "" {
 		t.Errorf("an empty query stamped a match kind %q; nothing was matched", got[0].Match)
+	}
+}
+
+// rateLimitedServer serves an engine whose every GitHub API request is
+// refused for a rate limit resetting at reset. The refusal comes from the
+// token source, which the engine consults before sending, so no request
+// leaves the process.
+func rateLimitedServer(t *testing.T, reset time.Time) *httptest.Server {
+	t.Helper()
+	dir := t.TempDir()
+	rl := &toolbelt.GitHubRateLimitError{Reset: reset, Limit: 60}
+	e, err := toolbelt.New(&toolbelt.Config{
+		ConfigDir:   dir,
+		ToolsDir:    dir + "/tools",
+		Logger:      slog.Default(),
+		GitHubToken: func(context.Context) (string, error) { return "", rl },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	h := Handler(e, "/api/tools")
+	mux := http.NewServeMux()
+	mux.Handle("/api/tools", h)
+	mux.Handle("/api/tools/", h)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestJobsRoute_RateLimitedJobCarriesTheCode(t *testing.T) {
+	reset := time.Date(2026, 10, 5, 9, 30, 0, 0, time.UTC)
+	srv := rateLimitedServer(t, reset)
+
+	var jr JobResponse
+	body := `{"name":"r","source":"release:github/o/r","version":"v1.0.0"}`
+	if code := call(t, srv, http.MethodPost, "/api/tools", body, &jr); code != http.StatusAccepted || jr.Job == nil {
+		t.Fatalf("POST /api/tools %s = %d (job %v), want 202 with a job", body, code, jr.Job)
+	}
+	j := finishedJobJSON(t, srv, jr.Job.ID)
+
+	var code string
+	_ = json.Unmarshal(j["error_code"], &code)
+	if code != "github_rate_limited" {
+		t.Errorf("job %s error_code = %s, want %q", jr.Job.ID, j["error_code"], "github_rate_limited")
+	}
+	want := fmt.Sprintf(`{"reset_at":%d,"limit":60,"authenticated":false}`, reset.UnixMilli())
+	if got := string(j["rate_limit"]); got != want {
+		t.Errorf("job %s rate_limit = %s, want %s", jr.Job.ID, got, want)
+	}
+}
+
+// finishedJobJSON polls the jobs route until the named job is in recent
+// history, returning its raw JSON fields.
+func finishedJobJSON(t *testing.T, srv *httptest.Server, jobID string) map[string]json.RawMessage {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		var raw struct {
+			Recent []map[string]json.RawMessage `json:"recent"`
+		}
+		call(t, srv, http.MethodGet, "/api/tools/jobs", "", &raw)
+		for _, j := range raw.Recent {
+			var id string
+			if err := json.Unmarshal(j["id"], &id); err == nil && id == jobID {
+				return j
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("GET /api/tools/jobs: job %s never finished", jobID)
+	return nil
+}
+
+func TestAddRoute_RateLimitIsCoded(t *testing.T) {
+	reset := time.Date(2026, 10, 5, 9, 30, 0, 0, time.UTC)
+	srv := rateLimitedServer(t, reset)
+
+	var got map[string]json.RawMessage
+	body := `{"name":"r","source":"release:github/o/r"}`
+	status := call(t, srv, http.MethodPost, "/api/tools", body, &got)
+	if status != http.StatusServiceUnavailable {
+		t.Errorf("POST /api/tools %s = %d, want %d", body, status, http.StatusServiceUnavailable)
+	}
+	if code := string(got["code"]); code != `"github_rate_limited"` {
+		t.Errorf("POST /api/tools code = %s, want %q", code, "github_rate_limited")
+	}
+	want := fmt.Sprintf(`{"reset_at":%d,"limit":60,"authenticated":false}`, reset.UnixMilli())
+	if rl := string(got["rate_limit"]); rl != want {
+		t.Errorf("POST /api/tools rate_limit = %s, want %s", rl, want)
 	}
 }

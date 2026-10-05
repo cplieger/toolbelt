@@ -24,7 +24,11 @@ Downloads are capped at 1 GiB. Archive extraction refuses a symlink that points 
 
 Every fetch goes through a client that allows only public IP addresses, checked when the connection is made, and only port 443, with its own redirect policy. Transient failures are retried and rate limits are respected through [cplieger/httpx](https://github.com/cplieger/httpx).
 
-Requests to the GitHub API carry the token that `gh auth token` reports, when the GitHub CLI is installed and logged in. That token is sent to `api.github.com` only, never to a download host. Without it, GitHub allows 60 API requests an hour per IP address. When that limit runs out, the error gives the time it resets. The latest `node` and `go` versions come from nodejs.org and go.dev, so those two need no GitHub request.
+Requests to the GitHub API carry the token that your `Config.GitHubToken` function returns. The engine asks for it on each request to `api.github.com` and sends it nowhere else, never to a download host, even one an API request redirects to.
+
+The engine does not run the GitHub CLI or read `GH_TOKEN` or `GITHUB_TOKEN` to find a token. A login made with `gh auth login` does not reach the engine. To keep authenticated GitHub requests, set `Config.GitHubToken` to a function that returns your token.
+
+Without a token, GitHub allows 60 API requests an hour per IP address, shared with everything else on that address. When a limit runs out, the request fails with `ErrGitHubRateLimited`. The error says whether the request carried a token and when the limit resets. [How toolbelt works](how-it-works.md#jobs) shows how a failed job reports it. The latest `node` and `go` versions come from nodejs.org and go.dev, so those two need no GitHub request.
 
 ## The manual source
 
@@ -42,6 +46,6 @@ The apt binaries get the trusted directories added in front of the `PATH` they i
 
 ## Binaries the engine installs
 
-A binary the engine installs itself, such as `gh`, `npm`, `uv`, `cargo` or `go`, is still found through the tools tree. Publishing it there is the point, and an absolute path would name the same writable file.
+A tool the engine installs and then runs itself, `npm`, `uv`, `cargo` or `go`, is still found through the tools tree. Publishing it there is the point, and an absolute path would name the same writable file.
 
 `VerifyRootIntegrity` limits which other accounts can reach that tree, as [Configuration](configuration.md#root-integrity-check) describes. It cannot separate the engine from a shell command running beside it as the same user. On a volume where someone else holds a shell as that user, those binaries are theirs to replace. The engine is built for a volume with one user.

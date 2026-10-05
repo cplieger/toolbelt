@@ -55,6 +55,14 @@ type Config struct {
 	// OnJobOutput, when non-nil, receives coalesced batches of a running
 	// job's output lines (~150 ms cadence).
 	OnJobOutput func(jobID string, lines []string)
+	// GitHubToken, when non-nil, is called once per api.github.com request
+	// (version checks, release listings) and for no other host, so a rotated
+	// token reaches the next request. "" sends that request anonymously. An
+	// error fails it with no anonymous retry; where the engine returns that
+	// failure (Add, for example), errors.Is and errors.As reach the error.
+	// Nil means every GitHub API request is anonymous. Must be safe for
+	// concurrent use.
+	GitHubToken func(ctx context.Context) (string, error)
 	// Logger receives engine-level log lines. Nil means slog.Default().
 	Logger *slog.Logger
 	// Seed is the manifest written when none exists (fresh volume).
@@ -177,14 +185,15 @@ func (t urlPolicyTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // and version checks go to registry-defined public URLs: validate every
 // initial target and redirect before SafeTransport enforces public
 // resolved and connected IPs at the dial boundary.
-func newEngineClient(tokens *githubTokenCache) *http.Client {
+func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 	return &http.Client{
 		Transport: githubAPITransport{
 			next: urlPolicyTransport{
 				next:   ssrf.SafeTransport(ssrf.WithAllowedPorts(443)),
 				policy: ssrf.NewURLPolicy(),
 			},
-			tokens: tokens,
+			token:  token,
+			limits: &rateLimitGate{},
 		},
 		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
 		// Per-attempt bound: retry loops (httpx.GetBytes / httpx.Do) sit
@@ -228,7 +237,7 @@ func New(cfg *Config) (*Engine, error) {
 	if err := verifyConfigWritable(log, cfg.ConfigDir); err != nil {
 		return nil, fmt.Errorf("toolbelt: %w", err)
 	}
-	client := newEngineClient(&githubTokenCache{})
+	client := newEngineClient(cfg.GitHubToken)
 	e := &Engine{
 		store:           st,
 		refresh:         cfg.Refresh,
@@ -284,15 +293,14 @@ func (e *Engine) Close() {
 	e.queue.Close()
 }
 
-// DefaultSeed returns the shared starter manifest: the officially
-// supported language servers for Go, TypeScript, and Python plus the
-// GitHub CLI, all disabled. Nothing downloads until enabled; install
-// knowledge hydrates from the catalog at enable time.
+// DefaultSeed returns a fresh copy of the shared starter manifest: the
+// officially supported language servers for Go, TypeScript, Python and
+// Rust, all disabled. Nothing downloads until enabled; install knowledge
+// hydrates from the catalog at enable time.
 //
 // Backend runtimes and required packages are deliberately NOT seeded:
 // the engine adopts a missing dependency at install time, so a seeded
-// row would only be a second place for its version to drift. Returns a
-// fresh copy on every call.
+// row would only be a second place for its version to drift.
 func DefaultSeed() *Manifest {
 	return &Manifest{
 		Version: ManifestVersion,
@@ -308,7 +316,6 @@ func DefaultSeed() *Manifest {
 			"typescript-language-server": {Disabled: true},
 			"pyright":                    {Disabled: true},
 			"rust-analyzer":              {Disabled: true},
-			"gh":                         {Disabled: true},
 		},
 	}
 }

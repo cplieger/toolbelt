@@ -56,13 +56,36 @@ const (
 	JobKindCatalogRefresh = "catalog-refresh" // fetch + verify + swap the published catalog
 )
 
+// ErrorCodeGitHubRateLimited is Job.ErrorCode for a job GitHub's API rate
+// limit failed; Job.RateLimit then carries the detail.
+const ErrorCodeGitHubRateLimited = "github_rate_limited"
+
+// GitHubRateLimit is the wire form of a [GitHubRateLimitError].
+type GitHubRateLimit struct {
+	// ResetAt is when GitHub allows the next request, in Unix
+	// milliseconds: a minute after the refusal for a secondary limit
+	// that names no time, absent for a primary one that names none.
+	ResetAt int64 `json:"reset_at,omitempty"`
+	// Limit is X-RateLimit-Limit, absent when GitHub did not send it.
+	Limit         int  `json:"limit,omitempty"`
+	Authenticated bool `json:"authenticated"`
+	Secondary     bool `json:"secondary,omitempty"`
+}
+
 // Job is one queued/running/finished unit of engine work.
 type Job struct {
-	ID    string   `json:"id"`
-	Kind  string   `json:"kind"`
-	State string   `json:"state"`
-	Error string   `json:"error,omitempty"`
-	Names []string `json:"names,omitempty"`
+	// failure is the error that failed the job, for Err.
+	failure error
+	// RateLimit is set alongside ErrorCode github_rate_limited.
+	RateLimit *GitHubRateLimit `json:"rate_limit,omitempty"`
+	ID        string           `json:"id"`
+	Kind      string           `json:"kind"`
+	State     string           `json:"state"`
+	Error     string           `json:"error,omitempty"`
+	// ErrorCode classifies Error for a client; empty when the failure has
+	// no code (ErrorCodeGitHubRateLimited is the one defined).
+	ErrorCode string   `json:"error_code,omitempty"`
+	Names     []string `json:"names,omitempty"`
 	// CancelCause names who cancelled the job (State JobCancelled only).
 	// Additive on the wire: omitted whenever the cause is unknown, so a
 	// consumer that ignores the field sees exactly the payload it saw
@@ -77,6 +100,12 @@ type Job struct {
 	StartedAt int64 `json:"started_at,omitempty"`
 	EndedAt   int64 `json:"ended_at,omitempty"`
 }
+
+// Err returns the error that failed the job: nil unless State is JobFailed,
+// and nil for a timeout, which Error alone describes. errors.As reaches a
+// [*GitHubRateLimitError] through it. Err is not on the wire; a client reads
+// ErrorCode and RateLimit.
+func (j *Job) Err() error { return j.failure }
 
 // ToolInfo is one tool row in Inventory: the manifest entry joined with
 // the engine's install state.

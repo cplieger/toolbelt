@@ -706,7 +706,7 @@ func TestCatalogSwapIsRaceSafe(t *testing.T) {
 // non-443, and private targets before any dial, and the redirect
 // policy must accept the GitHub release-download hop chain.
 func TestEngineClientPolicyComposition(t *testing.T) {
-	client := newEngineClient(&githubTokenCache{})
+	client := newEngineClient(nil)
 	// A per-attempt timeout of zero is no timeout at all: a stalled
 	// release download would hold the single-flight job worker (and any
 	// boot gate waiting on it) forever.

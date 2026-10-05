@@ -1072,6 +1072,9 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 		return err
 	}
 	if final.State != JobDone {
+		if cause := final.Err(); cause != nil {
+			return fmt.Errorf("install %s: %w", name, cause)
+		}
 		return fmt.Errorf("install %s: %s", name, orDefault(final.Error, final.State))
 	}
 	return nil
@@ -1185,7 +1188,7 @@ func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output 
 	for _, n := range p.enabled {
 		output(fmt.Sprintf("enabling %s, required by %s", n, strings.Join(names, ", ")))
 	}
-	failed, firstErr := e.recordUnplanned(m, p.unplanned, output)
+	fails := e.recordUnplanned(m, p.unplanned, output)
 	blockers := installBlockers{}
 	// Resolved once for the whole plan: a catalog swap mid-job must not
 	// change what counts as a dependency edge partway through.
@@ -1200,30 +1203,47 @@ func (e *Engine) runInstall(ctx context.Context, j *job, names []string, output 
 			continue
 		}
 		if err := e.installTool(ctx, n, output); err != nil {
-			failed = append(failed, n)
-			if firstErr == nil {
-				firstErr = err
-			}
+			fails.add(n, err)
 			blockers[n] = blocker{err: err}
 			output(fmt.Sprintf("ERROR %s: %v", n, err))
 		}
 	}
-	switch len(failed) {
+	return fails.err()
+}
+
+// installError is the tools an install job could not install, each with
+// its cause, in order.
+type installError struct {
+	names []string
+	errs  []error
+}
+
+func (f *installError) add(name string, err error) {
+	f.names = append(f.names, name)
+	f.errs = append(f.errs, err)
+}
+
+// err is the job's error: nil, one tool's cause, or every cause behind the
+// name list, so errors.As reaches any of them.
+func (f *installError) err() error {
+	switch len(f.names) {
 	case 0:
 		return nil
 	case 1:
-		return fmt.Errorf("%s: %w", failed[0], firstErr)
+		return fmt.Errorf("%s: %w", f.names[0], f.errs[0])
 	default:
-		return fmt.Errorf("failed: %s", strings.Join(failed, ", "))
+		return f
 	}
 }
 
-func (e *Engine) recordUnplanned(m *Manifest, unplanned []planFailure, output func(string)) (failed []string, firstErr error) {
+func (f *installError) Error() string { return "failed: " + strings.Join(f.names, ", ") }
+
+func (f *installError) Unwrap() []error { return f.errs }
+
+func (e *Engine) recordUnplanned(m *Manifest, unplanned []planFailure, output func(string)) *installError {
+	fails := &installError{}
 	for _, u := range unplanned {
-		failed = append(failed, u.name)
-		if firstErr == nil {
-			firstErr = u.err
-		}
+		fails.add(u.name, u.err)
 		output(fmt.Sprintf("ERROR %s: %v", u.name, u.err))
 		rows := u.stranded
 		if !slices.Contains(rows, u.name) {
@@ -1238,7 +1258,7 @@ func (e *Engine) recordUnplanned(m *Manifest, unplanned []planFailure, output fu
 			}
 		}
 	}
-	return failed, firstErr
+	return fails
 }
 
 type dependencyError struct {
@@ -1736,28 +1756,52 @@ func (e *Engine) runUpdate(ctx context.Context, j *job, output func(string)) err
 		}
 		slices.Sort(targets)
 	}
-	explicit := len(names) > 0
-	var bumped []string
-	for _, n := range targets {
-		did, err := e.updateOne(ctx, m, n, explicit, output)
-		if err != nil {
-			return err
-		}
-		if did {
-			bumped = append(bumped, n)
-		}
+	bumped, limited, err := e.checkUpdates(ctx, m, targets, len(names) > 0, output)
+	if err != nil {
+		return err
 	}
 	if len(bumped) == 0 {
+		if limited != nil {
+			return limited
+		}
 		output("everything up to date")
 		return nil
 	}
-	return e.runInstall(ctx, j, bumped, output)
+	if err := e.runInstall(ctx, j, bumped, output); err != nil {
+		if limited != nil {
+			return errors.Join(err, limited)
+		}
+		return err
+	}
+	return limited
+}
+
+// checkUpdates runs updateOne over targets, returning the bumped names and
+// the first rate-limited version check. That limit does not stop the walk:
+// the job still checks and installs the rest, then fails on it rather than
+// reporting the tool up to date.
+func (e *Engine) checkUpdates(ctx context.Context, m *Manifest, targets []string, explicit bool, output func(string)) (bumped []string, limited, err error) {
+	for _, n := range targets {
+		did, err := e.updateOne(ctx, m, n, explicit, output)
+		switch {
+		case errors.Is(err, ErrGitHubRateLimited):
+			if limited == nil {
+				limited = fmt.Errorf("%s: version check: %w", n, err)
+			}
+		case err != nil:
+			return nil, nil, err
+		case did:
+			bumped = append(bumped, n)
+		}
+	}
+	return bumped, limited, nil
 }
 
 // updateOne checks one tool for a newer upstream version and records the
 // bump in the manifest, reporting whether it changed. Disabled templates
 // stay offline; pinned tools are skipped unless explicitly named; manual
-// tools have no upstream source.
+// tools have no upstream source. A failed version check is skipped, except
+// a GitHub rate limit, which it returns.
 func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit bool, output func(string)) (bool, error) {
 	t, ok := m.Tools[n]
 	if !ok || t.Disabled || t.Source == SourceManual || t.Source == "" {
@@ -1770,6 +1814,9 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
 	if err != nil {
 		output(fmt.Sprintf("%s: version check failed: %v", n, err))
+		if errors.Is(err, ErrGitHubRateLimited) {
+			return false, err
+		}
 		return false, nil
 	}
 	if latest == t.Version {

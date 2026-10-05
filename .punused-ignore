@@ -116,10 +116,27 @@ method (*RootIntegrityError).Is
 # errors.Unwrap contract: (*dependencyError).Unwrap (engine.go) is the method
 # errors.Is and errors.As reach through their `interface{ Unwrap() error }`
 # assertion, the same runtime dispatch as the two entries above. It keeps the
-# dependency's own cause (a *githubRateLimitError, a context cancellation)
+# dependency's own cause (a *GitHubRateLimitError, a context cancellation)
 # reachable from the dependent's error, which the fmt.Errorf("%w") it replaced
 # also did.
 method (*dependencyError).Unwrap
+#
+# errors.Is contract, third instance: (*GitHubRateLimitError).Is (githubapi.go)
+# makes `errors.Is(err, ErrGitHubRateLimited)` match the rate-limit refusal the
+# GitHub transport returns. The engine's own update path branches on it
+# (engine.go checkUpdates, updateOne), and a consumer uses it to tell a rate
+# limit from any other failed job. Same runtime dispatch as the two entries
+# above; test-covered in githubapi_test.go TestGitHubAPITransport_RateLimitRefusalIsTyped
+# and TestUpdateJob_RateLimitedVersionCheckFailsTheJob.
+method (*GitHubRateLimitError).Is
+#
+# errors.Unwrap contract, multi-error form: (*installError).Unwrap (engine.go)
+# returns every failed tool's cause through the `interface{ Unwrap() []error }`
+# assertion errors.Is and errors.As make. It is what keeps a
+# *GitHubRateLimitError reachable from a job that failed two or more tools,
+# whose message is only "failed: a, b". Test-covered in githubapi_test.go
+# TestReconcileJob_RateLimitSurvivesSeveralFailures.
+method (*installError).Unwrap
 #
 # The change that added the above introduced four other exported symbols with no
 # entry here, deliberately: ErrRootIntegrity, RootIntegrityError,

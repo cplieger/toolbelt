@@ -41,6 +41,9 @@ type job struct {
 	covers []string
 	state  string
 	err    string
+	// failure is the error a failed job ended on: nil for a cancellation
+	// or a timeout, which err alone describes.
+	failure error
 	// cause records WHO cancelled the job. It is written at the
 	// cancellation site BEFORE the job's context is cancelled, so the
 	// finalizer in runOne can attribute a cancellation it only observes
@@ -95,6 +98,11 @@ func (j *job) view(withTail bool) *Job {
 		Error:       j.err,
 		CancelCause: j.cause,
 		CreatedAt:   j.created.UnixMilli(),
+		failure:     j.failure,
+	}
+	if rl, ok := errors.AsType[*GitHubRateLimitError](j.failure); ok {
+		w := rl.Wire()
+		v.ErrorCode, v.RateLimit = ErrorCodeGitHubRateLimited, &w
 	}
 	if !j.started.IsZero() {
 		v.StartedAt = j.started.UnixMilli()
@@ -474,6 +482,7 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 	default:
 		j.state = JobFailed
 		j.err = err.Error()
+		j.failure = err
 		q.log.Warn("toolbelt: job failed", "job", j.id, "kind", j.kind, "error", err)
 	}
 	if j.state != JobCancelled {

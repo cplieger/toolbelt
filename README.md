@@ -30,11 +30,15 @@ engine, err := toolbelt.New(&toolbelt.Config{
     ConfigDir:   "/config",                    // tools.json and tools-state.json
     ToolsDir:    "/config/tools",              // bin/, opt/, npm/, python/
     CatalogPath: "/opt/app/tool-catalog.json", // the catalog baked into your image
-    Seed:        toolbelt.DefaultSeed(),       // five disabled templates
+    Seed:        toolbelt.DefaultSeed(),       // four disabled templates
     Refresh: &toolbelt.CatalogRefresh{         // optional: fetch newer catalogs
         URL:      toolbelt.DefaultCatalogURL,
         Interval: 24 * time.Hour, // 0 = on demand only
-        Require:  []string{"gopls", "gh"},
+        Require:  []string{"node", "rust-analyzer"},
+    },
+    // Optional: a token raises GitHub's limit on version checks.
+    GitHubToken: func(ctx context.Context) (string, error) {
+        return os.Getenv("GITHUB_TOKEN"), nil
     },
 })
 if err != nil {
@@ -59,14 +63,16 @@ disabled := true
 job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &disabled})
 ```
 
-`DefaultSeed` writes five disabled templates on a fresh volume: `gopls`, `typescript-language-server`, `pyright`, `rust-analyzer` and `gh`. Nothing downloads until one is enabled. Installed tools are linked into `bin/` under `ToolsDir`, so put that directory on the `PATH` of whatever runs them. [The catalog](docs/catalog.md) explains when the engine fetches a newer catalog. To serve the engine over HTTP, mount `httpapi.Handler(engine, "/api/tools")` behind your own authentication. [The REST handler](docs/http-api.md) lists its routes.
+`DefaultSeed` writes four disabled templates on a fresh volume: `gopls`, `typescript-language-server`, `pyright` and `rust-analyzer`. Nothing downloads until one is enabled. Installed tools are linked into `bin/` under `ToolsDir`, so put that directory on the `PATH` of whatever runs them. [The catalog](docs/catalog.md) explains when the engine fetches a newer catalog. To serve the engine over HTTP, mount `httpapi.Handler(engine, "/api/tools")` behind your own authentication. [The REST handler](docs/http-api.md) lists its routes.
+
+Without `GitHubToken`, GitHub API requests go without a token, and GitHub allows 60 of them an hour per IP address. The engine does not use a `gh auth login` session or a `GH_TOKEN` variable, so set `GitHubToken` to keep authenticated GitHub requests.
 
 ## API
 
 - `New` and `Close` start and stop an engine. `Inventory`, `Search` and `SearchWithCounts` read the manifest, the install state and the catalog.
 - `Add`, `Patch`, `Install`, `Update`, `Remove`, `RemoveWithDependents` and `Reconcile` change the manifest or the disk, each through a job. `EnsureInstalled` installs a tool and waits for it.
 - `Jobs`, `Wait` and `CancelJob` follow the job queue. `RefreshCatalog` and `CatalogInfo` refresh and describe the catalog.
-- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured` and `ErrRootIntegrity` match with `errors.Is`.
+- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
 - `httpapi.Handler` serves the engine over HTTP, and `cmd/toolcatalog` compiles and checks a catalog.
 
 The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/toolbelt/v3).
