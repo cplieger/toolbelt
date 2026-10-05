@@ -1,166 +1,26 @@
 # Contributing to toolbelt
 
-Notes on the reconciler model, the invariants that make hand-edited
-manifests safe, and the test suite. The three-state tool lifecycle and
-the never-touch-unmanaged-files rule are the point of the library, so
-most of this guide is about preserving them.
+The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md) for commits, releases, synced files and checks apply here.
 
-## What the library is
+## Rules
 
-`toolbelt` provisions developer tools onto a persistent volume from a
-declarative manifest, with install knowledge compiled into a read-only
-catalog and execution serialized through a single-flight job queue. Two
-consumers drive its shape: a UI-driven app (settings panel, SSE job
-streaming via the `Config` callbacks) and a headless app (config-file
-toggles, a loopback REST projection, a boot gate on `Reconcile`).
+- Engines of any version may read the catalog [tool-catalog](https://github.com/cplieger/tool-catalog) publishes, from an image or a runtime fetch. A format change may add a field or top-level key. Renaming, removing or redefining one makes older engines misread or refuse the catalog.
+- Only `cmd/toolcatalog` imports the TOML and YAML parsers. Keep them out of the root and `httpapi` packages, even though `go.mod` lists both. An import there adds them to every consumer's build.
+- When the queue refuses a job, the engine call that wrote the manifest for it undoes the write, as `Add`, `Patch` and `Remove` do. Without the undo, the manifest records a state no job will bring about.
+- A new sentinel error that an `httpapi` route returns needs a case in `writeEngineError`, or the route answers 400 `bad_request`. Add it under "Replies and refusals" in `docs/http-api.md` and to the README's API list too.
 
-## Load-bearing invariants
+## Checks
 
-- **The manifest is intent; presence means enabled.** `disabled: true`
-  is the only template marker. Do not add an `enabled` field: absence of
-  a flag must keep meaning "install this".
-- **The reconciler converges both ways but never touches unmanaged
-  files.** Uninstalls (disable, remove, reconcile-extras) act only on
-  the engine-owned footprint recorded in `tools-state.json`
-  (`ToolStatus.owned`). A same-name binary the engine never installed is
-  invisible to cleanup paths, deliberately: volumes carry user-placed
-  binaries that must keep working.
-- **Hydration runs before any probe or plan.** Every install/update/
-  reconcile job first completes sparse entries (no `source`) from the
-  catalog, under the store lock. Reordering this wedges volumes with
-  pre-existing binaries: an unmanaged binary satisfies the probe, the
-  entry stays source-less, and the update path fails on an empty source
-  forever. `TestHydration_LegacyBinaryDoesNotWedge` pins this.
-- **Disabled entries stay offline.** Static catalog fields only; no
-  version resolution, no fetches. `TestHydration_DisabledStaysOffline`
-  pins it with a failing transport.
-- **A version's legal alphabet belongs to its source, not to the
-  engine.** `sourceVersionGrammar` maps each source kind to what its
-  producer can emit: a forge tag or registry semver for most, a Debian
-  version for `apt:` (epoch and tilde included), a PEP 440 version for
-  `pip:`. A new source kind must declare one;
-  `TestSourceVersionGrammarIsTotal` fails otherwise. The separate
-  constraint, that a version is usable as a path component, belongs to
-  the sources that build a path and is asserted where the path is built
-  (`extractAndSwap`) rather than folded into every alphabet.
-- **Install is policy-neutral.** `Install` (the retry verb) refuses
-  disabled templates with `ErrDisabled`; enabling is an explicit
-  `Patch{Disabled: false}`. The one sanctioned exception is
-  `EnsureInstalled`, the programmatic "a product action needs this
-  binary now" path, which enables and installs.
-- **Checksum handling fails closed.** A declared checksum source that
-  cannot be resolved, fetched, or matched aborts the install; never
-  downgrade to unverified. `findChecksum` is algorithm-aware (BSD
-  multi-algorithm tables, coreutils tables, bare digests); a format it
-  cannot attribute confidently returns nothing and the install refuses.
-- **The store is single-writer, in-process.** Every read-modify-write
-  runs under the store mutex, and files are re-read per operation so
-  out-of-band hand edits are picked up. Never link the library from a
-  second process against the same data dir.
-- **A fetched catalog never degrades the engine.** The runtime refresh
-  (`catalogrefresh.go`) accepts a fetched catalog only after the full
-  pipeline passes: parse, consumer overlays, the structural entry
-  floor, and the consumer's `Require` verification; any failure keeps
-  the current catalog and fails only the refresh job. The in-memory
-  swap is an `atomic.Pointer` store; readers snapshot via `cat()` and
-  never mix two catalogs mid-operation. The cache file persists the
-  RAW fetched bytes (overlays re-apply at load), so the cache stays a
-  faithful copy of the published artifact.
-- **Job callbacks must not block.** `OnJobChanged` fires under the queue
-  lock so transitions arrive in strict order; consumers fan out through
-  their own non-blocking buffer (an SSE ring, a channel).
+This repo has no tests for `cmd/toolcatalog`, so CI never compiles a catalog.
 
-## Layout
-
-Flat root package: `toolbelt.go` (Config, New, DefaultSeed),
-`manifest.go` (store), `engine.go` (reconciler + public API), `jobs.go`
-(queue), `install.go` (six backends), `versions.go` (latest-version
-resolution via httpx), `aqua.go` (registry-definition evaluator),
-`extract.go` (archive handling), `catalog.go` (reader + VerifyCatalog),
-`wire.go` (result shapes). `httpapi/` is the REST projection built on
-`webhttp` primitives. `cmd/toolcatalog/` is the catalog compiler command
-(package main in this module; it shares the root's schema types and
-verification semantics by construction and embeds the base overlay set).
-Its TOML/YAML registry parsers stay out of consumer builds via module
-graph pruning; they cost consumers a few `go.sum` metadata lines only.
-
-## Local development
-
-The module targets the Go version pinned in `go.mod`. Use that toolchain
-or newer.
+After you change the compiler or the catalog types it shares with the engine, run the tool-catalog dry run on your working tree. From a [tool-catalog](https://github.com/cplieger/tool-catalog) checkout next to this one:
 
 ```sh
-go build ./...
-go test -count=1 ./...
-go test -race -count=1 ./...
+TOOLCATALOG_VERSION=v3.0.0 TOOLCATALOG_RUN='go run -C ../toolbelt ./cmd/toolcatalog' DRY_RUN=1 bash scripts/publish.sh
 ```
 
-`cmd/toolcatalog` is part of this module: `go build ./...` covers it,
-and `go run ./cmd/toolcatalog` runs your working tree's compiler
-directly (no go.work, no cross-module setup).
+It downloads the pinned mise and aqua registries, compiles them, checks the engine's required tools and writes `./tool-catalog.json`. `TOOLCATALOG_VERSION` only labels the result. It needs `curl`, `jq` and `tar`.
 
-### Linting and formatting
+## Releases
 
-Lint config lives in `.golangci.yaml` (synced from `cplieger/ci`; change
-it upstream). Formatting is `gofumpt` plus `gci` import grouping;
-`golangci-lint run` reports unformatted files as issues, so format
-before pushing.
-
-```sh
-golangci-lint run ./...
-golangci-lint fmt
-```
-
-### Mutation testing
-
-`.gremlins.yaml` configures [Gremlins](https://gremlins.dev) mutation
-testing (synced from `cplieger/ci`). Run it locally to confirm new tests
-actually kill mutants:
-
-```sh
-gremlins unleash .
-```
-
-## Test suite conventions
-
-`go test -count=1 ./...` from the repo root. The suite runs real
-installs against `httptest` servers and temp dirs (manual bash installs,
-aqua artifact downloads with checksum verification, symlink-escape
-rejection); no mocks. Offline assertions use a failing transport: if a
-path that must be network-free fetches anything, the test fails. Match
-the file to the unit:
-
-- `engine_test.go`: the behavioral suite: add/patch/remove,
-  dependents cascade, aqua end-to-end (download → verify → extract →
-  link → prune), queue-full rollbacks, symlink-escape rejection.
-- `reconcile_test.go`: the reconciler state machine, hydration
-  ordering, seeds, templates, checksum-file parsing.
-- `aqua_test.go` / `versions_test.go`: evaluator fixtures (real
-  registry files, JSON-converted so the root module needs no YAML
-  dependency) and resolver behavior.
-- `httpapi/httpapi_test.go`: route contract: status codes, the
-  webhttp error envelope, toggle transitions, the dependents 409.
-
-When adding an engine mutation, cover: the happy-path job, the
-queue-full rollback (the manifest must never claim state no job will
-realize), and the sentinel error mapping in `httpapi`. The
-`cmd/toolcatalog` compiler is exercised against real registry checkouts
-in its consumers' image builds (the `verify` gate), not unit-mocked here.
-
-## Commits and PRs
-
-Branch from `main`, keep changes focused with tests, and open a PR. This
-account uses [Conventional Commits](https://www.conventionalcommits.org/)
-parsed by git-cliff (`cliff.toml`), so the commit type drives the version
-bump: `feat:`, `fix:`, `sec:`, and `chore:`/`docs:`/`refactor:`/`test:`
-(no release). Write the subject as the changelog line a consumer would
-read. `cmd/toolcatalog` commits version with the module like any other
-package (use the `feat(toolcatalog):`/`fix(toolcatalog):` scope).
-
-## Conduct & security
-
-By participating you agree to the org-wide
-[Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
-Report security issues through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md),
-never in a public issue.
+`cmd/toolcatalog` releases with the module under the same tag, and its commits take the `toolcatalog` scope, as in `fix(toolcatalog):`. A compiler change reaches the published catalog only once tool-catalog's pinned `TOOLCATALOG_VERSION` moves to that tag.
