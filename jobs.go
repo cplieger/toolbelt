@@ -429,7 +429,7 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 	// flushed closes after the ticker goroutine's FINAL flush() returns;
 	// runOne waits on it before publishing terminal state, or a consumer
 	// could see tool_job_output arrive after tool_job_changed said the
-	// job was done (go-rulebook C20). flush() takes only outMu, never
+	// job was done. flush() takes only outMu, never
 	// q.mu, so waiting here cannot deadlock against the finalize.
 	flushed := make(chan struct{})
 	go func() {

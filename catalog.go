@@ -357,7 +357,7 @@ func (c *Catalog) Featured() []CatalogEntry {
 
 // ParseRequireList extracts tool names from a requirements list: one
 // name per line, # comments and blank lines ignored — the shape
-// required-tools.txt files use across the fleet (cmd/toolcatalog verify
+// required-tools.txt files use across the cplieger repos (cmd/toolcatalog verify
 // reads the same format). Shared here so consumers embedding their list
 // for CatalogRefresh.Require parse it identically to the build gate.
 func ParseRequireList(raw string) []string {

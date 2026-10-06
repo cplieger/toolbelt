@@ -1102,16 +1102,11 @@ func cancelActiveContext(t *testing.T, e *Engine, _, _ *Job) {
 
 // TestRunOne_FlushesOutputBeforeTheTerminalState pins the ordering rule a
 // consumer's UI depends on: a job's LAST output batch reaches OnJobOutput
-// BEFORE the OnJobChanged transition that says the job finished
-// (go-rulebook C20).
-//
-// The window it closes is narrow and real. Output is coalesced by a ticker
-// goroutine, and the line emitted in the job's final moments has no tick
-// left to carry it — only that goroutine's closing flush. Signalling the
-// goroutine and finalizing without waiting for it left the flush racing the
-// terminal notification, so marotte's tools panel could render a finished
-// job and then receive more of its output. The queue is driven directly
-// here because the ordering is the queue's, not the engine's.
+// BEFORE the OnJobChanged transition that says the job finished. The final
+// line has no tick left to carry it, only the ticker goroutine's closing
+// flush, so finalizing without waiting for that flush races the terminal
+// notification. The queue is driven directly because the ordering is the
+// queue's, not the engine's.
 func TestRunOne_FlushesOutputBeforeTheTerminalState(t *testing.T) {
 	var mu sync.Mutex
 	var seq []string

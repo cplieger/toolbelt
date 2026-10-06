@@ -291,8 +291,8 @@ func verifyConfigWritable(log *slog.Logger, configDir string) error {
 // copy of the parsed result (Tool values are copied by value; callers must
 // not mutate maps/slices inside them). It is a verb because it costs real
 // work per call — the lock, a file read and a JSON decode — and a caller
-// that treated it as a field access would pay for all three in a loop
-// (go-rulebook C21). Named for the file it loads, beside MutateManifest.
+// that treated it as a field access would pay for all three in a loop.
+// Named for the file it loads, beside MutateManifest.
 func (s *store) LoadManifest() (*Manifest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

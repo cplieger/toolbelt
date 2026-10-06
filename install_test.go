@@ -55,7 +55,7 @@ func setgidParent(t *testing.T) string {
 // write. The comparisons against it below are written out at each site rather
 // than performed inside a shared assertion helper, so a failure names the
 // directory that broke and the sibling directories in the same test are still
-// checked (go-rulebook C18).
+// checked.
 const managedDirStoredMode = os.ModeDir | managedDirMode
 
 // storedDirMode returns dir's stored mode for comparison at the call

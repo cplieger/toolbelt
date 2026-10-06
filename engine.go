@@ -1008,25 +1008,13 @@ func (e *Engine) rollbackRemoval(removed map[string]Tool) {
 }
 
 // Reconcile enqueues the convergence job: install missing enabled
-// entries, uninstall the engine-owned footprint of disabled ones and
-// of orphaned state rows (a manifest row deleted without its uninstall
-// job completing). ReconcileFull additionally enqueues an update pass
-// over unpinned entries.
+// entries, uninstall the engine-owned footprint of disabled ones and of
+// orphaned state rows. ReconcileFull also enqueues an update pass over
+// unpinned entries.
 //
-// enqueued reports whether there was anything to converge. It is false —
-// with a nil job and a nil error — when the manifest is empty and no
-// state row exists, which is a normal answer on a fresh volume and not a
-// failure. The job is nil in exactly that case, so a caller that wants to
-// gate readiness must branch on enqueued before touching it:
-//
-//	jv, enqueued, err := e.Reconcile(toolbelt.ReconcileFull)
-//	if err != nil { ... }
-//	if enqueued { e.Wait(ctx, jv.ID) }   // gate on convergence
-//
-// The found-style triple is deliberate (go-rulebook C15): absence is a
-// normal answer, so it does not travel as an error, but a caller cannot
-// reach the job without receiving the flag that says whether there is
-// one.
+// enqueued is false, with a nil job and a nil error, when the manifest is
+// empty and no state row exists: a normal answer on a fresh volume, not a
+// failure. A caller gating readiness must branch on enqueued first.
 func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err error) {
 	m, err := e.store.LoadManifest()
 	if err != nil {
