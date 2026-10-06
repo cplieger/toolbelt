@@ -305,11 +305,11 @@ func DefaultSeed() *Manifest {
 	return &Manifest{
 		Version: ManifestVersion,
 		Comment: []string{
-			"Tool templates. Entries with \"disabled\": true are preinstalled examples:",
-			"enable one to install it (set \"disabled\": false, or use the tools API/UI),",
-			"then restart or trigger a reconcile. Add more tools by name; install",
-			"knowledge (source, dependencies, version) comes from the built-in",
-			"catalog.",
+			"Tool templates. Entries with \"disabled\": true are preinstalled examples.",
+			"To install one, set \"disabled\": false or use the tools API or UI,",
+			"then restart or trigger a reconcile. Add more tools by name. Install",
+			"knowledge, meaning the source, dependencies and version, comes from the",
+			"built-in catalog.",
 		},
 		Tools: map[string]Tool{
 			"gopls":                      {Disabled: true},
