@@ -65,10 +65,9 @@ const (
 // env variable — "24h", "off", or "" when the variable is unset.
 //
 // It is a distinct type from [RefreshEnvName] because ParseCatalogRefresh
-// takes both and the two used to be adjacent strings: transposed, the
-// variable's NAME was parsed as a duration, failed, and silently fell
-// back to DefaultCatalogRefresh while the warning named the value. A swap
-// is now a compile error (go-rulebook C16).
+// takes both: as two adjacent strings, a transposed call would parse the
+// variable's NAME as a duration and silently fall back to
+// DefaultCatalogRefresh while the warning named the value.
 type RefreshEnv string
 
 // RefreshEnvName is the NAME of that env variable ("TOOLS_CATALOG_REFRESH").

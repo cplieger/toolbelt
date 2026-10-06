@@ -799,8 +799,8 @@ func TestParseCatalogRefresh(t *testing.T) {
 }
 
 // TestParseCatalogRefresh_NameIsNotParsed pins the reason the two
-// arguments carry distinct types (go-rulebook C16): the variable's NAME is
-// never read as a duration. A transposed call no longer compiles, so the
+// arguments carry distinct types: the variable's NAME is
+// never read as a duration. A transposed call does not compile, so the
 // only remaining way to state the property is that a name-shaped VALUE
 // falls back rather than being interpreted.
 func TestParseCatalogRefresh_NameIsNotParsed(t *testing.T) {
