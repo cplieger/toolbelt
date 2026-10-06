@@ -163,23 +163,24 @@ func TestAptGetInstall_RetriesOnlyTheArchivesLock(t *testing.T) {
 	// message after it is only seen if the whole output is read.
 	const longLine = "s=x; i=0; while [ $i -lt 17 ]; do s=$s$s; i=$((i+1)); done; echo \"$s\"\n"
 	cases := map[string]struct {
-		script   string
-		wantErr  bool
-		wantRuns int
-		minWait  time.Duration
-		wantLine string
+		script      string
+		wantLine    string
+		wantErrText string
+		minWait     time.Duration
+		wantRuns    int
+		wantErr     bool
 	}{
 		"the archives lock is retried up to the bound": {
 			script: "echo '" + lockMsg + "'\nexit 100\n", wantErr: true, wantRuns: 3, minWait: 6 * time.Second,
-			wantLine: lockMsg,
+			wantLine: lockMsg, wantErrText: lockMsg,
 		},
 		"a lock message after a long line is still recognised": {
 			script: longLine + "echo '" + lockMsg + "'\nexit 100\n", wantErr: true, wantRuns: 3, minWait: 6 * time.Second,
-			wantLine: lockMsg,
+			wantLine: lockMsg, wantErrText: lockMsg,
 		},
 		"any other failure is reported at once": {
 			script: "echo 'E: Unable to locate package jq'\nexit 100\n", wantErr: true, wantRuns: 1,
-			wantLine: "E: Unable to locate package jq",
+			wantLine: "E: Unable to locate package jq", wantErrText: "E: Unable to locate package jq",
 		},
 		"a success runs once": {
 			script: "echo\necho '  Setting up jq (1.7.1-3) ...'\n", wantRuns: 1,
@@ -200,6 +201,9 @@ func TestAptGetInstall_RetriesOnlyTheArchivesLock(t *testing.T) {
 
 				if (err != nil) != tc.wantErr {
 					t.Errorf("aptGetInstall = %v, want error %v", err, tc.wantErr)
+				}
+				if tc.wantErrText != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrText)) {
+					t.Errorf("aptGetInstall error = %v, want it to carry %q", err, tc.wantErrText)
 				}
 				if waited < tc.minWait {
 					t.Errorf("aptGetInstall waited %s across its attempts, want at least %s", waited, tc.minWait)

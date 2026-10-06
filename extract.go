@@ -225,11 +225,7 @@ func decompressTo(ctx context.Context, out, name string, args ...string) error {
 		runErr = cerr
 	}
 	if runErr != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if len(msg) > 500 {
-			msg = msg[:500]
-		}
-		return fmt.Errorf("%s failed: %w (%s)", name, runErr, msg)
+		return commandFailed(name, runErr, stderr.String())
 	}
 	return nil
 }
@@ -243,11 +239,7 @@ func runQuiet(ctx context.Context, name string, args ...string) error {
 	cmd.Env = systemEnvPATH()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if len(msg) > 500 {
-			msg = msg[:500]
-		}
-		return fmt.Errorf("%s failed: %w (%s)", name, err, msg)
+		return commandFailed(name, err, string(out))
 	}
 	return nil
 }

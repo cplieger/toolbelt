@@ -387,3 +387,48 @@ func TestInstall_PlannedRootPersistsItsStagedDependencies(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallOrder_SystemPackagesFirst(t *testing.T) {
+	tools := map[string]Tool{
+		"gcc":       {Source: "apt:gcc", Version: "4:14.2.0-1"},
+		"libc6-dev": {Source: "apt:libc6-dev", Version: "2.41-12"},
+		"go":        manualEntry("go"),
+		"gopls":     {Source: "go:golang.org/x/tools/gopls", Version: "v0.23.0"},
+		"libfoo":    {Source: "apt:libfoo", Version: "1.0-1", Requires: []string{"helper"}},
+		"helper":    manualEntry("helper"),
+		"other":     manualEntry("other"),
+	}
+	cases := map[string]struct {
+		roots []string
+		want  []string
+	}{
+		"an apt root sorted after a go root installs first": {
+			roots: []string{"gcc", "go", "gopls", "libc6-dev"},
+			want:  []string{"gcc", "libc6-dev", "go", "gopls"},
+		},
+		"a go root still installs after its backend": {
+			roots: []string{"gopls", "libc6-dev"},
+			want:  []string{"libc6-dev", "go", "gopls"},
+		},
+		"an apt root still installs after its own requirement": {
+			roots: []string{"libfoo", "other"},
+			want:  []string{"helper", "libfoo", "other"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			seedManifest(t, e, tools)
+			m := loadManifest(t, e)
+
+			p := e.installOrder(t.Context(), m, tc.roots)
+
+			if len(p.unplanned) != 0 {
+				t.Fatalf("installOrder(%v) unplanned = %v, want none", tc.roots, p.unplanned)
+			}
+			if !slices.Equal(p.ordered, tc.want) {
+				t.Errorf("installOrder(%v) ordered = %v, want %v", tc.roots, p.ordered, tc.want)
+			}
+		})
+	}
+}

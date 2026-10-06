@@ -115,7 +115,7 @@ func aptInstalledPackages(ctx context.Context) ([]AptPackage, error) {
 	cmd.Env = aptEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return nil, commandFailed("dpkg-query", err, "")
 	}
 	// A missing or unreadable states file means no package reads as a
 	// dependency. That is the honest degradation: apt's own default for a

@@ -1305,17 +1305,35 @@ func (e *Engine) recordBlocked(name string, cause blocker, output func(string)) 
 	}
 }
 
-// installOrder expands names with backend deps + Requires (creating
-// manifest entries from the catalog for missing deps, enabling disabled
-// ones) and returns them dependency-first, updating m to match tools.json.
-// Each root is planned on its own and is all-or-nothing: its adoptions and
-// enables are staged, then committed to tools.json and m in one write only
-// when its whole chain plans. A root that fails lands in unplanned with its
-// staging and its order entries discarded, so a later root adopts a shared
-// new dependency for itself, and the other roots still install.
+// systemPackagesFirst moves apt: roots ahead of the rest, each group in its
+// incoming order. A native build (cgo, node-gyp, a pip sdist) compiles against
+// system packages it declares no edge to: apt installs without Recommends, so
+// gcc arrives without libc6-dev's headers, and Go enables cgo whenever a C
+// compiler is on PATH (https://pkg.go.dev/cmd/cgo).
+func systemPackagesFirst(m *Manifest, names []string) []string {
+	apt := make([]string, 0, len(names))
+	var rest []string
+	for _, n := range names {
+		if sourceKind(m.Tools[n].Source) == SourceApt {
+			apt = append(apt, n)
+		} else {
+			rest = append(rest, n)
+		}
+	}
+	return append(apt, rest...)
+}
+
+// installOrder expands names with backend deps + Requires (adopting missing
+// deps from the catalog, enabling disabled ones) and returns them
+// dependency-first, apt roots before the others (systemPackagesFirst),
+// updating m to match tools.json. Each root plans on its own and is
+// all-or-nothing: its adoptions and enables are staged, then committed to
+// tools.json and m in one write only when its whole chain plans. A failed root
+// lands in unplanned with its staging and order entries discarded, so a later
+// root adopts a shared new dependency itself and the other roots still install.
 func (e *Engine) installOrder(ctx context.Context, m *Manifest, names []string) *installPlan {
 	p := &installPlan{e: e, m: m, seen: map[string]bool{}}
-	for _, n := range names {
+	for _, n := range systemPackagesFirst(m, names) {
 		mark := len(p.ordered)
 		p.stage = rootStage{tools: map[string]Tool{}, via: map[string][]string{}}
 		err := p.visit(ctx, n, nil)

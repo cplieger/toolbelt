@@ -143,27 +143,7 @@ func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, er
 	if !AptAvailable() {
 		return "", ErrAptUnavailable
 	}
-	// The oracle runs FIRST, because apt-cache policy expands a pattern
-	// exactly as apt-get install does: asked about "jq." it answers with a
-	// version belonging to whichever package matched, and this function
-	// would record it as the version of a package the user never named.
-	if err := v.aptIdx.knownName(ctx, pkg); err != nil {
-		return "", err
-	}
-	cmd, err := systemCommand(ctx, "apt-cache", "policy", "--", pkg)
-	if err != nil {
-		return "", err
-	}
-	cmd.Env = aptEnv()
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("apt-cache policy %s: %w", pkg, err)
-	}
-	cand, err := aptCandidateFrom(string(out))
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", pkg, err)
-	}
-	return cand, nil
+	return aptPolicyCandidate(ctx, v.aptIdx, pkg)
 }
 
 // latestAqua resolves a package's latest version: the runtime's own

@@ -95,7 +95,7 @@ func (a *aptIndex) ensureLists(ctx context.Context) error {
 		cmd.Env = aptEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			a.updateErr = fmt.Errorf("apt-get update: %w: %s", err, strings.TrimSpace(string(out)))
+			a.updateErr = commandFailed("apt-get update", err, string(out))
 			return
 		}
 	})
@@ -363,6 +363,8 @@ func (a *aptIndex) load(ctx context.Context) (map[string]string, error) {
 		return nil, err
 	}
 	cmd.Env = aptEnv()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -372,7 +374,7 @@ func (a *aptIndex) load(ctx context.Context) (map[string]string, error) {
 	}
 	names := parseAptAvailable(pipe)
 	if err := cmd.Wait(); err != nil {
-		return nil, fmt.Errorf("apt-cache dumpavail: %w", err)
+		return nil, commandFailed("apt-cache dumpavail", err, stderr.String())
 	}
 	if len(names) == 0 {
 		return nil, errors.New("apt-cache dumpavail produced no packages")

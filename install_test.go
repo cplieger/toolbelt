@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // setgidParent returns a temp directory with S_ISGID set, having first
@@ -913,5 +915,112 @@ func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *test
 	}
 	if string(body) != "#!/bin/sh\necho live\n" {
 		t.Errorf("restored tree holds %q, want the version that was live", body)
+	}
+}
+
+func TestStreamCmd_FailureCarriesOutputTail(t *testing.T) {
+	const cgoErr = "gcc_libinit.c:7:10: fatal error: pthread.h: No such file or directory"
+	cases := map[string]struct {
+		script       string
+		wantNil      bool
+		wantExact    string
+		wantContains []string
+		wantAbsent   []string
+		wantLine     string
+		maxLen       int
+	}{
+		"a compiler error reaches the error": {
+			script:       "echo '# runtime/cgo'; echo '" + cgoErr + "' >&2; exit 1",
+			wantContains: []string{cgoErr},
+			wantLine:     cgoErr,
+		},
+		"a long output keeps its end": {
+			script:       `i=0; while [ $i -lt 400 ]; do echo "noise line $i"; i=$((i+1)); done; echo 'LAST: the real cause'; exit 2`,
+			wantContains: []string{"LAST: the real cause", "(..."},
+			wantAbsent:   []string{"noise line 0 "},
+			maxLen:       len("sh failed: exit status 2 (...)") + maxCommandOutput,
+		},
+		"a cut lands on a rune boundary": {
+			script:       `i=0; while [ $i -lt 600 ]; do printf '€'; i=$((i+1)); done; exit 1`,
+			wantContains: []string{"€"},
+		},
+		"a silent failure names only its exit": {
+			script:    "exit 3",
+			wantExact: "sh failed: exit status 3",
+		},
+		"a window cut mid-rune drops the partial rune": {
+			script: `printf '€€'; i=0; while [ $i -lt 998 ]; do echo; i=$((i+1)); done; exit 1`,
+		},
+		"a success returns nil": {
+			script:  "echo ok",
+			wantNil: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var lines []string
+			in := &installer{output: func(l string) { lines = append(lines, l) }}
+			cmd := exec.CommandContext(t.Context(), "/bin/sh", "-c", tc.script)
+
+			err := in.streamCmd(cmd, "sh")
+
+			if tc.wantNil {
+				if err != nil {
+					t.Errorf("streamCmd(%q) error = %q, want nil", tc.script, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("streamCmd(%q) error = nil, want a failure", tc.script)
+			}
+			msg := err.Error()
+			if !errors.As(err, new(*exec.ExitError)) {
+				t.Errorf("streamCmd(%q) error = %q, want it to wrap *exec.ExitError", tc.script, msg)
+			}
+			if tc.wantExact != "" && msg != tc.wantExact {
+				t.Errorf("streamCmd(%q) error = %q, want %q", tc.script, msg, tc.wantExact)
+			}
+			for _, s := range tc.wantContains {
+				if !strings.Contains(msg, s) {
+					t.Errorf("streamCmd(%q) error = %q, want it to contain %q", tc.script, msg, s)
+				}
+			}
+			for _, s := range tc.wantAbsent {
+				if strings.Contains(msg, s) {
+					t.Errorf("streamCmd(%q) error = %q, want it without %q", tc.script, msg, s)
+				}
+			}
+			if strings.Contains(msg, "\n") {
+				t.Errorf("streamCmd(%q) error = %q, want a single line", tc.script, msg)
+			}
+			if !utf8.ValidString(msg) || strings.ContainsRune(msg, utf8.RuneError) {
+				t.Errorf("streamCmd(%q) error = %q, want valid UTF-8 with no replacement rune", tc.script, msg)
+			}
+			if tc.maxLen > 0 && len(msg) > tc.maxLen {
+				t.Errorf("streamCmd(%q) error is %d bytes, want at most %d", tc.script, len(msg), tc.maxLen)
+			}
+			if tc.wantLine != "" && !slices.Contains(lines, tc.wantLine) {
+				t.Errorf("streamCmd(%q) streamed %q, want the line %q", tc.script, lines, tc.wantLine)
+			}
+		})
+	}
+}
+
+func TestCommandFailed_UsesExitErrorStderr(t *testing.T) {
+	_, err := exec.CommandContext(t.Context(), "/bin/sh", "-c", "echo out; echo 'E: boom' >&2; exit 1").Output()
+	if err == nil {
+		t.Fatal("Setup: the probe command succeeded, want exit 1")
+	}
+
+	got := commandFailed("probe", err, "")
+
+	if !strings.Contains(got.Error(), "E: boom") {
+		t.Errorf("commandFailed(probe, %v, \"\") = %q, want the captured stderr %q", err, got, "E: boom")
+	}
+	if strings.Contains(got.Error(), "out") {
+		t.Errorf("commandFailed(probe, %v, \"\") = %q, want no stdout text", err, got)
+	}
+	if !errors.As(got, new(*exec.ExitError)) {
+		t.Errorf("commandFailed(probe, %v, \"\") = %q, want it to wrap *exec.ExitError", err, got)
 	}
 }
