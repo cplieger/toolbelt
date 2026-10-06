@@ -93,7 +93,7 @@ func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) erro
 	}
 	cmd.Env = aptEnv()
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("apt-mark %s %s: %w: %s", action, pkg, err, strings.TrimSpace(string(out)))
+		return commandFailed("apt-mark "+action+" "+pkg, err, string(out))
 	}
 	in.logf("apt-mark %s %s", action, pkg)
 	return nil
@@ -133,6 +133,7 @@ func (in *installer) aptInstalled(ctx context.Context, pkg string) (version stri
 	if err != nil {
 		return "", false
 	}
+	cmd.Env = aptEnv()
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false
@@ -158,21 +159,30 @@ func aptStatusFrom(out string) (version string, installed bool) {
 	return strings.TrimSpace(version), true
 }
 
-// aptCandidate reports the version apt would install now: the
-// Candidate line of `apt-cache policy`. It is what an apt row displays
-// and what decides whether an update is available, because an apt entry
-// has no upstream version of its own to resolve.
+// aptCandidate reports the version apt would install now. It is what an apt
+// row displays and what decides whether an update is available, because an
+// apt entry has no upstream version of its own to resolve.
 func (in *installer) aptCandidate(ctx context.Context, pkg string) (string, error) {
-	if err := in.aptKnownName(ctx, pkg); err != nil {
+	return aptPolicyCandidate(ctx, in.aptIdx, pkg)
+}
+
+// aptPolicyCandidate reads the Candidate line of `apt-cache policy` for pkg,
+// after the index oracle accepts the name.
+func aptPolicyCandidate(ctx context.Context, idx *aptIndex, pkg string) (string, error) {
+	// The oracle runs FIRST: apt-cache policy expands a pattern as apt-get
+	// install does, so "jq." would answer with whichever package matched and
+	// record that version against a name the user never gave.
+	if err := idx.knownName(ctx, pkg); err != nil {
 		return "", err
 	}
 	cmd, err := systemCommand(ctx, "apt-cache", "policy", "--", pkg)
 	if err != nil {
 		return "", err
 	}
+	cmd.Env = aptEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("apt-cache policy %s: %w", pkg, err)
+		return "", commandFailed("apt-cache policy "+pkg, err, "")
 	}
 	cand, err := aptCandidateFrom(string(out))
 	if err != nil {
@@ -182,8 +192,7 @@ func (in *installer) aptCandidate(ctx context.Context, pkg string) (string, erro
 }
 
 // aptCandidateFrom extracts the Candidate version from apt-cache policy
-// output. Shared by the installer and the version resolver so the two
-// cannot disagree about what "the version apt would install" means.
+// output.
 //
 // "(none)" is apt's answer for a package it knows of but cannot install
 // (a pure virtual name, or one with no candidate in the configured
@@ -301,10 +310,9 @@ func aptEnv() []string {
 // runCombined runs a command, streams its output into the job as it
 // arrives, and returns that output as text.
 //
-// The engine's streamCmd does the streaming half only. apt needs the
-// text as well, because deciding whether to retry means reading which
-// lock apt failed on, and a caller that has already streamed the lines
-// away cannot answer that.
+// streamCmd keeps only a bounded tail for its error. apt needs the whole
+// text, because deciding whether to retry means reading which lock apt
+// failed on, and that line can sit anywhere in the output.
 func (in *installer) runCombined(ctx context.Context, name string, args ...string) (string, error) {
 	cmd, err := systemCommand(ctx, name, args...)
 	if err != nil {
@@ -333,7 +341,7 @@ func (in *installer) runCombined(ctx context.Context, name string, args ...strin
 	werr := cmd.Wait()
 	out := all.String()
 	if werr != nil {
-		return out, fmt.Errorf("%s failed: %w", name, werr)
+		return out, commandFailed(name, werr, out)
 	}
 	return out, nil
 }

@@ -40,6 +40,8 @@ A language source is a tool too. An `npm:` install adds `node` from the catalog,
 
 A tool's dependencies are installed whenever the tool is. Installing a tool adds every dependency the catalog names, enables any that is a template, and installs the whole set with the dependencies first. The job log names each entry it enabled and which tool asked for it. When one dependency cannot be resolved, the tool that needs it fails with `dependency "<name>" failed` and the reason. That attempt adds no dependency and enables no template, and the tools in the same job that do not need it still install.
 
+Debian packages from `apt:` entries install before the other tools in the job, because a Go, Rust, Python or Node tool may compile against one it does not list as a dependency.
+
 Enabling a tool you name yourself stays explicit. `Install` on a template returns `ErrDisabled`, which the REST handler sends as `409 disabled`, because enabling changes the user's intent, and only a dependency enables a tool on its own.
 
 Each inventory row reports its `dependents`, the enabled entries that need it through `requires` or as the runtime of their source. A client reads it to ask the user before sending a disable the engine would refuse. It is advisory, because the engine works the set out again under the manifest lock, so a request based on a stale inventory is still refused.
@@ -77,7 +79,7 @@ Every change runs as a job on one queue, one job at a time. The queue holds up t
 
 `Config.OnJobChanged` receives every state change, and `Config.OnJobOutput` receives output lines in batches about every 150 ms. Neither callback may block.
 
-A failed job carries its message in `error`, and `Job.Err()` returns the error behind it for `errors.As`. When a GitHub rate limit failed the job, `error_code` is `github_rate_limited`. Its `rate_limit` field says whether the request carried a token, when the limit resets and what hourly limit GitHub reported. Your app decides what to tell the user, for example to set a token when `authenticated` is false.
+A failed job carries its message in `error`, and `Job.Err()` returns the error behind it for `errors.As`. When a command fails, the error carries up to the last 500 bytes of the command's output. The job output of an install command keeps every line. When a GitHub rate limit failed the job, `error_code` is `github_rate_limited`. Its `rate_limit` field says whether the request carried a token, when the limit resets and what hourly limit GitHub reported. Your app decides what to tell the user, for example to set a token when `authenticated` is false.
 
 The engine does not retry a rate-limited request or wait for the reset. Until the limit resets, and for at least one minute, the engine sends no more GitHub API requests with the same token. Each one fails at once with the same error. Requests with no token are held back the same way. Requests with a different token are sent as usual, so a token your app sets after an anonymous limit takes effect at once.
 

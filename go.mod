@@ -8,6 +8,7 @@ require (
 	github.com/cplieger/httpx/v5 v5.0.3
 	github.com/cplieger/keyenc v1.0.9
 	github.com/cplieger/pathinside/v2 v2.0.1
+	github.com/cplieger/runesafe/v2 v2.1.0
 	github.com/cplieger/scheduler/v4 v4.2.1
 	github.com/cplieger/ssrf/v4 v4.1.3
 	github.com/cplieger/webhttp/v3 v3.0.0
@@ -16,5 +17,3 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/mod v0.41.0
 )
-
-require github.com/cplieger/runesafe/v2 v2.1.0 // indirect

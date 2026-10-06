@@ -21,9 +21,11 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/pathinside/v2"
+	"github.com/cplieger/runesafe/v2"
 )
 
 // installer executes install/uninstall plans for every source kind.
@@ -868,6 +870,8 @@ func (in *installer) runPM(ctx context.Context, name string, args ...string) err
 	return in.streamCmd(cmd, name)
 }
 
+// streamCmd streams cmd's combined output into the job log line by line; a
+// failure's error carries the output's end (commandFailed).
 func (in *installer) streamCmd(cmd *exec.Cmd, label string) error {
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -879,23 +883,40 @@ func (in *installer) streamCmd(cmd *exec.Cmd, label string) error {
 	}
 	buf := make([]byte, 4096)
 	var pending strings.Builder
+	// Twice the cap: headroom for the blank lines trimming drops and the rune-safe cut.
+	const keep = 2 * maxCommandOutput
+	tail := make([]byte, 0, keep+len(buf))
 	for {
 		n, rerr := pipe.Read(buf)
 		if n > 0 {
 			pending.WriteString(string(buf[:n]))
 			in.drainLines(&pending)
+			tail = keepTail(append(tail, buf[:n]...), keep)
 		}
 		if rerr != nil {
 			break
 		}
 	}
-	if tail := strings.TrimSpace(pending.String()); tail != "" {
-		in.output(tail)
+	if rest := strings.TrimSpace(pending.String()); rest != "" {
+		in.output(rest)
 	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("%s failed: %w", label, err)
+		return commandFailed(label, err, string(tail))
 	}
 	return nil
+}
+
+// keepTail's kept suffix never exceeds n bytes nor starts mid-rune, the
+// runesafe.CapBytesTail rule applied in place to reuse b.
+func keepTail(b []byte, n int) []byte {
+	if len(b) <= n {
+		return b
+	}
+	cut := len(b) - n
+	for cut < len(b) && !utf8.RuneStart(b[cut]) {
+		cut++
+	}
+	return b[:copy(b, b[cut:])]
 }
 
 // drainLines emits every complete (newline-terminated) line buffered in
@@ -912,6 +933,33 @@ func (in *installer) drainLines(pending *strings.Builder) {
 		pending.Reset()
 		pending.WriteString(rest)
 	}
+}
+
+// maxCommandOutput caps the output a failed command's error carries, keeping
+// the tail because a tool prints its fatal error last.
+const maxCommandOutput = 500
+
+// commandFailed is the error for a failed command: label, the wrapped err, and
+// the END of output joined onto one rune-safe line. An empty output falls back
+// to the stderr an *exec.ExitError captured (cmd.Output).
+func commandFailed(label string, err error, output string) error {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok && output == "" {
+		output = string(exitErr.Stderr)
+	}
+	var lines []string
+	for line := range strings.Lines(output) {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	msg := runesafe.SanitizeSingleLine(strings.Join(lines, " | "))
+	if msg == "" {
+		return fmt.Errorf("%s failed: %w", label, err)
+	}
+	if tail := runesafe.CapBytesTail(msg, maxCommandOutput); len(tail) < len(msg) {
+		msg = "..." + tail
+	}
+	return fmt.Errorf("%s failed: %w (%s)", label, err, msg)
 }
 
 // binDiff snapshots dir before fn and returns entries added by fn.
