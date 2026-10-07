@@ -173,41 +173,45 @@ func (s *store) seedManifest() *Manifest {
 	return cp
 }
 
-// readManifestLocked parses tools.json. A file whose version is not
-// ManifestVersion yields an error. Caller holds mu.
+// readManifestLocked requires the caller to hold mu.
 func (s *store) readManifestLocked() (*Manifest, error) {
 	data, err := os.ReadFile(s.manifestPath)
 	if err != nil {
 		return nil, err
 	}
+	m, err := ParseManifest(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", s.manifestPath, err)
+	}
+	return m, nil
+}
+
+// ParseManifest decodes and validates a tools.json document exactly as the
+// engine reads the file: a JSON parse error, a version other than
+// ManifestVersion, an invalid tool name or a version its source's grammar
+// refuses is an error. A consumer that writes tools.json on a user's behalf
+// calls it first, because a document it refuses fails New at the next start.
+func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", s.manifestPath, err)
+		return nil, fmt.Errorf("parse: %w", err)
 	}
 	if m.Version != ManifestVersion {
-		return &m, fmt.Errorf("%s: manifest version %d, want %d", s.manifestPath, m.Version, ManifestVersion)
+		return nil, fmt.Errorf("manifest version %d, want %d", m.Version, ManifestVersion)
 	}
 	if m.Tools == nil {
 		m.Tools = map[string]Tool{}
 	}
-	// tools.json is hand-editable and re-read per operation, so a key
-	// here has not necessarily been through Add's validation — and the
-	// key IS a path component: it is joined onto the opt dir and the
-	// join is handed to os.RemoveAll on uninstall. Validate on the way
-	// in, at the one place every read path goes through, rather than
-	// trusting the file. Refusing the document (like the version check
-	// above) beats dropping the entry: the engine reports intent it
-	// cannot use instead of silently rewriting it.
+	// A key and a version both become path components (the key is handed to
+	// os.RemoveAll on uninstall), and a hand edit reaches here without Add's
+	// validation. The whole document is refused rather than the entry dropped,
+	// so the engine reports intent it cannot use instead of rewriting it.
 	for _, name := range slices.Sorted(maps.Keys(m.Tools)) {
 		if !validToolName(name) {
-			return nil, fmt.Errorf("%s: invalid tool name %q", s.manifestPath, name)
+			return nil, fmt.Errorf("invalid tool name %q", name)
 		}
-		// Same reasoning as the key, and the same gap it closed: Add and
-		// Patch validate a version they resolve, so a version reaching
-		// the engine through a hand edit was the only one nothing
-		// checked, and it is the one that lands in a path component.
 		if t := m.Tools[name]; t.Version != "" && !validVersion(t.Source, t.Version) {
-			return nil, fmt.Errorf("%s: %s: %v", s.manifestPath, name, versionRejected(t.Source, t.Version))
+			return nil, fmt.Errorf("%s: %v", name, versionRejected(t.Source, t.Version))
 		}
 	}
 	return &m, nil

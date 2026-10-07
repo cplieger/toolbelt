@@ -2392,6 +2392,50 @@ func TestReconcileFull_UpdatePassRefusedByAFullQueue(t *testing.T) {
 	}
 }
 
+func TestReconcile_AFullQueueCoalescesRatherThanRefuses(t *testing.T) {
+	e := newTestEngine(t, nil)
+	slow, err := e.Add(t.Context(), &AddRequest{
+		Name: "slow", Source: SourceManual, Version: "1",
+		Install: `sleep 3 && ` + binStub("slow"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if a := e.queue.Active(); a != nil && a.ID == slow.ID && a.State == JobRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("slow job never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for range jobQueueCap {
+		if _, err := e.Update(); err != nil {
+			t.Fatalf("filling the queue to cap: %v", err)
+		}
+	}
+
+	first, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued || first == nil {
+		t.Fatalf("Reconcile on a full queue = job %v, enqueued %v, err %v; want a queued reconcile", first, enqueued, err)
+	}
+	second, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued || second == nil {
+		t.Fatalf("second Reconcile = job %v, enqueued %v, err %v; want the queued reconcile", second, enqueued, err)
+	}
+	if second.ID != first.ID {
+		t.Errorf("second Reconcile queued job %s, want the already-queued %s", second.ID, first.ID)
+	}
+	e.queue.mu.Lock()
+	queued := len(e.queue.pending)
+	e.queue.mu.Unlock()
+	if queued != jobQueueCap+1 {
+		t.Errorf("queued jobs = %d, want the %d updates plus one reconcile", queued, jobQueueCap)
+	}
+}
+
 // TestToolInfo_CarriesChecksumOnlyWhileInstalled pins the fact behind the
 // client's "no checksum" badge. The badge must not be derived from the
 // source kind: 252 of the catalog's aqua entries declare no checksum

@@ -1007,14 +1007,14 @@ func (e *Engine) rollbackRemoval(removed map[string]Tool) {
 	}
 }
 
-// Reconcile enqueues the convergence job: install missing enabled
-// entries, uninstall the engine-owned footprint of disabled ones and of
-// orphaned state rows. ReconcileFull also enqueues an update pass over
-// unpinned entries.
+// Reconcile enqueues the convergence job: install missing enabled entries,
+// uninstall the engine-owned footprint of disabled ones and of orphaned
+// state rows. ReconcileFull also enqueues an update pass over unpinned
+// entries. A queued reconcile is returned rather than duplicated and a full
+// queue never refuses one, so err means a manifest read failure or shutdown.
 //
 // enqueued is false, with a nil job and a nil error, when the manifest is
-// empty and no state row exists: a normal answer on a fresh volume, not a
-// failure. A caller gating readiness must branch on enqueued first.
+// empty and no state row exists; a readiness gate branches on enqueued first.
 func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err error) {
 	m, err := e.store.LoadManifest()
 	if err != nil {
