@@ -71,6 +71,7 @@ Without `GitHubToken`, GitHub API requests go without a token, and GitHub allows
 
 - `New` and `Close` start and stop an engine. `Inventory`, `Search` and `SearchWithCounts` read the manifest, the install state and the catalog.
 - `Add`, `Patch`, `Install`, `Update`, `Remove`, `RemoveWithDependents` and `Reconcile` change the manifest or the disk, each through a job. `EnsureInstalled` installs a tool and waits for it.
+- `ParseManifest` checks a `tools.json` document the way the engine reads it, so you can refuse a bad one before writing it.
 - `Jobs`, `Wait` and `CancelJob` follow the job queue. `RefreshCatalog` and `CatalogInfo` refresh and describe the catalog.
 - `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
 - `httpapi.Handler` serves the engine over HTTP, and `cmd/toolcatalog` compiles and checks a catalog.

@@ -13,7 +13,8 @@ import (
 const (
 	// jobRingLines caps each job's retained output for reload-resume.
 	jobRingLines = 500
-	// jobQueueCap bounds queued (not yet running) jobs.
+	// jobQueueCap bounds queued (not yet running) jobs; a reconcile is
+	// exempt because enqueue coalesces it to one.
 	jobQueueCap = 8
 	// jobHistory bounds finished jobs kept for the jobs endpoint.
 	jobHistory = 10
@@ -155,7 +156,8 @@ func newJobQueue(onChanged func(*Job), onOutput func(string, []string), log *slo
 	return q
 }
 
-// Enqueue adds a job. Returns an error when the queue is full.
+// Enqueue adds a job. Returns an error on shutdown, or when the queue is
+// full and the job is not a reconcile.
 func (q *jobQueue) Enqueue(kind string, names []string) (*Job, error) {
 	return q.enqueue(kind, names, nil)
 }
@@ -166,14 +168,23 @@ func (q *jobQueue) EnqueueRemoval(names []string, removed map[string]Tool) (*Job
 	return q.enqueue(JobKindUninstall, names, removed)
 }
 
+// enqueue admits a job. A reconcile reads the manifest when it starts, so a queued one already
+// covers every later request and is returned instead of a second job; that bounds reconciles to
+// one queued job, so they are exempt from jobQueueCap and a converge request fails only on
+// shutdown.
 func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool) (*Job, error) {
 	q.mu.Lock()
+	defer q.mu.Unlock()
 	if q.stopped {
-		q.mu.Unlock()
 		return nil, errors.New("engine shutting down")
 	}
-	if len(q.pending) >= jobQueueCap {
-		q.mu.Unlock()
+	if kind == JobKindReconcile {
+		for _, j := range q.pending {
+			if j.kind == JobKindReconcile {
+				return j.view(false), nil
+			}
+		}
+	} else if len(q.pending) >= jobQueueCap {
 		return nil, errors.New("too many queued tool jobs")
 	}
 	q.nextID++
@@ -190,10 +201,8 @@ func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool)
 	case q.wake <- struct{}{}:
 	default:
 	}
-	view := j.view(false)
 	q.notifyLocked(j)
-	q.mu.Unlock()
-	return view, nil
+	return j.view(false), nil
 }
 
 // noteCancelLocked attributes a cancellation to cause. Caller holds the
