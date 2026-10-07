@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 )
@@ -110,6 +111,24 @@ func TestNew_verifiesTheStoredModeOfTheBinDir(t *testing.T) {
 	if got := storedDirMode(t, binDir); got != managedDirStoredMode {
 		t.Errorf("mode of the PATH dir New created = %v, want %v", got, managedDirStoredMode)
 	}
+}
+
+// A caller that retries New after a failure must not accumulate job workers it can never Close:
+// synctest fails the test when a goroutine New started is still blocked once it returns.
+func TestNew_leavesNoGoroutineWhenTheBinDirIsRefused(t *testing.T) {
+	toolsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(toolsDir, "bin"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configDir := t.TempDir()
+
+	synctest.Test(t, func(t *testing.T) {
+		e, err := New(&Config{ConfigDir: configDir, ToolsDir: toolsDir})
+		if err == nil {
+			e.Close()
+			t.Error("New over a tools dir whose bin is a regular file = nil error, want a refusal")
+		}
+	})
 }
 
 // TestLinkBin_verifiesTheStoredModeOfThePathDir covers the other creator:
