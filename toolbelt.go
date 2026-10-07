@@ -237,6 +237,15 @@ func New(cfg *Config) (*Engine, error) {
 	if err := verifyConfigWritable(log, cfg.ConfigDir); err != nil {
 		return nil, fmt.Errorf("toolbelt: %w", err)
 	}
+	// ensureManagedDir, not MkdirAll: this is where bin/ is normally BORN,
+	// so it is the only place the mode the filesystem stored for it can
+	// still be certified. linkBin re-establishes the same directory later
+	// and enforces there too, but by then this call has already created it,
+	// so leaving this one unverified would make that enforcement dead code
+	// in every flow that goes through New.
+	if err := ensureManagedDir(binDir(cfg.ToolsDir)); err != nil {
+		return nil, err
+	}
 	client := newEngineClient(cfg.GitHubToken)
 	e := &Engine{
 		store:           st,
@@ -264,15 +273,6 @@ func New(cfg *Config) (*Engine, error) {
 		log:      log,
 		output:   func(string) {},
 		aptIdx:   e.aptIdx,
-	}
-	// ensureManagedDir, not MkdirAll: this is where bin/ is normally BORN,
-	// so it is the only place the mode the filesystem stored for it can
-	// still be certified. linkBin re-establishes the same directory later
-	// and enforces there too, but by then this call has already created it,
-	// so leaving this one unverified would make that enforcement dead code
-	// in every flow that goes through New.
-	if err := ensureManagedDir(binDir(cfg.ToolsDir)); err != nil {
-		return nil, err
 	}
 	e.startCatalogSchedule()
 	return e, nil
