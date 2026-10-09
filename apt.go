@@ -128,7 +128,7 @@ func AptAvailable() bool {
 
 // aptInstalled reports whether a package is installed AND its version.
 // See aptStatusFrom for why the status word, not just the version, decides.
-func (in *installer) aptInstalled(ctx context.Context, pkg string) (version string, installed bool) {
+func aptInstalled(ctx context.Context, pkg string) (version string, installed bool) {
 	cmd, err := systemCommand(ctx, "dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", pkg)
 	if err != nil {
 		return "", false

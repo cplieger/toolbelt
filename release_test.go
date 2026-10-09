@@ -11,10 +11,14 @@ import (
 	"testing"
 )
 
+func chooseReleaseAsset(assets []string, tool, goarch string) (assetChoice, error) {
+	return chooseReleaseAssetNamed(assets, []string{tool}, goarch)
+}
+
 // fixtureAssets reads one testdata/release-assets/<tool>.txt: leading
 // "# " lines are provenance, the rest are asset names as the forge
 // reported them.
-func fixtureAssets(t *testing.T, path string) (repo string, assets []string) {
+func fixtureAssets(t *testing.T, path string) (assets []string) {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
@@ -27,16 +31,12 @@ func fixtureAssets(t *testing.T, path string) (repo string, assets []string) {
 		if line == "" {
 			continue
 		}
-		if r, ok := strings.CutPrefix(line, "# repo "); ok {
-			repo = r
-			continue
-		}
 		if strings.HasPrefix(line, "#") {
 			continue
 		}
 		assets = append(assets, line)
 	}
-	return repo, assets
+	return assets
 }
 
 // TestChooseReleaseAsset_OverTheRealCorpus is the ship requirement:
@@ -64,7 +64,7 @@ func TestChooseReleaseAsset_OverTheRealCorpus(t *testing.T) {
 					continue
 				}
 				tool := strings.TrimSuffix(de.Name(), ".txt")
-				_, assets := fixtureAssets(t, filepath.Join(dir, de.Name()))
+				assets := fixtureAssets(t, filepath.Join(dir, de.Name()))
 				if len(assets) == 0 {
 					continue // no release published; nothing to choose from
 				}
@@ -442,32 +442,28 @@ func TestReleaseInstallableShape(t *testing.T) {
 // nothing to verify against and the row has to say so.
 func TestReleaseChecksumFor(t *testing.T) {
 	cases := []struct {
-		name         string
-		assets       []string
-		chosen       string
-		wantName     string
-		wantManifest bool
+		name     string
+		assets   []string
+		chosen   string
+		wantName string
 	}{
 		{
-			name:         "per-asset sibling wins",
-			assets:       []string{"tool-linux.tar.gz", "tool-linux.tar.gz.sha256", "checksums.txt"},
-			chosen:       "tool-linux.tar.gz",
-			wantName:     "tool-linux.tar.gz.sha256",
-			wantManifest: false,
+			name:     "per-asset sibling wins",
+			assets:   []string{"tool-linux.tar.gz", "tool-linux.tar.gz.sha256", "checksums.txt"},
+			chosen:   "tool-linux.tar.gz",
+			wantName: "tool-linux.tar.gz.sha256",
 		},
 		{
-			name:         "manifest",
-			assets:       []string{"tool-linux.tar.gz", "checksums.txt"},
-			chosen:       "tool-linux.tar.gz",
-			wantName:     "checksums.txt",
-			wantManifest: true,
+			name:     "manifest",
+			assets:   []string{"tool-linux.tar.gz", "checksums.txt"},
+			chosen:   "tool-linux.tar.gz",
+			wantName: "checksums.txt",
 		},
 		{
-			name:         "goreleaser versioned manifest",
-			assets:       []string{"cli_0.43.125_linux_amd64.tar.gz", "cli_0.43.125_checksums.txt"},
-			chosen:       "cli_0.43.125_linux_amd64.tar.gz",
-			wantName:     "cli_0.43.125_checksums.txt",
-			wantManifest: true,
+			name:     "goreleaser versioned manifest",
+			assets:   []string{"cli_0.43.125_linux_amd64.tar.gz", "cli_0.43.125_checksums.txt"},
+			chosen:   "cli_0.43.125_linux_amd64.tar.gz",
+			wantName: "cli_0.43.125_checksums.txt",
 		},
 		{
 			name:     "nothing to verify against",
@@ -478,12 +474,8 @@ func TestReleaseChecksumFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			name, isManifest := releaseChecksumFor(tc.assets, tc.chosen)
-			if name != tc.wantName {
+			if name := releaseChecksumFor(tc.assets, tc.chosen); name != tc.wantName {
 				t.Errorf("checksum asset = %q, want %q", name, tc.wantName)
-			}
-			if isManifest != tc.wantManifest {
-				t.Errorf("isManifest = %v, want %v", isManifest, tc.wantManifest)
 			}
 		})
 	}
@@ -680,11 +672,10 @@ func TestChooseReleaseAssetWithHints(t *testing.T) {
 // every upstream that drops its checksums file into a hard install failure
 // for a tool that worked yesterday.
 func TestReleaseSpec_DiscoveredChecksumIsNotDeclared(t *testing.T) {
-	in := &installer{}
 	rr := releaseRef{Host: "github", Owner: "docker", Repo: "compose"}
 
 	withSums := []string{"docker-compose-linux-x86_64", "checksums.txt"}
-	spec, err := in.releaseSpec(rr, "docker-compose", "v5.5.0", withSums, nil)
+	spec, err := releaseSpec(rr, "docker-compose", "v5.5.0", withSums, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +690,7 @@ func TestReleaseSpec_DiscoveredChecksumIsNotDeclared(t *testing.T) {
 	}
 
 	withoutSums := []string{"docker-compose-linux-x86_64"}
-	spec, err = in.releaseSpec(rr, "docker-compose", "v5.5.0", withoutSums, nil)
+	spec, err = releaseSpec(rr, "docker-compose", "v5.5.0", withoutSums, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
