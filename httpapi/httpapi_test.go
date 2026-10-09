@@ -19,7 +19,7 @@ import (
 
 // newServer builds an engine on temp dirs and serves the projection at
 // /api/tools.
-func newServer(t *testing.T) (*toolbelt.Engine, *httptest.Server) {
+func newServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
 	e, err := toolbelt.New(&toolbelt.Config{
@@ -37,7 +37,7 @@ func newServer(t *testing.T) (*toolbelt.Engine, *httptest.Server) {
 	mux.Handle("/api/tools/", h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return e, srv
+	return srv
 }
 
 // call issues a JSON request and decodes the response body into out
@@ -104,7 +104,7 @@ func addBody(name string) string {
 }
 
 func TestRoutes_EndToEnd(t *testing.T) {
-	_, srv := newServer(t)
+	srv := newServer(t)
 
 	// Empty inventory.
 	var inv toolbelt.Inventory
@@ -219,7 +219,7 @@ func waitRawJob(t *testing.T, srv *httptest.Server, jobID string) map[string]any
 // — a job nobody cancelled carries no cancel_cause key at all, so an
 // older consumer's payload is unchanged.
 func TestCancelRoute_ReportsCallerCause(t *testing.T) {
-	_, srv := newServer(t)
+	srv := newServer(t)
 
 	var done JobResponse
 	call(t, srv, http.MethodPost, "/api/tools", addBody("finished"), &done)
@@ -268,7 +268,7 @@ func TestCancelRoute_ReportsCallerCause(t *testing.T) {
 }
 
 func TestRoutes_DependentsConflict(t *testing.T) {
-	_, srv := newServer(t)
+	srv := newServer(t)
 	var jr JobResponse
 	call(t, srv, http.MethodPost, "/api/tools", addBody("base"), &jr)
 	waitDone(t, srv, jr.Job.ID)
@@ -300,7 +300,7 @@ func TestRoutes_DependentsConflict(t *testing.T) {
 }
 
 func TestRoutes_SearchAndBadBody(t *testing.T) {
-	_, srv := newServer(t)
+	srv := newServer(t)
 	var sr SearchResponse
 	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=anything", "", &sr); code != http.StatusOK {
 		t.Fatalf("GET search = %d", code)
@@ -318,7 +318,7 @@ func TestRoutes_SearchAndBadBody(t *testing.T) {
 
 // newRefreshServer is newServer with catalog refresh configured (an
 // unreachable URL: route-level tests need the enqueue, not the fetch).
-func newRefreshServer(t *testing.T) (*toolbelt.Engine, *httptest.Server) {
+func newRefreshServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	dir := t.TempDir()
 	e, err := toolbelt.New(&toolbelt.Config{
@@ -337,11 +337,11 @@ func newRefreshServer(t *testing.T) (*toolbelt.Engine, *httptest.Server) {
 	mux.Handle("/api/tools/", h)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return e, srv
+	return srv
 }
 
 func TestCatalogInfoRoute(t *testing.T) {
-	_, srv := newServer(t)
+	srv := newServer(t)
 	var info toolbelt.CatalogInfo
 	if code := call(t, srv, http.MethodGet, "/api/tools/catalog", "", &info); code != http.StatusOK {
 		t.Fatalf("GET catalog = %d", code)
@@ -353,7 +353,7 @@ func TestCatalogInfoRoute(t *testing.T) {
 
 func TestCatalogRefreshRoute(t *testing.T) {
 	t.Run("unconfigured refuses with not_configured", func(t *testing.T) {
-		_, srv := newServer(t)
+		srv := newServer(t)
 		var errBody struct {
 			Code string `json:"code"`
 		}
@@ -364,7 +364,7 @@ func TestCatalogRefreshRoute(t *testing.T) {
 	})
 
 	t.Run("configured returns 202 with the job", func(t *testing.T) {
-		_, srv := newRefreshServer(t)
+		srv := newRefreshServer(t)
 		var jr JobResponse
 		code := call(t, srv, http.MethodPost, "/api/tools/catalog/refresh", "", &jr)
 		if code != http.StatusAccepted || jr.Job == nil {

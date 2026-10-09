@@ -103,26 +103,16 @@ type assetChoice struct {
 	// the release publishes nothing to verify against, which the row
 	// reports rather than hides.
 	ChecksumAsset string
-	// ChecksumIsManifest distinguishes the two shapes, because a manifest
-	// needs the line for this asset picked out of it while a sibling is
-	// the digest itself.
-	ChecksumIsManifest bool
 }
 
-// chooseReleaseAsset picks one asset for goarch out of a release's file
-// names, matching against every name the tool is known by: its registry
-// name first, then the executables it publishes (see releasePickBest).
+// chooseReleaseAssetNamed picks one asset for goarch out of a release's
+// file names, matching every name the tool is known by: its registry name
+// first, then the executables it publishes (see releasePickBest).
 //
-// The ORDER matters and was measured wrong twice: architecture must NOT
-// come before the single-candidate rule, or a release shipping one
-// untagged linux binary has no escape — lost 19 repositories on amd64
-// and 23 on arm64 (yt-dlp, solidity among them). ubi's order (extension,
-// single candidate, OS, architecture) recovers them.
-func chooseReleaseAsset(assets []string, tool, goarch string) (assetChoice, error) {
-	return chooseReleaseAssetNamed(assets, []string{tool}, goarch)
-}
-
-// chooseReleaseAssetNamed is chooseReleaseAsset with the full name set.
+// The OS and architecture steps keep an asset that names neither, so a
+// release shipping one untagged linux binary (yt-dlp, solidity) still
+// installs. Short-circuiting on a lone candidate instead would let an
+// amd64-only asset (certstrap) install on arm64.
 func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice, error) {
 	if len(assets) == 0 {
 		return assetChoice{}, errors.New("the release publishes no assets")
@@ -142,8 +132,8 @@ func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice
 	}
 
 	// 2. Reject what names another OS or another architecture. An asset
-	//    naming NEITHER survives both steps — see chooseReleaseAsset's
-	//    doc comment for why architecture cannot short-circuit instead.
+	//    naming NEITHER survives both steps — see the doc comment for
+	//    why architecture cannot short-circuit instead.
 	if os := releaseRejectForeignOS(cands); len(os) > 0 {
 		cands = os
 	} else {
@@ -166,7 +156,7 @@ func chooseReleaseAssetNamed(assets, names []string, goarch string) (assetChoice
 	}
 
 	choice := assetChoice{Asset: releasePickBest(cands, names)}
-	choice.ChecksumAsset, choice.ChecksumIsManifest = releaseChecksumFor(assets, choice.Asset)
+	choice.ChecksumAsset = releaseChecksumFor(assets, choice.Asset)
 	return choice, nil
 }
 
@@ -390,22 +380,22 @@ func releaseStem(name string) string {
 }
 
 // releaseChecksumFor finds a digest source for the chosen asset: a
-// per-asset sibling first (needs no parsing, cannot be confused with
-// another asset's line), then a manifest. Roughly 60 of 147 releases
-// can be verified at all; the rest install on the transport's word,
-// reported per entry rather than hidden (see ToolStatus.Checksum).
-func releaseChecksumFor(assets []string, chosen string) (name string, isManifest bool) {
+// per-asset sibling first (it cannot be confused with another asset's
+// line), then a manifest. Roughly 60 of 147 releases can be verified at
+// all; the rest install on the transport's word, reported per entry
+// rather than hidden (see ToolStatus.Checksum).
+func releaseChecksumFor(assets []string, chosen string) string {
 	for _, suffix := range []string{".sha256", ".sha256sum", ".sha256.txt"} {
 		want := chosen + suffix
 		for _, a := range assets {
 			if strings.EqualFold(a, want) {
-				return a, false
+				return a
 			}
 		}
 	}
 	for _, a := range assets {
 		if slices.Contains(releaseChecksumNames, strings.ToLower(a)) {
-			return a, true
+			return a
 		}
 	}
 	// A goreleaser-style manifest carrying the version in its name
@@ -413,10 +403,10 @@ func releaseChecksumFor(assets []string, chosen string) (name string, isManifest
 	for _, a := range assets {
 		lower := strings.ToLower(a)
 		if strings.HasSuffix(lower, "_checksums.txt") || strings.HasSuffix(lower, "-checksums.txt") {
-			return a, true
+			return a
 		}
 	}
-	return "", false
+	return ""
 }
 
 // hasAnyToken reports whether name contains any of the tokens as a whole

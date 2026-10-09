@@ -9,13 +9,12 @@ import (
 )
 
 // writeStub writes an executable shell stub into the engine's bin dir.
-func writeStub(t *testing.T, e *Engine, name, body string) string {
+func writeStub(t *testing.T, e *Engine, name, body string) {
 	t.Helper()
 	p := filepath.Join(e.binDir(), name)
 	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return p
 }
 
 // TestProbeInstalled_ExecutesTheTool pins install detection: presence of
