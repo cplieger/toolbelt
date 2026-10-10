@@ -311,9 +311,7 @@ func TestBinDiff_reportsOnlyWhatTheCallbackAdded(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "old"), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		in := &installer{toolsDir: dir, output: func(string) {}}
-
-		added, err := in.binDiff(dir, func() error {
+		added, err := binDiff(dir, func() error {
 			return os.WriteFile(filepath.Join(dir, "new"), []byte("x"), 0o600)
 		})
 		if err != nil {
@@ -325,10 +323,9 @@ func TestBinDiff_reportsOnlyWhatTheCallbackAdded(t *testing.T) {
 	})
 	t.Run("a_callback_failure_is_propagated", func(t *testing.T) {
 		dir := t.TempDir()
-		in := &installer{toolsDir: dir, output: func(string) {}}
 		want := errors.New("install refused")
 
-		added, err := in.binDiff(dir, func() error { return want })
+		added, err := binDiff(dir, func() error { return want })
 		if !errors.Is(err, want) {
 			t.Errorf("binDiff err = %v, want the callback's own error", err)
 		}

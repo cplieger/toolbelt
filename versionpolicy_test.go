@@ -157,10 +157,6 @@ func checkGrammarFor(t *testing.T, constName string) {
 		t.Errorf("source kind %q (%s) has no entry in sourceVersionGrammar", kind, constName)
 		return
 	}
-	if g == grammarUnknown {
-		t.Errorf("source kind %q (%s) maps to grammarUnknown", kind, constName)
-		return
-	}
 	if versionPatterns[g] == nil {
 		t.Errorf("source kind %q (%s) names grammar %d, which has no pattern", kind, constName, g)
 	}

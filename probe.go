@@ -149,7 +149,7 @@ func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 // tool and logged once per fingerprint change.
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceApt {
-		return e.probeApt(ref)
+		return probeApt(ref)
 	}
 	bins := recordedBins(name, t, s)
 	for _, b := range bins {
@@ -181,13 +181,13 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 // The verdict is deliberately NOT cached: unlike the other sources, an
 // apt package can be removed from under the process by anyone with a
 // container shell, and dpkg-query is a cheap local read.
-func (e *Engine) probeApt(pkg string) probeVerdict {
+func probeApt(pkg string) probeVerdict {
 	if !AptAvailable() {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "apt is unavailable on this host"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	version, installed := e.inst.aptInstalled(ctx, pkg)
+	version, installed := aptInstalled(ctx, pkg)
 	if !installed {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "dpkg reports " + pkg + " is not installed"}
 	}

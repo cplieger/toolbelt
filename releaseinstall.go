@@ -67,7 +67,7 @@ func (in *installer) installRelease(ctx context.Context, name, ref, version stri
 	if err != nil {
 		return nil, "", err
 	}
-	spec, err := in.releaseSpec(rr, name, version, assets, hints)
+	spec, err := releaseSpec(rr, name, version, assets, hints)
 	if err != nil {
 		return nil, "", err
 	}
@@ -75,7 +75,7 @@ func (in *installer) installRelease(ctx context.Context, name, ref, version stri
 }
 
 // releaseSpec resolves the asset and builds the InstallSpec for it.
-func (in *installer) releaseSpec(rr releaseRef, name, version string, assets []string, hints *ReleaseHints) (*InstallSpec, error) {
+func releaseSpec(rr releaseRef, name, version string, assets []string, hints *ReleaseHints) (*InstallSpec, error) {
 	choice, err := chooseReleaseAssetWithHints(assets, name, runtime.GOARCH, hints)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", name, version, err)

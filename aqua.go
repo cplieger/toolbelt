@@ -262,7 +262,7 @@ func (d *flatDef) resolveChecksum(p *AquaPackage, spec *InstallSpec, vars *templ
 	if c.Algorithm == "" {
 		return errors.New("aqua: checksum configured without an algorithm")
 	}
-	cu, err := d.checksumURL(p, c, vars)
+	cu, err := checksumURL(p, c, vars)
 	if err != nil {
 		return fmt.Errorf("aqua: checksum url: %w", err)
 	}
@@ -428,7 +428,7 @@ func (d *flatDef) artifactURL(p *AquaPackage, vars *templateVars) (string, error
 // an unsupported type, a template error, a template that renders empty —
 // is an error, never an empty URL the install path could read as "this
 // artifact needs no verification".
-func (d *flatDef) checksumURL(p *AquaPackage, c *AquaChecksum, vars *templateVars) (string, error) {
+func checksumURL(p *AquaPackage, c *AquaChecksum, vars *templateVars) (string, error) {
 	switch c.Type {
 	case aquaTypeGitHubRelease:
 		asset, err := renderTemplate(c.Asset, vars)

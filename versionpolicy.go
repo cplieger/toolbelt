@@ -15,9 +15,9 @@ import (
 type versionGrammar int
 
 const (
-	// grammarUnknown names no alphabet, so a source kind missing from
-	// sourceVersionGrammar cannot inherit one by zero value.
-	grammarUnknown versionGrammar = iota
+	// The zero value names no alphabet, so a source kind missing from
+	// sourceVersionGrammar cannot inherit one.
+	_ versionGrammar = iota
 	// grammarTag is a forge tag or registry semver — the narrowest,
 	// because only these sources put the version in a path component, a
 	// URL segment and a bash $VERSION.
@@ -36,8 +36,8 @@ const maxVersionLen = 100
 
 // sourceVersionGrammar maps each source kind to its producer's grammar.
 // TestSourceVersionGrammarIsTotal fails when a source constant is added
-// without an entry, because the alternative is grammarUnknown reaching a
-// caller that then has to guess.
+// without an entry, because the alternative is the zero grammar reaching
+// a caller that then has to guess.
 var sourceVersionGrammar = map[string]versionGrammar{
 	SourceAqua:    grammarTag,
 	SourceRelease: grammarTag,

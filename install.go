@@ -963,7 +963,7 @@ func commandFailed(label string, err error, output string) error {
 }
 
 // binDiff snapshots dir before fn and returns entries added by fn.
-func (in *installer) binDiff(dir string, fn func() error) ([]string, error) {
+func binDiff(dir string, fn func() error) ([]string, error) {
 	before := map[string]bool{}
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
@@ -992,7 +992,7 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 		return nil, err
 	}
 	pmBin := npmBinDir(in.toolsDir)
-	added, err := in.binDiff(pmBin, func() error {
+	added, err := binDiff(pmBin, func() error {
 		return in.runPM(ctx, "npm", "install", "-g", "--prefix", in.npmDir(), pkg+"@"+version)
 	})
 	if err != nil {
@@ -1011,7 +1011,7 @@ func (in *installer) installPip(ctx context.Context, pkg, version string, prev [
 		return nil, err
 	}
 	pmBin := pythonBinDir(in.toolsDir)
-	added, err := in.binDiff(pmBin, func() error {
+	added, err := binDiff(pmBin, func() error {
 		return in.runPM(ctx, "uv", "tool", "install", "--reinstall", pkg+"=="+version)
 	})
 	if err != nil {
@@ -1075,7 +1075,7 @@ func pkgBinName(pkg string) string {
 // installCargo builds/installs a crate with binaries landing directly
 // in the engine bin dir (cargo --root writes <root>/bin).
 func (in *installer) installCargo(ctx context.Context, crate, version string, prev []string, fallback string) ([]string, error) {
-	added, err := in.binDiff(in.binDir(), func() error {
+	added, err := binDiff(in.binDir(), func() error {
 		return in.runPM(ctx, "cargo", "install", crate,
 			"--version", strings.TrimPrefix(version, "v"), "--root", in.toolsDir)
 	})
@@ -1091,7 +1091,7 @@ func (in *installer) installGo(ctx context.Context, module, version string, prev
 	if !strings.HasPrefix(ver, "v") {
 		ver = "v" + ver
 	}
-	added, err := in.binDiff(in.binDir(), func() error {
+	added, err := binDiff(in.binDir(), func() error {
 		return in.runPM(ctx, "go", "install", module+"@"+ver)
 	})
 	if err != nil {
@@ -1111,7 +1111,7 @@ func (in *installer) installManual(ctx context.Context, name string, t *Tool, pr
 	if err := ensureManagedDirs(in.optDir(), optDir); err != nil {
 		return nil, err
 	}
-	added, err := in.binDiff(in.binDir(), func() error {
+	added, err := binDiff(in.binDir(), func() error {
 		return in.runShell(ctx, t.Install, t.Version, optDir)
 	})
 	if err != nil {
