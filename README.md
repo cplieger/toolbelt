@@ -4,7 +4,7 @@
 
 toolbelt lets your Go server install, update and remove the developer tools its users ask for, on a persistent volume, while it runs.
 
-It replaces the image rebuild or install script a web IDE or agent sandbox would otherwise need for every new CLI, language server or runtime. It runs on Linux amd64 and arm64, needs Go 1.27.1 or later and is licensed under Apache-2.0. At run time it depends on `expr-lang/expr`, `hashicorp/go-version`, `golang.org/x/mod` and eight libraries by the same author.
+It replaces the image rebuild or install script a web IDE or agent sandbox would otherwise need for every new CLI, language server or runtime. It runs on Linux amd64 and arm64, needs Go 1.27.2 or later and is licensed under Apache-2.0. At run time it depends on `expr-lang/expr`, `hashicorp/go-version`, `golang.org/x/mod` and eight libraries by the same author.
 
 ## Why use it
 
