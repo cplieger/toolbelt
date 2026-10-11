@@ -25,7 +25,7 @@ import (
 
 	"github.com/cplieger/httpx/v5"
 	"github.com/cplieger/pathinside/v2"
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // installer executes install/uninstall plans for every source kind.
