@@ -2,8 +2,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/cplieger/atomicfile/v4 v4.1.0 h1:vBF59l/60iLtJhTdE+XCMVpvm5OVc9eGK60TzxG1yfs=
 github.com/cplieger/atomicfile/v4 v4.1.0/go.mod h1:C3RUdajRwohBoXTS7pgGj4fMGpVk0f4mYuqHuRz7zHE=
-github.com/cplieger/httpx/v5 v5.1.0-dev.2 h1:WDqizpth0NZHNE9nxAKmbVZPMGVty4uWwKerBge9BME=
-github.com/cplieger/httpx/v5 v5.1.0-dev.2/go.mod h1:+oL1fPTCSNuzy7HZEC2eCSirL+D3fh/AblvN/nQPSt0=
+github.com/cplieger/httpx/v5 v5.1.0 h1:0niQwaY2Ref1Sc4SVGv3Nc0lo7N1bnHOXefxyTDSGzM=
+github.com/cplieger/httpx/v5 v5.1.0/go.mod h1:+oL1fPTCSNuzy7HZEC2eCSirL+D3fh/AblvN/nQPSt0=
 github.com/cplieger/keyenc v1.1.0-dev.1 h1:RFFC6oeqHMAoBgfg/rvx3zjM90+a1Tg5ZeitWom4dTg=
 github.com/cplieger/keyenc v1.1.0-dev.1/go.mod h1:Lg79aUqLICnRRroo2EDqZKoUTY24g7UcOdgMA8T2j2w=
 github.com/cplieger/pathinside/v2 v2.0.3 h1:g7V1tj/OHvHIaB0W2rwS3HvoaK2Mv5sZWf++tbz9+Fk=
