@@ -12,8 +12,8 @@ github.com/cplieger/runesafe/v3 v3.2.0-dev.1 h1:91ehcUtH+PxLgkX0kFMCdT51ptb3aInE
 github.com/cplieger/runesafe/v3 v3.2.0-dev.1/go.mod h1:5XDABx7qgrlEAYnvKiXdak6rRQ5Zac6MyuQcksZUdEc=
 github.com/cplieger/scheduler/v4 v4.3.0-dev.1 h1:D2UjDkl0uj2HK7rTJQZUu/Wcfe1KD2zr7WPGXxMVFVs=
 github.com/cplieger/scheduler/v4 v4.3.0-dev.1/go.mod h1:ONnKeZ+efBTEk8y+RMWegjFBOyx/pMoQVQE00en1+xk=
-github.com/cplieger/ssrf/v4 v4.5.0-dev.4 h1:xpXHss6sSuXnEAFgypXyFJT0F6PmjwM4bXPPix69SGk=
-github.com/cplieger/ssrf/v4 v4.5.0-dev.4/go.mod h1:DwOXfjc1FMJCvEKh9B26iLHAswz66Kd2Z4x+C5f1UzA=
+github.com/cplieger/ssrf/v4 v4.5.0-dev.5 h1:ESbn49H7pGwOuMuHwTxcFOedEpZwULZBaOtmSyUY1GY=
+github.com/cplieger/ssrf/v4 v4.5.0-dev.5/go.mod h1:3mx2l1qAnJ7G4E+vDwiPTR/2JHB0/yJx/ECXN7wvGOo=
 github.com/cplieger/webhttp/v3 v3.0.2 h1:4eAHYipBy/4tdGUM0S9shdvjkX97Lw2bhulJ3z94cZE=
 github.com/cplieger/webhttp/v3 v3.0.2/go.mod h1:pl50N8nFHBn/2Le+YTpXgSRdmtkS9dt26LRXl/X9uZc=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
