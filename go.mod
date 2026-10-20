@@ -10,7 +10,7 @@ require (
 	github.com/cplieger/pathinside/v2 v2.1.0-dev.1
 	github.com/cplieger/runesafe/v3 v3.2.0-dev.1
 	github.com/cplieger/scheduler/v4 v4.3.0-dev.1
-	github.com/cplieger/ssrf/v4 v4.5.0-dev.4
+	github.com/cplieger/ssrf/v4 v4.5.0-dev.5
 	github.com/cplieger/webhttp/v3 v3.0.2
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-version v1.9.0
