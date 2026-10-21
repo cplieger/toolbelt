@@ -6,9 +6,9 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/cplieger/atomicfile/v4 v4.2.0
 	github.com/cplieger/httpx/v5 v5.2.0-dev.1
-	github.com/cplieger/keyenc v1.1.0-dev.2
-	github.com/cplieger/pathinside/v2 v2.1.0-dev.1
-	github.com/cplieger/runesafe/v3 v3.2.0-dev.1
+	github.com/cplieger/keyenc v1.1.0
+	github.com/cplieger/pathinside/v2 v2.1.0
+	github.com/cplieger/runesafe/v3 v3.2.0
 	github.com/cplieger/scheduler/v4 v4.3.0-dev.1
 	github.com/cplieger/ssrf/v4 v4.5.0-dev.5
 	github.com/cplieger/webhttp/v3 v3.0.2
