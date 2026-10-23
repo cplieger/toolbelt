@@ -1,15 +1,15 @@
 module github.com/cplieger/toolbelt/v3
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/cplieger/atomicfile/v4 v4.1.0
-	github.com/cplieger/httpx/v5 v5.0.5
-	github.com/cplieger/keyenc v1.0.11
-	github.com/cplieger/pathinside/v2 v2.0.3
-	github.com/cplieger/runesafe/v3 v3.0.0
-	github.com/cplieger/scheduler/v4 v4.2.3
+	github.com/cplieger/atomicfile/v4 v4.2.0
+	github.com/cplieger/httpx/v5 v5.2.0
+	github.com/cplieger/keyenc v1.1.0
+	github.com/cplieger/pathinside/v2 v2.1.0
+	github.com/cplieger/runesafe/v3 v3.2.0
+	github.com/cplieger/scheduler/v4 v4.3.0
 	github.com/cplieger/ssrf/v4 v4.4.0
 	github.com/cplieger/webhttp/v3 v3.0.2
 	github.com/expr-lang/expr v1.17.8
