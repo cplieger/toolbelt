@@ -680,21 +680,12 @@ func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
 	return jv, nil
 }
 
-// applyAptHold makes a pin REAL for an apt package by asking dpkg to hold
-// it, and releases the hold when the pin comes off.
+// applyAptHold holds a pinned apt package with `apt-mark hold` and releases
+// the hold when the pin comes off: apt upgrades a package as another
+// install's dependency, and a hold is the only thing apt respects.
 //
-// Without it a pin is bookkeeping only. Manifest-level pinning already
-// stops this engine bumping the row (updateOne skips a pinned tool), but
-// apt upgrades a package as a DEPENDENCY of some other install, so a
-// pinned package could move underneath a pin that reported it frozen and
-// nothing would record the change. `apt-mark hold` is the only mechanism
-// apt itself respects.
-//
-// Best-effort on purpose, and it fires only on a transition. The pin is
-// already persisted by the time this runs, so a failure must not undo the
-// user's stated intent — it warns and leaves the manifest-level pin in
-// force, which is strictly what the pin meant before this existed. It runs
-// after patchJob, so a patch the queue refuses never reaches dpkg.
+// It fires only on a pin transition, after patchJob, so a refused patch
+// never reaches dpkg. A failure warns and leaves the manifest pin in force.
 func (e *Engine) applyAptHold(name string, out *patchOutcome) {
 	pkg, ok := strings.CutPrefix(out.source, SourceApt+":")
 	if !ok || !out.pinChanged || !AptAvailable() {

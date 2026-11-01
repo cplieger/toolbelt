@@ -17,8 +17,6 @@ func writeStub(t *testing.T, e *Engine, name, body string) {
 	}
 }
 
-// writeNpmPackage writes pkg's package.json where npm's global install puts
-// it under the engine's npm prefix.
 func writeNpmPackage(t *testing.T, e *Engine, pkg, manifest string) {
 	t.Helper()
 	dir := filepath.Join(e.toolsDir, "npm", "lib", "node_modules", pkg)

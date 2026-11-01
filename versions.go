@@ -49,11 +49,9 @@ var errAllRetracted = errors.New("every published version is retracted")
 type versionResolver struct {
 	client *http.Client
 	cache  map[latestKey]string
-	// aptIdx guarantees a package index exists before apt-cache is asked
-	// anything. Both consumer images ship with /var/lib/apt/lists empty,
-	// and apt-cache answers "no Candidate line" rather than erroring on a
-	// missing index, so without this a first-ever apt add fails while
-	// looking like a broken package name.
+	// aptIdx ensures a package index exists before apt-cache runs: with
+	// /var/lib/apt/lists empty, apt-cache answers "no Candidate line" and a
+	// first apt add reads as a broken package name.
 	aptIdx *aptIndex
 
 	mu sync.Mutex
@@ -421,10 +419,8 @@ func parseTagVersion(tag, prefix string) *goversion.Version {
 	if ver, err := goversion.NewVersion(s); err == nil {
 		return ver
 	}
-	// Tags like "go1.24.0" or "jq-1.8.2" carry a non-numeric prefix the
-	// definition doesn't declare (the version_filter does the matching
-	// instead). Parse from the first digit so version comparison still
-	// works — a lexicographic fallback would rank go1.9 above go1.24.
+	// "go1.24.0" or "jq-1.8.2" carry an undeclared prefix; parse from the
+	// first digit, since a lexicographic fallback ranks go1.9 above go1.24.
 	if i := strings.IndexFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }); i > 0 {
 		if ver, err := goversion.NewVersion(s[i:]); err == nil {
 			return ver
@@ -434,10 +430,8 @@ func parseTagVersion(tag, prefix string) *goversion.Version {
 }
 
 func (v *versionResolver) latestNpm(ctx context.Context, pkg string) (string, error) {
-	// The dist-tag endpoint returns just the tagged version manifest.
-	// Never fetch the full packument (/{pkg}): it carries every version
-	// ever published and blows the response-size cap on big packages
-	// (typescript's is >4 MiB — found enabling the seed template).
+	// The dist-tag endpoint, never the full packument (/{pkg}), which lists
+	// every version and overflows the response cap (typescript's is >4 MiB).
 	var doc struct {
 		Version string `json:"version"`
 	}

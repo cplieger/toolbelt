@@ -90,15 +90,12 @@ type probeVerdict struct {
 	CannotExec bool
 }
 
-// probeCache memoizes exec probes so the read path (Inventory, which a
-// settings UI polls) does not spawn a subprocess per tool per call.
-//
-// Presence, and a pip: venv's interpreter, are re-checked on every probe:
-// each is a cheap local read, and a deleted file must be noticed at once.
-// Only the EXEC verdict is cached, keyed by a fingerprint of the probe
-// target (resolved path, size, mtime), the recorded version, and the
-// declared version args, so any reinstall, relink or version bump
-// invalidates it without a TTL.
+// probeCache memoizes exec probes so Inventory, which a settings UI polls,
+// does not spawn a subprocess per tool per call. Presence and a pip: venv's
+// interpreter are re-checked on every probe, so a deleted file shows at once.
+// The exec verdict is keyed by the probe target (resolved path, size, mtime),
+// the recorded version and the declared version args, so a reinstall, relink
+// or version bump invalidates it without a TTL.
 type probeCache struct {
 	entries map[string]probeCacheEntry
 	mu      sync.Mutex

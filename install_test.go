@@ -1095,7 +1095,6 @@ func fakeUV(t *testing.T) string {
 	return argv
 }
 
-// readArgv returns the argv lines fakeUV recorded, one per uv run.
 func readArgv(t *testing.T, path string) []string {
 	t.Helper()
 	data, err := os.ReadFile(path)
