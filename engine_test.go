@@ -261,8 +261,8 @@ func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	if final.State != JobFailed {
 		t.Errorf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
 	}
-	if !strings.Contains(final.Error, "cannot run") {
-		t.Errorf("job error = %q, want it to say the tool cannot run", final.Error)
+	if !strings.Contains(final.Error, "cannot execute") {
+		t.Errorf("job error = %q, want it to say the tool cannot execute", final.Error)
 	}
 	inv, _ := e.Inventory()
 	row := inv.Tools[0]
@@ -326,6 +326,126 @@ func TestInstall_LibraryOnlyNpmPackageIsAlreadyInstalled(t *testing.T) {
 	}
 	if row := inventoryByName(t, e)[pkg]; !row.Installed {
 		t.Errorf("inventory row = %+v, want installed", row)
+	}
+}
+
+// TestInstall_NoBinNpmPackageProofDecidesTheJob pins that an npm install
+// exiting 0 ends done only when the installed package.json proves the
+// requested version, the same proof the inventory reads, so a done job is
+// never followed by a reconcile that reruns npm.
+func TestInstall_NoBinNpmPackageProofDecidesTheJob(t *testing.T) {
+	const pkg = "stylelint-config-standard"
+	cases := []struct {
+		name       string
+		manifest   string // written by the fake npm; empty writes no package.json
+		wantDone   bool
+		wantReason string
+	}{
+		{name: "requested version installed", manifest: `{"name":"stylelint-config-standard","version":"1.0.0"}`, wantDone: true},
+		{name: "another version left in place", manifest: `{"name":"stylelint-config-standard","version":"0.9.0"}`, wantReason: `"0.9.0"`},
+		{name: "no package.json", wantReason: "package.json"},
+		{name: "malformed package.json", manifest: `{"version":`, wantReason: "package.json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourceNpm: ""}})
+			captureLogs(e)
+			dir := filepath.Join(e.toolsDir, "npm", "lib", "node_modules", pkg)
+			script := "#!/bin/sh\nexit 0\n"
+			if tc.manifest != "" {
+				script = fmt.Sprintf("#!/bin/sh\nmkdir -p '%s' && printf '%%s' '%s' > '%s/package.json'\n", dir, tc.manifest, dir)
+			}
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools[pkg] = Tool{Source: "npm:" + pkg, Version: "1.0.0"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install(pkg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+
+			row := inventoryByName(t, e)[pkg]
+			if tc.wantDone {
+				if final.State != JobDone || !row.Installed {
+					t.Errorf("job = %s (%q), installed = %v; want done and installed", final.State, final.Error, row.Installed)
+				}
+				return
+			}
+			if final.State != JobFailed {
+				t.Errorf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
+			}
+			if !strings.Contains(final.Error, tc.wantReason) || !strings.Contains(row.LastError, tc.wantReason) {
+				t.Errorf("job error = %q, last_error = %q, want both to carry %q", final.Error, row.LastError, tc.wantReason)
+			}
+			if row.Installed {
+				t.Error("the package reads as installed")
+			}
+		})
+	}
+}
+
+// TestInstall_ProbeVerdictDecidesThePipJob pins that an install whose venv
+// uv built on an interpreter outside the managed dir fails, as the inventory
+// reads that venv as not installed.
+func TestInstall_ProbeVerdictDecidesThePipJob(t *testing.T) {
+	foreign := newInterpreterHome(t, t.TempDir())
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"mkdir -p \"$UV_TOOL_DIR/x/bin\"\n" +
+		"echo \"home = " + foreign + "\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
+		"ln -sf \"" + foreign + "/python3\" \"$UV_TOOL_DIR/x/bin/python\"\n" +
+		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
+		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e := pipEngine(t, "")
+	captureLogs(e)
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	final := waitJob(t, e, job.ID)
+	if final.State != JobFailed {
+		t.Errorf("install job = %s, want failed (tail %v)", final.State, final.OutputTail)
+	}
+	if row := inventoryRow(t, e, "x"); row.Installed || !strings.Contains(row.LastError, "is outside") {
+		t.Errorf("inventory row = %+v, want not installed with the probe's reason", row)
+	}
+}
+
+// TestInstall_VersionBannerMismatchIsAWarning pins the one tolerated probe
+// failure: a bin that runs but whose declared version banner does not carry
+// the recorded version ends the job done, with the reason in its output.
+func TestInstall_VersionBannerMismatchIsAWarning(t *testing.T) {
+	e := newTestEngine(t, nil)
+	captureLogs(e)
+	job, err := e.Add(t.Context(), &AddRequest{
+		Name: "banner", Source: SourceManual, Version: "1.0.0", VersionArgs: []string{"--version"},
+		Install: `printf '#!/bin/sh\necho banner 9.9.9\n' > "$BIN/banner" && chmod 755 "$BIN/banner"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	final := waitJob(t, e, job.ID)
+	if final.State != JobDone {
+		t.Errorf("job state = %s (%q), want done", final.State, final.Error)
+	}
+	if out := strings.Join(final.OutputTail, "\n"); !strings.Contains(out, "was not verified") || !strings.Contains(out, "9.9.9") {
+		t.Errorf("job output = %q, want the unverified banner reported", out)
 	}
 }
 

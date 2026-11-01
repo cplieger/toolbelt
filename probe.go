@@ -80,15 +80,13 @@ type probeVerdict struct {
 	// Reason explains a failure or a downgrade, for the log line.
 	Reason string
 	// OK is the install-detection answer: true = installed, false =
-	// reinstall. A failed probe is never fatal.
+	// reinstall.
 	OK bool
-	// CannotExec marks the one failure an install may not record as a
-	// success: the binary is present but the OS refused to run it (a
-	// missing shared library, a wrong-architecture image, an
-	// unresolvable interpreter). Distinct from a version-banner
-	// mismatch, which an install tolerates because a banner this engine
-	// cannot parse is a knowledge gap rather than a broken tool.
-	CannotExec bool
+	// BannerMismatch marks a bin that ran but whose declared version
+	// banner did not carry the recorded version, the one failed verdict
+	// an install tolerates: a banner this engine cannot parse is a
+	// knowledge gap rather than a broken tool.
+	BannerMismatch bool
 }
 
 // probeCache memoizes exec probes so Inventory, which a settings UI polls,
@@ -141,29 +139,42 @@ func (c *probeCache) forget(name string) {
 func (e *Engine) binDir() string { return binDir(e.toolsDir) }
 
 // probeInstalled reports whether the tool is installed. The recorded bin
-// must exist AND execute, and when the definition declares its
-// version-reporting shape the answer must contain the recorded version,
-// so a truncated download, a wrong-architecture binary, a dangling
-// symlink, a dead venv interpreter, or the wrong version all read as NOT
-// installed. A bin the engine cannot execute falls back to presence only,
-// at Warn. An apt package, and an npm package that ships no bin, are
-// proven by their package manager's record instead.
+// must exist AND execute, and with declared version args the answer must
+// contain the recorded version, so a truncated download, a wrong-arch
+// binary, a dangling symlink, a dead venv interpreter, or the wrong version
+// all read as NOT installed. A present non-executable file falls back to
+// presence, at Warn; a file the OS refuses to start is not installed. An apt
+// package, and an npm package that ships no bin, are proven by their
+// package manager's record instead.
 func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeTool(name, t, s).OK
 }
 
-// probeTool is probeInstalled's full verdict (mode + reason), cached per
-// tool and logged once per fingerprint change.
+// probeTool is probeInstalled's full verdict (mode + reason).
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	if kind == SourceApt {
 		return probeApt(ref)
 	}
+	var pkgReason string
 	if kind == SourceNpm && len(s.Bins)+len(s.PMBins) == 0 {
-		if v, ok := e.probeNpmPackage(ref, s.InstalledVersion); ok {
+		v, ok := e.probeNpmPackage(ref, s.InstalledVersion)
+		if ok {
 			return v
 		}
+		pkgReason = v.Reason
 	}
+	v := e.probeBins(name, t, s)
+	if !v.OK && pkgReason != "" {
+		v.Reason = pkgReason + "; " + v.Reason
+	}
+	return v
+}
+
+// probeBins executes the tool's probe bin, cached per tool and logged once
+// per fingerprint change.
+func (e *Engine) probeBins(name string, t *Tool, s *ToolStatus) probeVerdict {
+	kind, ref, _ := strings.Cut(t.Source, ":")
 	bins := recordedBins(name, t, s)
 	for _, b := range bins {
 		if _, err := os.Stat(filepath.Join(e.binDir(), b)); err != nil {
@@ -208,7 +219,7 @@ func (e *Engine) probePipInterpreter(ref string) (identity string, failed probeV
 	switch {
 	case missing != "":
 		return "", probeVerdict{
-			OK: false, Mode: probeModePresence, CannotExec: true,
+			OK: false, Mode: probeModePresence,
 			Reason: "venv interpreter " + missing + " is missing",
 		}, false
 	case foreign != "":
@@ -246,23 +257,30 @@ const npmPackageCap = 1 << 20
 // probeNpmPackage checks an npm package that ships no bin against the
 // version in its installed package.json. ok is false when the bin probe
 // must decide instead: the package declares a bin, or its package.json is
-// missing or unreadable. The read goes through os.Root because npm refs
-// are not validated, so a ".." ref must not reach outside node_modules.
-// Like probeApt it is not cached: a file read notices a removal at once.
+// missing or unreadable, which the verdict's Reason then names. The read
+// goes through os.Root because npm refs are not validated, so a ".." ref
+// must not reach outside node_modules. Like probeApt it is not cached: a
+// file read notices a removal at once.
 func (e *Engine) probeNpmPackage(ref, want string) (probeVerdict, bool) {
+	unread := func(cause string) (probeVerdict, bool) {
+		return probeVerdict{Reason: "the package.json of " + ref + " " + cause}, false
+	}
 	root, err := os.OpenRoot(npmModulesDir(e.toolsDir))
 	if err != nil {
-		return probeVerdict{}, false
+		return unread("cannot be read: " + err.Error())
 	}
 	defer func() { _ = root.Close() }()
 	f, err := root.Open(filepath.Join(ref, "package.json"))
 	if err != nil {
-		return probeVerdict{}, false
+		return unread("cannot be read: " + err.Error())
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, npmPackageCap+1))
-	if err != nil || len(data) > npmPackageCap {
-		return probeVerdict{}, false
+	switch {
+	case err != nil:
+		return unread("cannot be read: " + err.Error())
+	case len(data) > npmPackageCap:
+		return unread("exceeds " + strconv.Itoa(npmPackageCap) + " bytes")
 	}
 	// npm links a bin from "bin" (a path or a name-to-path map) or from
 	// every file in "directories.bin":
@@ -274,8 +292,11 @@ func (e *Engine) probeNpmPackage(ref, want string) (probeVerdict, bool) {
 			Bin string `json:"bin"`
 		} `json:"directories"`
 	}
-	if json.Unmarshal(data, &pkg) != nil || pkg.Version == "" {
-		return probeVerdict{}, false
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return unread("is not valid JSON: " + err.Error())
+	}
+	if pkg.Version == "" {
+		return unread("carries no version")
 	}
 	if declaresBin(pkg.Bin) || pkg.Directories.Bin != "" {
 		return probeVerdict{}, false
@@ -451,27 +472,19 @@ func (e *Engine) runProbe(target string, args []string, want string, declared bo
 	}
 	out, runErr := e.execProbe(target, args)
 	if runErr != nil {
-		return probeVerdict{
-			OK: false, Mode: probeModeExec, Reason: runErr.Error(),
-			CannotExec: errors.Is(runErr, errCannotExecute),
-		}
+		return probeVerdict{OK: false, Mode: probeModeExec, Reason: runErr.Error()}
 	}
 	if !declared || want == "" {
 		return probeVerdict{OK: true, Mode: probeModeExec}
 	}
 	if !versionAnswered(out, want) {
 		return probeVerdict{
-			OK: false, Mode: probeModeVersion,
+			OK: false, Mode: probeModeVersion, BannerMismatch: true,
 			Reason: fmt.Sprintf("reported %q, recorded version is %q", firstLine(out), want),
 		}
 	}
 	return probeVerdict{OK: true, Mode: probeModeVersion}
 }
-
-// errCannotExecute marks a probe failure where the binary was never
-// entered, so a caller can tell it apart from a timeout or an
-// unparseable version banner (errors.Is).
-var errCannotExecute = errors.New("cannot execute")
 
 // execProbe runs the probe command with the engine's PATH (so a
 // launcher's `#!/usr/bin/env node` shebang resolves against the engine's
@@ -493,12 +506,12 @@ func (e *Engine) execProbe(target string, args []string) (string, error) {
 	}
 	exit, isExit := errors.AsType[*exec.ExitError](err)
 	if err != nil && !isExit {
-		return out.String(), fmt.Errorf("%w: %w", errCannotExecute, err)
+		return out.String(), fmt.Errorf("cannot execute: %w", err)
 	}
 	// The loader's own diagnostic (stderr) is the only description of
 	// why the binary would not run.
 	if isExit && exit.ExitCode() == exitCouldNotExecute {
-		return out.String(), fmt.Errorf("%w: %s", errCannotExecute, probeFailureDetail(out.String()))
+		return out.String(), fmt.Errorf("cannot execute: %s", probeFailureDetail(out.String()))
 	}
 	return out.String(), nil
 }

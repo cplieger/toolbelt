@@ -1518,8 +1518,8 @@ func depsOf(name string, t *Tool, backends map[string]string) []string {
 // The status write is the install's COMMIT POINT: superseded versions are
 // pruned only after the new tree and its state record are both durable, so a
 // crash or a full disk never leaves a pruned predecessor beside an unwritten
-// state file. verifyInstalled sits between the two, so a binary that cannot
-// run fails the install with the predecessor still on disk.
+// state file. verifyInstalled sits between the two, so an install the probe
+// does not read as installed fails with the predecessor still on disk.
 func (e *Engine) installTool(ctx context.Context, name string, output func(string)) (err error) {
 	t, err := e.resolveInstallTarget(ctx, name, output)
 	if err != nil || t == nil {
@@ -1649,30 +1649,27 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 	return nil
 }
 
-// verifyInstalled probes what the install just published and refuses to
-// let a binary the OS will not run stand as a completed install. It runs
-// AFTER the status write (durability unchanged) and BEFORE pruning, so a
-// failed verification leaves the retained predecessor as the fallback.
-//
-// Only CannotExec fails the install; a version-banner mismatch is
-// reported and tolerated as a knowledge gap rather than evidence the
-// tool is broken. The probe verdict is cached by binary fingerprint, so
-// the inventory read that follows reuses it instead of re-spawning.
+// verifyInstalled fails the install unless the inventory's probe reads what
+// it published as installed, so a done job never leaves a row Reconcile
+// would install again. probeVerdict.BannerMismatch is the one verdict it
+// reports and tolerates. It runs after the status write and before pruning,
+// so a failed check keeps the predecessor on disk.
 func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
 	st := e.store.State().Tools[name]
 	v := e.probeTool(name, t, &st)
 	switch {
-	case v.CannotExec:
-		err := fmt.Errorf("installed %s but it cannot run: %s", t.Version, v.Reason)
-		output(fmt.Sprintf("ERROR %s: %v", name, err))
-		if serr := e.recordFailure(name, err); serr != nil {
-			e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
-		}
-		return err
-	case !v.OK:
+	case v.OK:
+		return nil
+	case v.BannerMismatch:
 		output(fmt.Sprintf("The %s install was not verified. %s", name, v.Reason))
+		return nil
 	}
-	return nil
+	err := fmt.Errorf("installed %s but its install check failed: %s", t.Version, v.Reason)
+	output(fmt.Sprintf("ERROR %s: %v", name, err))
+	if serr := e.recordFailure(name, err); serr != nil {
+		e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
+	}
+	return err
 }
 
 // recordFailure stores an install failure on the tool's status row.

@@ -32,18 +32,16 @@ func writeNpmPackage(t *testing.T, e *Engine, pkg, manifest string) {
 // TestProbeInstalled_ExecutesTheTool pins install detection: presence of
 // bin/<name> is not proof, so a corrupt/wrong-arch binary, a dangling
 // link, or the wrong version all read as NOT installed. It also pins
-// the CannotExec split: the binary was never entered (exit 127) versus
-// every other verdict, where the tool ran and this engine merely could
-// not grade the answer.
+// which failure is a banner mismatch, the one an install tolerates.
 func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 	cases := []struct {
-		name           string
-		setup          func(t *testing.T, e *Engine) (Tool, ToolStatus)
-		want           bool
-		wantMode       string
-		wantWarning    string
-		wantCannotExec bool
-		wantReason     string
+		name               string
+		setup              func(t *testing.T, e *Engine) (Tool, ToolStatus)
+		want               bool
+		wantMode           string
+		wantWarning        string
+		wantBannerMismatch bool
+		wantReason         string
 	}{
 		{
 			name: "runnable binary, no version shape declared",
@@ -92,6 +90,7 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 					ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
 			want: false, wantMode: probeModeVersion, wantWarning: "probe failed",
+			wantBannerMismatch: true,
 		},
 		{
 			name: "declared version shape but nothing recorded to compare",
@@ -111,7 +110,7 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
 			want: false, wantMode: probeModeExec, wantWarning: "probe failed",
-			wantCannotExec: true,
+			wantReason: "cannot execute",
 		},
 		{
 			// The shape that shipped: node's own linux-x64 build links
@@ -126,7 +125,7 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
 			want: false, wantMode: probeModeExec, wantWarning: "probe failed",
-			wantCannotExec: true, wantReason: "libatomic.so.1",
+			wantReason: "libatomic.so.1",
 		},
 		{
 			// The tolerance the 127 rule must not swallow: a tool that
@@ -290,10 +289,8 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 				writeStub(t, e, "tool", "sleep 120")
 				return Tool{Source: SourceManual}, ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
-			// NOT CannotExec: a language server that ignores --version
-			// and blocks has started, so a timeout must not fail an
-			// install the way an unrunnable binary does.
 			want: false, wantMode: probeModeExec, wantWarning: "probe failed",
+			wantReason: "did not answer",
 		},
 	}
 	for _, tc := range cases {
@@ -312,8 +309,8 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			if tc.wantMode != "" && got.Mode != tc.wantMode {
 				t.Errorf("probe mode = %q, want %q (reason %q)", got.Mode, tc.wantMode, got.Reason)
 			}
-			if got.CannotExec != tc.wantCannotExec {
-				t.Errorf("probe CannotExec = %v, want %v (reason %q)", got.CannotExec, tc.wantCannotExec, got.Reason)
+			if got.BannerMismatch != tc.wantBannerMismatch {
+				t.Errorf("probe BannerMismatch = %v, want %v (reason %q)", got.BannerMismatch, tc.wantBannerMismatch, got.Reason)
 			}
 			if tc.wantReason != "" && !strings.Contains(got.Reason, tc.wantReason) {
 				t.Errorf("probe reason = %q, want it to carry %q", got.Reason, tc.wantReason)
@@ -559,18 +556,17 @@ func interpreterHomeAt(t *testing.T, dir, name string) string {
 }
 
 // TestProbeInstalled_PipVenvInterpreter pins that a pip: launcher whose venv
-// interpreter is gone reads as not installed and unrunnable, though the
+// interpreter is gone reads as not installed, though the
 // launcher file itself is intact. uv names a tool's venv after the
 // normalized package name without extras
 // (https://packaging.python.org/en/latest/specifications/name-normalization/).
 func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 	cases := []struct {
-		name           string
-		ref            string
-		setup          func(t *testing.T, e *Engine)
-		want           bool
-		wantReason     string
-		wantCannotExec bool
+		name       string
+		ref        string
+		setup      func(t *testing.T, e *Engine)
+		want       bool
+		wantReason string
 	}{
 		{
 			name: "live interpreter",
@@ -590,7 +586,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: false, wantCannotExec: true, wantReason: filepath.Join("x", "bin", "python"),
+			want: false, wantReason: filepath.Join("x", "bin", "python"),
 		},
 		{
 			name: "venv without its python link",
@@ -602,7 +598,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: false, wantCannotExec: true, wantReason: filepath.Join("x", "bin", "python"),
+			want: false, wantReason: filepath.Join("x", "bin", "python"),
 		},
 		{
 			name: "python link resolving through a link chain",
@@ -623,7 +619,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			setup: func(t *testing.T, e *Engine) {
 				writeVenv(t, e, "x", filepath.Join(t.TempDir(), "cpython-3.14.7", "bin"))
 			},
-			want: false, wantCannotExec: true, wantReason: "cpython-3.14.7",
+			want: false, wantReason: "cpython-3.14.7",
 		},
 		{
 			name: "copied interpreter whose home is gone",
@@ -639,7 +635,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: false, wantCannotExec: true, wantReason: "cpython-3.14.7",
+			want: false, wantReason: "cpython-3.14.7",
 		},
 		{
 			name: "normalized venv name without extras",
@@ -647,7 +643,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			setup: func(t *testing.T, e *Engine) {
 				writeVenv(t, e, "ruamel-yaml-clib", filepath.Join(t.TempDir(), "gone"))
 			},
-			want: false, wantCannotExec: true, wantReason: "gone",
+			want: false, wantReason: "gone",
 		},
 		{
 			name: "interpreter outside the managed dir",
@@ -751,9 +747,6 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			if got.OK != tc.want {
 				t.Errorf("probe OK = %v (%s: %s), want %v", got.OK, got.Mode, got.Reason, tc.want)
 			}
-			if got.CannotExec != tc.wantCannotExec {
-				t.Errorf("probe CannotExec = %v, want %v (reason %q)", got.CannotExec, tc.wantCannotExec, got.Reason)
-			}
 			if tc.wantReason != "" && !strings.Contains(got.Reason, tc.wantReason) {
 				t.Errorf("probe reason = %q, want it to carry %q", got.Reason, tc.wantReason)
 			}
@@ -786,8 +779,8 @@ func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			if v := e.probeTool("x", &tool, &status); v.OK || !v.CannotExec {
-				t.Errorf("probe after the interpreter was removed = %+v, want not OK and CannotExec", v)
+			if v := e.probeTool("x", &tool, &status); v.OK || v.BannerMismatch {
+				t.Errorf("probe after the interpreter was removed = %+v, want not OK and no banner mismatch", v)
 			}
 		})
 	}
@@ -800,10 +793,10 @@ func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) 
 // interpreter cannot execute (execve(2), EACCES).
 func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 	cases := []struct {
-		change         func(t *testing.T, python string)
-		name           string
-		wantMode       string
-		wantCannotExec bool
+		change             func(t *testing.T, python string)
+		name               string
+		wantMode           string
+		wantBannerMismatch bool
 	}{
 		{
 			name: "interpreter loses its execute bit",
@@ -812,7 +805,7 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantMode: probeModeExec, wantCannotExec: true,
+			wantMode: probeModeExec,
 		},
 		{
 			name: "interpreter replaced in place",
@@ -829,21 +822,21 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantMode: probeModeVersion,
+			wantMode: probeModeVersion, wantBannerMismatch: true,
 		},
 		{
 			name: "interpreter renamed over, keeping mode, size and mtime",
 			change: func(t *testing.T, python string) {
 				replaceKeepingStat(t, python, "#!/bin/sh\necho x 2.0.0\n", replaceByRename)
 			},
-			wantMode: probeModeVersion,
+			wantMode: probeModeVersion, wantBannerMismatch: true,
 		},
 		{
 			name: "interpreter rewritten in place, keeping mode, size and mtime",
 			change: func(t *testing.T, python string) {
 				replaceKeepingStat(t, python, "#!/bin/sh\necho x 2.0.0\n", replaceInPlace)
 			},
-			wantMode: probeModeVersion,
+			wantMode: probeModeVersion, wantBannerMismatch: true,
 		},
 	}
 	for _, tc := range cases {
@@ -869,9 +862,9 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 			tc.change(t, python)
 
 			v := e.probeTool("x", &tool, &status)
-			if v.OK || v.Mode != tc.wantMode || v.CannotExec != tc.wantCannotExec {
-				t.Errorf("probe after the interpreter changed = %+v, want not OK, mode %q, CannotExec %v",
-					v, tc.wantMode, tc.wantCannotExec)
+			if v.OK || v.Mode != tc.wantMode || v.BannerMismatch != tc.wantBannerMismatch {
+				t.Errorf("probe after the interpreter changed = %+v, want not OK, mode %q, BannerMismatch %v",
+					v, tc.wantMode, tc.wantBannerMismatch)
 			}
 		})
 	}
