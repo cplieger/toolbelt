@@ -82,7 +82,7 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/too
 
 - Uninstalls remove only the files the engine recorded when it installed the tool. A binary of the same name that it did not install stays.
 - A download whose aqua registry definition declares a checksum installs only when that checksum matches. A tool with no declared checksum installs unverified, and its state says so.
-- A tool that ships a binary counts as installed only when that binary runs. A Debian package counts as installed when dpkg reports it, whether or not it ships a binary. A binary the system cannot start fails the install, and the error carries the system's reason, such as a missing library.
+- A tool whose recorded binary is executable counts as installed only when that binary runs and answers. A recorded binary that is present but not an executable file, such as a regular file without an execute bit, counts as installed by its presence, and the engine logs a warning. A Debian package counts as installed when dpkg reports it, whether or not it ships a binary. A binary the system cannot start fails the install, and the error carries the system's reason, such as a missing library.
 - A new version is written in full and flushed to disk before it replaces the old one. A failed install leaves the previous version in place.
 - A newer catalog replaces the current one only after it passes the same checks as `toolcatalog verify`. A bad fetch changes nothing.
 - Asking for a tool also installs every tool it depends on, first. A removal that would break an enabled tool is refused and names it.
