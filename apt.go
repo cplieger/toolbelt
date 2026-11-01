@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -153,31 +154,75 @@ func aptQuery(ctx context.Context, pkg string) (aptStatus, error) {
 	if err != nil {
 		return aptStatus{}, commandFailed("dpkg-query "+pkg, err, "")
 	}
-	st, err := aptStatusFrom(string(out))
+	st, err := aptStatusFrom(string(out), func() (string, error) { return dpkgNativeArch(ctx) })
 	if err != nil {
 		return aptStatus{}, fmt.Errorf("dpkg-query %s: %w", pkg, err)
 	}
 	return st, nil
 }
 
-// aptStatusFormat is the dpkg-query format aptStatusFrom parses.
-const aptStatusFormat = "-f=${db:Status-Want} ${db:Status-Status} ${Version}"
+// aptStatusFormat is the dpkg-query format aptStatusFrom parses. Tabs because
+// a record that is not installed has an empty version and may have an empty
+// architecture; the newline because dpkg-query prints one record per
+// installed architecture of a Multi-Arch: same package and adds no separator.
+const aptStatusFormat = "-f=${Architecture}\t${db:Status-Want}\t${db:Status-Status}\t${Version}\n"
 
-// aptStatusFrom reads one aptStatusFormat answer; a package that is not
-// installed has no version, so its answer can end after the status word.
+// aptStatusFrom reads an aptStatusFormat answer. Several records are one
+// package's architectures, of which the native one, or an all or
+// unrecorded one, is what apt-get and apt-mark act on for a bare name;
+// nativeArch is asked only then, and no matching record reads as absent.
 // The status word decides: after `apt-get remove nano` (apt 3.0.3) dpkg keeps
 // a config-files record at 8.4-1+deb13u1 and exits 0 with no binary on disk,
 // so a version-only read reports every apt entry present after a recreate.
-func aptStatusFrom(out string) (aptStatus, error) {
-	fields := strings.SplitN(strings.TrimSpace(out), " ", 3)
-	if len(fields) < 2 {
-		return aptStatus{}, fmt.Errorf("unreadable dpkg status %q", strings.TrimSpace(out))
+func aptStatusFrom(out string, nativeArch func() (string, error)) (aptStatus, error) {
+	var records [][]string
+	for line := range strings.Lines(out) {
+		fields := strings.Split(strings.TrimRight(line, "\n"), "\t")
+		if len(fields) != 4 {
+			return aptStatus{}, fmt.Errorf("unreadable dpkg status %q", strings.TrimSpace(out))
+		}
+		records = append(records, fields)
 	}
-	st := aptStatus{held: fields[0] == "hold", installed: fields[1] == aptStatusInstalled}
-	if st.installed && len(fields) == 3 {
-		st.version = strings.TrimSpace(fields[2])
+	if len(records) == 0 {
+		return aptStatus{}, errors.New("empty dpkg status")
+	}
+	rec := records[0]
+	if len(records) > 1 {
+		native, err := nativeArch()
+		if err != nil {
+			return aptStatus{}, err
+		}
+		i := slices.IndexFunc(records, func(r []string) bool {
+			return r[0] == native || r[0] == "all" || r[0] == ""
+		})
+		if i < 0 {
+			return aptStatus{}, nil
+		}
+		rec = records[i]
+	}
+	st := aptStatus{held: rec[1] == "hold", installed: rec[2] == aptStatusInstalled}
+	if st.installed {
+		st.version = rec[3]
 	}
 	return st, nil
+}
+
+// dpkgNativeArch is dpkg's native architecture (dpkg(1), --print-architecture).
+func dpkgNativeArch(ctx context.Context) (string, error) {
+	cmd, err := systemCommand(ctx, "dpkg", "--print-architecture")
+	if err != nil {
+		return "", err
+	}
+	cmd.Env = aptEnv()
+	out, err := cmd.Output()
+	if err != nil {
+		return "", commandFailed("dpkg --print-architecture", err, "")
+	}
+	arch := strings.TrimSpace(string(out))
+	if arch == "" {
+		return "", errors.New("dpkg printed no native architecture")
+	}
+	return arch, nil
 }
 
 // aptCandidate reports the version apt would install now. It is what an apt
@@ -329,14 +374,13 @@ func aptArchivesLockBusy(output string) bool {
 // maintainer script asks debconf a question would otherwise block on a
 // prompt no operator can see, and the job would hang until its context
 // expired rather than failing. Nothing here reads a terminal.
-//
-// LC_ALL=C because the engine matches apt and dpkg messages, which both
-// translate; os/exec keeps the last value of a repeated key, so it overrides
-// an inherited LC_ALL, and gettext ignores LANGUAGE under the C locale.
 func aptEnv() []string {
 	return systemPATHFirst(append(os.Environ(),
 		"DEBIAN_FRONTEND=noninteractive",
 		"DEBCONF_NONINTERACTIVE_SEEN=true",
+		// The engine matches apt and dpkg messages, which both translate. The
+		// last value of a repeated key wins (os/exec), and gettext ignores
+		// LANGUAGE under the C locale.
 		"LC_ALL=C",
 	))
 }

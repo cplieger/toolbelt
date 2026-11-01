@@ -3445,7 +3445,7 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 			"want=install; [ -e " + d + "held ] && want=hold\n" +
 			"status=installed; version=1.7.1-1; [ -e " + d + "installed ] || { status=not-installed; version=; }\n" +
 			"[ $status = installed ] || [ $want = hold ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
-			"case \"$2\" in *Status-Want*) echo \"$want $status $version\";; *) echo \"$status $version\";; esac\n",
+			"case \"$2\" in *Status-Want*) printf 'amd64\\t%s\\t%s\\t%s\\n' $want $status \"$version\";; *) echo \"$status $version\";; esac\n",
 		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: 1.7.1-1\\n'\n",
 	}
 	for name, body := range scripts {
