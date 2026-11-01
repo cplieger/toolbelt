@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cplieger/atomicfile/v4"
 )
 
 // wantFinding is one expected root-integrity finding: the exact path the
@@ -407,6 +410,53 @@ func TestNew_VerifyRootIntegrityLeavesNothingBehind(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > before {
 		t.Errorf("refused New leaked goroutines: %d -> %d", before, after)
+	}
+}
+
+// TestNew_VerifyRootIntegrityJudgesTheRootsItCreates pins the second
+// check: roots that did not exist at the first check are created by New
+// itself, through whatever mode the filesystem stores, so New judges them
+// again before it builds an Engine. The config-dir probe runs between the
+// two checks, which is where each case widens a root New just created.
+func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
+	cases := []struct {
+		widen func(configDir, toolsDir string) string
+		name  string
+	}{
+		{
+			name:  "tools dir created as the config dir's parent",
+			widen: func(_, toolsDir string) string { return toolsDir },
+		},
+		{
+			name:  "config dir created for the manifest",
+			widen: func(configDir, _ string) string { return configDir },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			toolsDir := filepath.Join(t.TempDir(), "tools")
+			configDir := filepath.Join(toolsDir, "config")
+			widened := tc.widen(configDir, toolsDir)
+
+			orig := probeWritable
+			t.Cleanup(func() { probeWritable = orig })
+			probeWritable = func(ctx context.Context, dir string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+				if err := os.Chmod(widened, 0o770); err != nil {
+					return atomicfile.ProbeResult{}, err
+				}
+				return orig(ctx, dir, opts...)
+			}
+
+			e, err := New(&Config{
+				ConfigDir: configDir, ToolsDir: toolsDir,
+				VerifyRootIntegrity: true, Logger: quietLogger(),
+			})
+			if e != nil {
+				e.Close()
+				t.Fatal("New returned an Engine over a root it created group-writable")
+			}
+			assertFindings(t, err, []wantFinding{{path: widened, reason: "group- or other-writable (mode 0770)"}})
+		})
 	}
 }
 

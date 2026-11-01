@@ -104,9 +104,10 @@ type Config struct {
 	// VerifyRootIntegrity makes New REFUSE to construct an Engine over
 	// managed roots it cannot safely execute from (see rootintegrity.go).
 	// Off by default; turn it on when the tool tree lives on an
-	// operator-controlled volume and the process runs privileged. A
-	// failure returns ErrRootIntegrity as a *RootIntegrityError
-	// (errors.As), logged at Error before New returns.
+	// operator-controlled volume and the process runs privileged. New
+	// checks before it writes anything and again after it creates
+	// ConfigDir and bin/. A failure returns ErrRootIntegrity as a
+	// *RootIntegrityError (errors.As), logged at Error before New returns.
 	VerifyRootIntegrity bool
 }
 
@@ -207,10 +208,9 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 // (seeding when absent; another schema version is an error), refuses a
 // ConfigDir that fails a probe write, and launches the job worker.
 //
-// With Config.VerifyRootIntegrity set, the managed roots are inspected
-// FIRST — before any file is written or directory created — and an
-// unfit root refuses construction with ErrRootIntegrity. New is the
-// seam because Inventory and EnsureInstalled probe synchronously too.
+// With Config.VerifyRootIntegrity set (that field says when it checks),
+// an unfit managed root refuses construction with ErrRootIntegrity. New
+// is the seam because Inventory and EnsureInstalled probe synchronously too.
 func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
@@ -246,6 +246,14 @@ func New(cfg *Config) (*Engine, error) {
 	// in every flow that goes through New.
 	if err := ensureManagedDir(binDir(cfg.ToolsDir)); err != nil {
 		return nil, err
+	}
+	// Again, now that ConfigDir, ToolsDir and bin/ exist: the first check
+	// skipped any root that was absent, and New created those through
+	// whatever mode the filesystem stores. Still before newJobQueue.
+	if cfg.VerifyRootIntegrity {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+			return nil, fmt.Errorf("toolbelt: %w", err)
+		}
 	}
 	client := newEngineClient(cfg.GitHubToken)
 	e := &Engine{

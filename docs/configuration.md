@@ -28,7 +28,7 @@ An overlay patch carries display fields and `essential`, which makes the engine 
 
 ### Root integrity check
 
-With `VerifyRootIntegrity` set, `New` refuses to start when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `npm/lib`, `npm/lib/node_modules`, `python/`, `python/bin`, `python/tools` and `python/interpreters` exists and fails a check. Every listed path must be a directory that is not a symlink, that only its owner can write and that the engine can inspect. `ConfigDir` may live outside `ToolsDir`, and `ToolsDir`'s managed subdirectories must resolve inside the tools tree. A path that does not exist yet is skipped.
+With `VerifyRootIntegrity` set, `New` refuses to start when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `npm/lib`, `npm/lib/node_modules`, `python/`, `python/bin`, `python/tools` and `python/interpreters` exists and fails a check. Every listed path must be a directory that is not a symlink, that only its owner can write and that the engine can inspect. `ConfigDir` may live outside `ToolsDir`, and `ToolsDir`'s managed subdirectories must resolve inside the tools tree. A path that does not exist yet is skipped. `New` checks again after it has created `ConfigDir`, `ToolsDir` and `bin/`, so a root it created and the filesystem stored as writable by another account refuses to start as well, leaving what it created in place.
 
 The check only reports. It changes no mode and creates or repairs nothing. It judges those directories, not the files beneath them. The error matches `ErrRootIntegrity` with `errors.Is`, and `errors.As` gives a `*RootIntegrityError` naming every path that failed. Turn it on when the tools tree lives on a volume someone else controls and your server runs privileged.
 

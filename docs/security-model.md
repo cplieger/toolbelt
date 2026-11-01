@@ -22,7 +22,7 @@ Every extracted file and the staging directory are flushed to disk before the re
 
 Downloads are capped at 1 GiB. Archive extraction refuses a symlink that points outside the install tree. Installs land in versioned directories that are swapped in one step.
 
-The managed directories the engine creates are created owner-writable only and are otherwise left as they are; [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write.
+The managed directories the engine creates are created owner-writable only and are otherwise left as they are; [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write, including a root `New` has just created.
 
 ## Network
 
@@ -40,7 +40,7 @@ A `manual` entry runs a bash script by design. It is an escape hatch for a volum
 
 ## Binaries the engine runs
 
-The engine starts system binaries by absolute path from `/usr/bin` and `/bin`, never through `PATH`. They are `tar`, `unzip`, `gunzip`, `bzip2`, `xz` and `zstd` for archives, `bash` for `manual` scripts, and `apt-get`, `apt-cache`, `apt-mark` and `dpkg-query` for `apt:` entries. A missing one fails the install that needs it.
+The engine starts system binaries by absolute path from `/usr/bin` and `/bin`, never through `PATH`. They are `tar`, `unzip`, `gunzip`, `bzip2`, `xz` and `zstd` for archives, `bash` for `manual` scripts, and `apt-get`, `apt-cache`, `apt-mark`, `dpkg` and `dpkg-query` for `apt:` entries. A missing one fails the install that needs it.
 
 This matters because the engine's own `bin/` comes before the system directories on `PATH` and lives on the volume. A `PATH` lookup would let a file written there replace those binaries on paths the engine runs with no user present, and as root for the apt binaries.
 
