@@ -94,8 +94,9 @@ type probeVerdict struct {
 // does not spawn a subprocess per tool per call. Presence and a pip: venv's
 // interpreter are re-checked on every probe, so a deleted file shows at once.
 // The exec verdict is keyed by the probe target (resolved path, size, mtime),
-// the recorded version and the declared version args, so a reinstall, relink
-// or version bump invalidates it without a TTL.
+// the recorded version, the declared version args and, for a pip: venv, its
+// resolved interpreter, so a reinstall, relink, version bump or interpreter
+// change invalidates it without a TTL.
 type probeCache struct {
 	entries map[string]probeCacheEntry
 	mu      sync.Mutex
@@ -168,13 +169,16 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 			return probeVerdict{OK: false, Mode: probeModePresence, Reason: "bin " + b + " is missing"}
 		}
 	}
+	var interpreter string
 	if kind == SourcePip {
-		if missing, gone := e.pipInterpreterGone(ref); gone {
+		identity, missing := e.pipInterpreter(ref)
+		if missing != "" {
 			return probeVerdict{
 				OK: false, Mode: probeModePresence, CannotExec: true,
 				Reason: "venv interpreter " + missing + " is missing",
 			}
 		}
+		interpreter = identity
 	}
 	target := filepath.Join(e.binDir(), probeBin(name, t, bins))
 	args := t.VersionArgs
@@ -185,6 +189,9 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	fingerprint, err := probeFingerprint(target, want, t.VersionArgs)
 	if err != nil {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "probe target unusable: " + err.Error()}
+	}
+	if interpreter != "" {
+		fingerprint = keyenc.Join(fingerprint, interpreter)
 	}
 	if v, ok := e.probes.lookup(name, fingerprint); ok {
 		return v
@@ -271,16 +278,17 @@ const pyvenvCap = 64 << 10
 // (https://packaging.python.org/en/latest/specifications/name-normalization/).
 var pipVenvSeparators = regexp.MustCompile(`[-_.]+`)
 
-// pipInterpreterGone reports whether the uv venv behind a pip: ref has lost
-// its interpreter: the pyvenv.cfg home directory, or the file bin/python
-// resolves to. Both live outside the venv, so the launcher's fingerprint
-// cannot see them go. No pyvenv.cfg, or a venv path leaving the tool dir,
-// is not evidence; the exec probe decides then.
-func (e *Engine) pipInterpreterGone(ref string) (missing string, gone bool) {
+// pipInterpreter inspects the interpreter of the uv venv behind a pip: ref:
+// the pyvenv.cfg home directory and the file bin/python resolves to. Both
+// live outside the venv, so the launcher's fingerprint cannot see them
+// change. missing names the first one gone; otherwise identity is the
+// resolved interpreter's path, mode, size and mtime. Both are empty when
+// there is no pyvenv.cfg or a venv path leaves the tool dir.
+func (e *Engine) pipInterpreter(ref string) (identity, missing string) {
 	toolDir := pythonToolDir(e.toolsDir)
 	root, err := os.OpenRoot(toolDir)
 	if err != nil {
-		return "", false
+		return "", ""
 	}
 	defer func() { _ = root.Close() }()
 	// uv names the venv after the normalized package name, extras dropped.
@@ -288,25 +296,45 @@ func (e *Engine) pipInterpreterGone(ref string) (missing string, gone bool) {
 	venv := strings.ToLower(pipVenvSeparators.ReplaceAllString(name, "-"))
 	f, err := root.Open(filepath.Join(venv, "pyvenv.cfg"))
 	if err != nil {
-		return "", false
+		return "", ""
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, pyvenvCap))
 	if err != nil {
-		return "", false
+		return "", ""
 	}
 	if home := pyvenvHome(string(data)); home != "" {
 		if _, statErr := os.Stat(home); errors.Is(statErr, fs.ErrNotExist) {
-			return home, true
+			return "", home
 		}
 	}
 	python := filepath.Join(venv, "bin", "python")
+	full := filepath.Join(toolDir, python)
 	// The root confines every component but the last, which uv links to an
 	// interpreter outside the tool dir.
-	if _, err = root.Lstat(python); err == nil {
-		_, err = os.Stat(filepath.Join(toolDir, python))
+	if _, err = root.Lstat(python); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", full
+		}
+		return "", ""
 	}
-	return filepath.Join(toolDir, python), errors.Is(err, fs.ErrNotExist)
+	resolved, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", full
+		}
+		return "", ""
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return "", ""
+	}
+	return keyenc.Join(
+		resolved,
+		fi.Mode().String(),
+		strconv.FormatInt(fi.Size(), 10),
+		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
+	), ""
 }
 
 // pyvenvHome reads the home key, parsed as CPython's site module does

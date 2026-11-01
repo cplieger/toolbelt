@@ -653,6 +653,76 @@ func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) 
 	}
 }
 
+// TestProbeInstalled_CachedVerdictFollowsTheInterpreter pins that a change
+// to the interpreter a live venv links to is noticed on the next probe,
+// though the launcher is unchanged. The launcher runs through the venv's
+// bin/python as uv writes it, so the kernel refuses it once the
+// interpreter cannot execute (execve(2), EACCES).
+func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
+	cases := []struct {
+		change         func(t *testing.T, python string)
+		name           string
+		wantMode       string
+		wantCannotExec bool
+	}{
+		{
+			name: "interpreter loses its execute bit",
+			change: func(t *testing.T, python string) {
+				if err := os.Chmod(python, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMode: probeModeExec, wantCannotExec: true,
+		},
+		{
+			name: "interpreter replaced in place",
+			change: func(t *testing.T, python string) {
+				fi, err := os.Stat(python)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(python, []byte("#!/bin/sh\necho x 2.0.0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				later := fi.ModTime().Add(time.Second)
+				if err := os.Chtimes(python, later, later); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantMode: probeModeVersion,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			captureLogs(e)
+			home := newInterpreterHome(t)
+			python := filepath.Join(home, "python3")
+			if err := os.WriteFile(python, []byte("#!/bin/sh\necho x 1.0.0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeVenv(t, e, "x", home)
+			venvPython := filepath.Join(e.toolsDir, "python", "tools", "x", "bin", "python")
+			if err := os.WriteFile(filepath.Join(e.binDir(), "x"), []byte("#!"+venvPython+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tool := Tool{Source: "pip:x", VersionArgs: []string{"--version"}}
+			status := ToolStatus{InstalledVersion: "1.0.0", PMBins: []string{"x"}}
+			if v := e.probeTool("x", &tool, &status); !v.OK || v.Mode != probeModeVersion {
+				t.Fatalf("probe with a live interpreter = %+v, want OK in version mode", v)
+			}
+
+			tc.change(t, python)
+
+			v := e.probeTool("x", &tool, &status)
+			if v.OK || v.Mode != tc.wantMode || v.CannotExec != tc.wantCannotExec {
+				t.Errorf("probe after the interpreter changed = %+v, want not OK, mode %q, CannotExec %v",
+					v, tc.wantMode, tc.wantCannotExec)
+			}
+		})
+	}
+}
+
 // TestProbeBin_PicksOneTarget pins which bin the probe executes: the
 // declared probe name, else the derived one, else the first recorded bin —
 // never one subprocess per recorded name.
