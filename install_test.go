@@ -1111,6 +1111,38 @@ func TestPMEnv_KeepsTheAmbientCacheSettings(t *testing.T) {
 	}
 }
 
+// TestRunPM_PrefersTheManagedBackendOverTheServerPATH pins which npm, uv,
+// cargo or go a backend install runs: the one the engine installed in bin/,
+// and a same-name executable on the server's PATH only when bin/ has none.
+func TestRunPM_PrefersTheManagedBackendOverTheServerPATH(t *testing.T) {
+	ambient := t.TempDir()
+	log := filepath.Join(t.TempDir(), "ran")
+	stub := func(dir, who string) {
+		script := "#!/bin/sh\necho " + who + " >> " + log + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub(ambient, "ambient")
+	t.Setenv("PATH", ambient+string(os.PathListSeparator)+os.Getenv("PATH"))
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+
+	if err := in.runPM(t.Context(), "uv", "--version"); err != nil {
+		t.Fatalf("runPM with no managed uv: %v", err)
+	}
+	if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	stub(in.binDir(), "managed")
+	if err := in.runPM(t.Context(), "uv", "--version"); err != nil {
+		t.Fatalf("runPM with a managed uv: %v", err)
+	}
+
+	if got := readArgv(t, log); !slices.Equal(got, []string{"ambient", "managed"}) {
+		t.Errorf("runPM ran %q, want [ambient managed]: the PATH uv only while bin/ has none", got)
+	}
+}
+
 // fakeUV puts a uv on PATH that appends its argv to the returned file and
 // publishes a runnable launcher x into UV_TOOL_BIN_DIR, as `uv tool install`
 // does for a package whose entry point is x.

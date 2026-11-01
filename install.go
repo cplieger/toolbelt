@@ -868,11 +868,16 @@ func (in *installer) pmEnv() []string {
 // runPM runs a package-manager command, streaming its combined output
 // line by line into the job log.
 //
-// Bare names on purpose: this engine installs these runtimes, so resolving them
-// through bin/ is the feature and a systemCommand pin would break every backend
-// install. pmEnv puts bin/ first for that reason.
+// Not a systemCommand pin: this engine installs these runtimes, so bin/<name>
+// is the feature, and the server's PATH is the fallback for one it has not
+// installed. exec resolves a bare name against this process's PATH, not
+// cmd.Env's, so bin/ is tried explicitly first.
 func (in *installer) runPM(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	path := name
+	if managed, err := exec.LookPath(filepath.Join(in.binDir(), name)); err == nil {
+		path = managed
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = in.pmEnv()
 	return in.streamCmd(cmd, name)
 }
