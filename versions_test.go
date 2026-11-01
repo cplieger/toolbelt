@@ -571,6 +571,63 @@ func TestVersionCache_KeysThePrereleaseLine(t *testing.T) {
 	}
 }
 
+// A catalog refresh that changes how an aqua package picks its version makes
+// the answer chosen under the old definition stale.
+func TestVersionCache_KeysTheAquaDefinition(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"version":"other-2.0.0"},{"version":"cli-1.0.0"},{"version":"cli-0.9.5"}]`)
+	}))
+	old := AquaPackage{Type: aquaTypeHTTP, VersionPrefix: "cli-"}
+	tests := []struct {
+		name   string
+		edit   func(*AquaPackage)
+		latest string // the new definition's answer; empty skips the resolve
+	}{
+		{"version_prefix", func(a *AquaPackage) { a.VersionPrefix = "other-" }, "other-2.0.0"},
+		{"version_filter", func(a *AquaPackage) { a.VersionFilter = `Version != "cli-1.0.0"` }, "cli-0.9.5"},
+		{"version_source", func(a *AquaPackage) { a.VersionSource = "github_tag" }, ""},
+		{"type", func(a *AquaPackage) { a.Type = "github_release" }, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := newTestVersionResolver(srv.Client())
+			tool := &Tool{Source: "aqua:nodejs/node", Version: "cli-0.9.0"}
+			before := old
+			if got, err := v.Latest(t.Context(), tool, &before); err != nil || got != "cli-1.0.0" {
+				t.Fatalf("Latest(old definition) = %q, %v; want cli-1.0.0", got, err)
+			}
+			after := old
+			tc.edit(&after)
+			if got := v.Cached(tool, &after); got != "" {
+				t.Errorf("Cached(changed %s) = %q, want a miss", tc.name, got)
+			}
+			if got := v.Cached(tool, &before); got != "cli-1.0.0" {
+				t.Errorf("Cached(old definition) = %q, want cli-1.0.0", got)
+			}
+			if tc.latest == "" {
+				return
+			}
+			if got, err := v.Latest(t.Context(), tool, &after); err != nil || got != tc.latest {
+				t.Fatalf("Latest(changed %s) = %q, %v; want %q", tc.name, got, err, tc.latest)
+			}
+			if got := v.Cached(tool, &after); got != tc.latest {
+				t.Errorf("Cached(changed %s) after Latest = %q, want %q", tc.name, got, tc.latest)
+			}
+		})
+	}
+}
+
+// A tool with no aqua definition and one whose definition sets none of the
+// version fields pick the same way, so they share a cache entry.
+func TestVersionCache_NilDefinitionIsTheZeroDefinition(t *testing.T) {
+	v := newTestVersionResolver(nil)
+	tool := &Tool{Source: "aqua:cli/cli", Version: "v1.0.0"}
+	v.cache[toolLatestKey(tool, nil)] = "v2.0.0"
+	if got := v.Cached(tool, &AquaPackage{RepoOwner: "cli", RepoName: "cli"}); got != "v2.0.0" {
+		t.Errorf("Cached(zero definition) = %q, want v2.0.0", got)
+	}
+}
+
 func TestMaxVersionTag(t *testing.T) {
 	cases := []struct {
 		candidates []string

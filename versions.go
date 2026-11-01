@@ -62,14 +62,24 @@ func newVersionResolver(client *http.Client, aptIdx *aptIndex) *versionResolver 
 }
 
 // latestKey keys the latest-version cache: the answer for a source depends
-// on whether the recorded version admits prereleases.
+// on whether the recorded version admits prereleases and on the aqua fields
+// latestAqua picks by, which a catalog refresh can change.
 type latestKey struct {
-	source   string
-	allowPre bool
+	source        string
+	aquaType      string
+	versionSource string
+	versionFilter string
+	versionPrefix string
+	allowPre      bool
 }
 
 func toolLatestKey(t *Tool, aq *AquaPackage) latestKey {
-	return latestKey{source: t.Source, allowPre: recordedPrerelease(t, aq)}
+	key := latestKey{source: t.Source, allowPre: recordedPrerelease(t, aq)}
+	if aq != nil {
+		key.aquaType, key.versionSource = aq.Type, aq.VersionSource
+		key.versionFilter, key.versionPrefix = aq.VersionFilter, aq.VersionPrefix
+	}
+	return key
 }
 
 // Cached returns the cached latest version for the tool, if any.
@@ -87,7 +97,7 @@ func (v *versionResolver) Cached(t *Tool, aq *AquaPackage) string {
 // tool's recorded version is itself a prerelease.
 func (v *versionResolver) Latest(ctx context.Context, t *Tool, aq *AquaPackage) (string, error) {
 	key := toolLatestKey(t, aq)
-	latest, err := v.resolve(ctx, key, aq)
+	latest, err := v.resolve(ctx, t.Source, key.allowPre, aq)
 	if err != nil {
 		return "", err
 	}
@@ -109,11 +119,11 @@ func recordedPrerelease(t *Tool, aq *AquaPackage) bool {
 	return isPrereleaseTag(t.Version, prefix)
 }
 
-func (v *versionResolver) resolve(ctx context.Context, key latestKey, aq *AquaPackage) (string, error) {
-	kind, ref, _ := strings.Cut(key.source, ":")
+func (v *versionResolver) resolve(ctx context.Context, source string, allowPre bool, aq *AquaPackage) (string, error) {
+	kind, ref, _ := strings.Cut(source, ":")
 	switch kind {
 	case SourceAqua:
-		return v.latestAqua(ctx, ref, aq, key.allowPre)
+		return v.latestAqua(ctx, ref, aq, allowPre)
 	case SourceNpm:
 		return v.latestNpm(ctx, ref)
 	case SourcePip:
@@ -121,13 +131,13 @@ func (v *versionResolver) resolve(ctx context.Context, key latestKey, aq *AquaPa
 	case SourceCargo:
 		return v.latestCrate(ctx, ref)
 	case SourceGo:
-		return v.latestGoModule(ctx, ref, key.allowPre)
+		return v.latestGoModule(ctx, ref, allowPre)
 	case SourceRelease:
-		return v.latestRelease(ctx, ref, key.allowPre)
+		return v.latestRelease(ctx, ref, allowPre)
 	case SourceApt:
 		return v.latestApt(ctx, ref)
 	default:
-		return "", fmt.Errorf("no version source for %q", key.source)
+		return "", fmt.Errorf("no version source for %q", source)
 	}
 }
 
