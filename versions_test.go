@@ -82,7 +82,7 @@ func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
 func TestLatestGitHubTag_WalksEveryPageOfTheCap(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		if page == tagPageCap {
+		if page == listPageCap {
 			fmt.Fprint(w, `[{"name":"v1.0.0"}]`)
 			return
 		}
@@ -98,7 +98,7 @@ func TestLatestGitHubTag_WalksEveryPageOfTheCap(t *testing.T) {
 
 	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "v"}, false)
 	if err != nil {
-		t.Fatalf("latestGitHubTag with the newest tag on page %d: %v", tagPageCap, err)
+		t.Fatalf("latestGitHubTag with the newest tag on page %d: %v", listPageCap, err)
 	}
 	if got != "v1.0.0" {
 		t.Errorf("latestGitHubTag = %q, want v1.0.0", got)
@@ -304,8 +304,109 @@ func TestLatestGitLabRelease_PicksByVersion(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("Latest = %q, want %q", got, tc.want)
 			}
-			if want := "gitlab.com/api/v4/projects/o%2Fr/releases?per_page=100"; asked != want {
+			if want := "gitlab.com/api/v4/projects/o%2Fr/releases?per_page=100&page=1"; asked != want {
 				t.Errorf("asked %q, want %q", asked, want)
+			}
+		})
+	}
+}
+
+// fullPage renders a full 100-entry page of JSON objects whose key field
+// holds name; a name with no digit parses as no version.
+func fullPage(key, name string) string {
+	entries := make([]string, 0, 100)
+	for range 100 {
+		entries = append(entries, fmt.Sprintf(`{%q:%q}`, key, name))
+	}
+	return "[" + strings.Join(entries, ",") + "]"
+}
+
+// GitLab paginates releases at most 100 per page
+// (https://docs.gitlab.com/api/rest/#pagination); the highest version can sit
+// on any page because the order is by release date.
+func TestLatestGitLabRelease_WalksEveryPage(t *testing.T) {
+	cases := []struct {
+		name     string
+		pages    map[int]string
+		recorded string
+		want     string
+	}{
+		{
+			name: "a higher version on page 2 wins", recorded: "v1.0.0",
+			pages: map[int]string{
+				1: strings.Replace(fullPage("tag_name", "nightly"), `"nightly"`, `"v1.9.10"`, 1),
+				2: `[{"tag_name":"v2.0.0"},{"tag_name":"v1.0.0"}]`,
+			},
+			want: "v2.0.0",
+		},
+		{
+			name: "no version-shaped tag on any page keeps the newest release",
+			pages: map[int]string{
+				1: fullPage("tag_name", "nightly"),
+				2: `[{"tag_name":"stable"}]`,
+			},
+			want: "nightly",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []int
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("per_page"); got != "100" {
+					t.Errorf("per_page = %q, want 100", got)
+				}
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				asked = append(asked, page)
+				body, ok := tc.pages[page]
+				if !ok {
+					body = `[]`
+				}
+				fmt.Fprint(w, body)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: "release:gitlab/o/r", Version: tc.recorded}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest = %q, want %q", got, tc.want)
+			}
+			if !slices.Equal(asked, []int{1, 2}) {
+				t.Errorf("pages asked = %v, want [1 2] (stop at the short page)", asked)
+			}
+		})
+	}
+}
+
+// A walk that reaches the page cap with the cap page still full has not seen
+// every version, so the highest it saw is not known to be the latest.
+func TestLatest_FullCapPageIsAnIncompleteWalk(t *testing.T) {
+	cases := []struct {
+		name, source, key string
+		aq                *AquaPackage
+	}{
+		{name: "gitlab releases", source: "release:gitlab/o/r", key: "tag_name"},
+		{name: "github tag list", source: "aqua:o/r", key: "name", aq: &AquaPackage{VersionSource: "github_tag"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pagesAsked := 0
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				pagesAsked++
+				body := fullPage(tc.key, "ancient")
+				if page == 1 {
+					body = strings.Replace(body, `"ancient"`, `"v1.0.0"`, 1)
+				}
+				fmt.Fprint(w, body)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source}, tc.aq)
+			if !errors.Is(err, errIncompleteWalk) {
+				t.Errorf("Latest = %q, %v; want errIncompleteWalk", got, err)
+			}
+			if pagesAsked != listPageCap {
+				t.Errorf("pages asked = %d, want %d", pagesAsked, listPageCap)
 			}
 		})
 	}

@@ -36,6 +36,10 @@ var errOnlyPrereleases = errors.New("only prereleases are published; record a pr
 
 // errAllRetracted is the answer of a Go module whose every listed version is
 // retracted; the go command's "latest" finds no version then either.
+// errIncompleteWalk is the answer of a paginated list still full at
+// listPageCap: a later page may hold the highest version.
+var errIncompleteWalk = errors.New("the version list runs past the page cap")
+
 var errAllRetracted = errors.New("every published version is retracted")
 
 // versionResolver finds the latest upstream version for a tool source.
@@ -162,19 +166,21 @@ func (v *versionResolver) latestGitHubRelease(ctx context.Context, rr releaseRef
 	return rel.TagName, nil
 }
 
-// latestGitLabRelease picks by version from the newest page of releases,
-// because GitLab marks no release as a prerelease and orders by release date
+// latestGitLabRelease picks by version across every release, because GitLab
+// marks no release as a prerelease and orders by release date
 // (https://docs.gitlab.com/api/releases/#list-releases), so a back-branch
-// patch released last would otherwise read as latest. A page with no
+// patch released last would otherwise read as latest. A list with no
 // version-shaped tag keeps GitLab's newest.
 func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef, allowPre bool) (string, error) {
-	var rels []struct {
+	type release struct {
 		TagName string `json:"tag_name"`
 	}
 	project := url.PathEscape(rr.Owner + "/" + rr.Repo)
-	api := "https://gitlab.com/api/v4/projects/" + project + "/releases?per_page=100"
-	if err := v.getJSON(ctx, api, &rels); err != nil {
-		return "", err
+	rels, err := walkPages[release](ctx, v, func(page int) string {
+		return fmt.Sprintf("https://gitlab.com/api/v4/projects/%s/releases?per_page=%d&page=%d", project, listPageSize, page)
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s/%s on gitlab: %w", rr.Owner, rr.Repo, err)
 	}
 	var tags []string
 	for _, r := range rels {
@@ -272,10 +278,32 @@ func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq
 	return "", fmt.Errorf("%s: %w", feedURL, errOnlyPrereleases)
 }
 
-// tagPageCap bounds the GitHub tag pagination walk. golang/go needs
-// ~6 pages before go1* tags appear; 20 covers pathological repos while
+// listPageCap bounds a paginated version-list walk. golang/go's tag list
+// needs ~6 pages before go1* tags appear; 20 covers pathological repos while
 // keeping the worst-case API cost bounded.
-const tagPageCap = 20
+const listPageCap = 20
+
+// listPageSize is the largest page both GitHub and GitLab serve
+// (https://docs.gitlab.com/api/rest/#pagination).
+const listPageSize = 100
+
+// walkPages decodes pages 1 to listPageCap of pageURL until a short page.
+// Neither forge orders these lists by version, so a cap page still full is
+// errIncompleteWalk rather than a truncated answer.
+func walkPages[T any](ctx context.Context, v *versionResolver, pageURL func(page int) string) ([]T, error) {
+	var all []T
+	for page := 1; page <= listPageCap; page++ {
+		var items []T
+		if err := v.getJSON(ctx, pageURL(page), &items); err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if len(items) < listPageSize {
+			return all, nil
+		}
+	}
+	return nil, errIncompleteWalk
+}
 
 // latestGitHubTag returns the newest repo tag passing the package's
 // version_filter and version_prefix. The GitHub tags endpoint has NO
@@ -290,22 +318,19 @@ func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo strin
 		prefix = aq.VersionPrefix
 		filter = aq.VersionFilter
 	}
+	type tag struct {
+		Name string `json:"name"`
+	}
+	tags, err := walkPages[tag](ctx, v, func(page int) string {
+		return fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=%d&page=%d", owner, repo, listPageSize, page)
+	})
+	if err != nil {
+		return "", fmt.Errorf("tags of %s/%s: %w", owner, repo, err)
+	}
 	var candidates []string
-	for page := 1; page <= tagPageCap; page++ {
-		tagURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=100&page=%d", owner, repo, page)
-		var tags []struct {
-			Name string `json:"name"`
-		}
-		if err := v.getJSON(ctx, tagURL, &tags); err != nil {
-			return "", err
-		}
-		for _, t := range tags {
-			if tagPasses(t.Name, prefix, filter) {
-				candidates = append(candidates, t.Name)
-			}
-		}
-		if len(tags) < 100 {
-			break
+	for _, t := range tags {
+		if tagPasses(t.Name, prefix, filter) {
+			candidates = append(candidates, t.Name)
 		}
 	}
 	if len(candidates) == 0 {
