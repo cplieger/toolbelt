@@ -1651,25 +1651,19 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 
 // verifyInstalled fails the install unless the inventory's probe reads what
 // it published as installed, so a done job never leaves a row Reconcile
-// would install again. probeVerdict.BannerMismatch is the one verdict it
-// reports and tolerates. It runs after the status write and before pruning,
+// would install again. It runs after the status write and before pruning,
 // so a failed check keeps the predecessor on disk.
 func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
 	st := e.store.State().Tools[name]
-	v := e.probeTool(name, t, &st)
-	switch {
-	case v.OK:
-		return nil
-	case v.BannerMismatch:
-		output(fmt.Sprintf("The %s install was not verified. %s", name, v.Reason))
-		return nil
+	if v := e.probeTool(name, t, &st); !v.OK {
+		err := fmt.Errorf("installed %s but its install check failed: %s", t.Version, v.Reason)
+		output(fmt.Sprintf("ERROR %s: %v", name, err))
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
+		}
+		return err
 	}
-	err := fmt.Errorf("installed %s but its install check failed: %s", t.Version, v.Reason)
-	output(fmt.Sprintf("ERROR %s: %v", name, err))
-	if serr := e.recordFailure(name, err); serr != nil {
-		e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
-	}
-	return err
+	return nil
 }
 
 // recordFailure stores an install failure on the tool's status row.

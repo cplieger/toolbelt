@@ -427,10 +427,10 @@ func TestInstall_ProbeVerdictDecidesThePipJob(t *testing.T) {
 	}
 }
 
-// TestInstall_VersionBannerMismatchIsAWarning pins the one tolerated probe
-// failure: a bin that runs but whose declared version banner does not carry
-// the recorded version ends the job done, with the reason in its output.
-func TestInstall_VersionBannerMismatchIsAWarning(t *testing.T) {
+// TestInstall_VersionBannerMismatchFailsTheInstall pins that a bin answering
+// its declared version_args with another version fails the install, as the
+// inventory reads it as not installed and Reconcile would install it again.
+func TestInstall_VersionBannerMismatchFailsTheInstall(t *testing.T) {
 	e := newTestEngine(t, nil)
 	captureLogs(e)
 	job, err := e.Add(t.Context(), &AddRequest{
@@ -442,11 +442,11 @@ func TestInstall_VersionBannerMismatchIsAWarning(t *testing.T) {
 	}
 
 	final := waitJob(t, e, job.ID)
-	if final.State != JobDone {
-		t.Errorf("job state = %s (%q), want done", final.State, final.Error)
+	if final.State != JobFailed || !strings.Contains(final.Error, "9.9.9") {
+		t.Errorf("job = %s (%q), want failed naming the reported version", final.State, final.Error)
 	}
-	if out := strings.Join(final.OutputTail, "\n"); !strings.Contains(out, "was not verified") || !strings.Contains(out, "9.9.9") {
-		t.Errorf("job output = %q, want the unverified banner reported", out)
+	if row := inventoryRow(t, e, "banner"); row.Installed || !strings.Contains(row.LastError, "9.9.9") {
+		t.Errorf("inventory row = %+v, want not installed with the probe's reason", row)
 	}
 }
 

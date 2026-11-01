@@ -82,11 +82,6 @@ type probeVerdict struct {
 	// OK is the install-detection answer: true = installed, false =
 	// reinstall.
 	OK bool
-	// BannerMismatch marks a bin that ran but whose declared version
-	// banner did not carry the recorded version, the one failed verdict
-	// an install tolerates: a banner this engine cannot parse is a
-	// knowledge gap rather than a broken tool.
-	BannerMismatch bool
 }
 
 // probeCache memoizes exec probes so Inventory, which a settings UI polls,
@@ -482,7 +477,7 @@ func (e *Engine) runProbe(target string, args []string, want string, declared bo
 	}
 	if !versionAnswered(out, want) {
 		return probeVerdict{
-			OK: false, Mode: probeModeVersion, BannerMismatch: true,
+			OK: false, Mode: probeModeVersion,
 			Reason: fmt.Sprintf("reported %q, recorded version is %q", firstLine(out), want),
 		}
 	}

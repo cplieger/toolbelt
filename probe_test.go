@@ -31,17 +31,15 @@ func writeNpmPackage(t *testing.T, e *Engine, pkg, manifest string) {
 
 // TestProbeInstalled_ExecutesTheTool pins install detection: presence of
 // bin/<name> is not proof, so a corrupt/wrong-arch binary, a dangling
-// link, or the wrong version all read as NOT installed. It also pins
-// which failure is a banner mismatch, the one an install tolerates.
+// link, or the wrong version all read as NOT installed.
 func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 	cases := []struct {
-		name               string
-		setup              func(t *testing.T, e *Engine) (Tool, ToolStatus)
-		want               bool
-		wantMode           string
-		wantWarning        string
-		wantBannerMismatch bool
-		wantReason         string
+		name        string
+		setup       func(t *testing.T, e *Engine) (Tool, ToolStatus)
+		want        bool
+		wantMode    string
+		wantWarning string
+		wantReason  string
 	}{
 		{
 			name: "runnable binary, no version shape declared",
@@ -90,7 +88,7 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 					ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
 			},
 			want: false, wantMode: probeModeVersion, wantWarning: "probe failed",
-			wantBannerMismatch: true,
+			wantReason: `reported "tool 9.9.9"`,
 		},
 		{
 			name: "declared version shape but nothing recorded to compare",
@@ -308,9 +306,6 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			}
 			if tc.wantMode != "" && got.Mode != tc.wantMode {
 				t.Errorf("probe mode = %q, want %q (reason %q)", got.Mode, tc.wantMode, got.Reason)
-			}
-			if got.BannerMismatch != tc.wantBannerMismatch {
-				t.Errorf("probe BannerMismatch = %v, want %v (reason %q)", got.BannerMismatch, tc.wantBannerMismatch, got.Reason)
 			}
 			if tc.wantReason != "" && !strings.Contains(got.Reason, tc.wantReason) {
 				t.Errorf("probe reason = %q, want it to carry %q", got.Reason, tc.wantReason)
@@ -779,8 +774,8 @@ func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			if v := e.probeTool("x", &tool, &status); v.OK || v.BannerMismatch {
-				t.Errorf("probe after the interpreter was removed = %+v, want not OK and no banner mismatch", v)
+			if v := e.probeTool("x", &tool, &status); v.OK || !strings.Contains(v.Reason, "venv interpreter") {
+				t.Errorf("probe after the interpreter was removed = %+v, want not OK naming the venv interpreter", v)
 			}
 		})
 	}
@@ -793,10 +788,9 @@ func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) 
 // interpreter cannot execute (execve(2), EACCES).
 func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 	cases := []struct {
-		change             func(t *testing.T, python string)
-		name               string
-		wantMode           string
-		wantBannerMismatch bool
+		change   func(t *testing.T, python string)
+		name     string
+		wantMode string
 	}{
 		{
 			name: "interpreter loses its execute bit",
@@ -822,21 +816,21 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			wantMode: probeModeVersion, wantBannerMismatch: true,
+			wantMode: probeModeVersion,
 		},
 		{
 			name: "interpreter renamed over, keeping mode, size and mtime",
 			change: func(t *testing.T, python string) {
 				replaceKeepingStat(t, python, "#!/bin/sh\necho x 2.0.0\n", replaceByRename)
 			},
-			wantMode: probeModeVersion, wantBannerMismatch: true,
+			wantMode: probeModeVersion,
 		},
 		{
 			name: "interpreter rewritten in place, keeping mode, size and mtime",
 			change: func(t *testing.T, python string) {
 				replaceKeepingStat(t, python, "#!/bin/sh\necho x 2.0.0\n", replaceInPlace)
 			},
-			wantMode: probeModeVersion, wantBannerMismatch: true,
+			wantMode: probeModeVersion,
 		},
 	}
 	for _, tc := range cases {
@@ -862,9 +856,8 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 			tc.change(t, python)
 
 			v := e.probeTool("x", &tool, &status)
-			if v.OK || v.Mode != tc.wantMode || v.BannerMismatch != tc.wantBannerMismatch {
-				t.Errorf("probe after the interpreter changed = %+v, want not OK, mode %q, BannerMismatch %v",
-					v, tc.wantMode, tc.wantBannerMismatch)
+			if v.OK || v.Mode != tc.wantMode {
+				t.Errorf("probe after the interpreter changed = %+v, want not OK, mode %q", v, tc.wantMode)
 			}
 		})
 	}
