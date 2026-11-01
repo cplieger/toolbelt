@@ -219,9 +219,9 @@ func New(cfg *Config) (*Engine, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	// Before newStore: st.initFiles() writes tools.json and CREATES
-	// ConfigDir, so a check placed after it would be judging a directory
-	// this library just made. Before the bin/ creation further down, which
+	// Before newStore: initFiles writes tools.json and CREATES ConfigDir, so
+	// an unfit root that already exists (a symlinked ConfigDir) is refused
+	// before anything is written through it. Before the bin/ creation, which
 	// resolves every ancestor component by name (only the leaf mkdir refuses
 	// a symlink). And before newJobQueue, whose worker goroutine an error
 	// returned afterwards would leak (the caller gets a nil Engine and can

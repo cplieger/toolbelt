@@ -369,11 +369,11 @@ func TestNew_VerifyRootIntegrityLogsRefusal(t *testing.T) {
 }
 
 // TestNew_VerifyRootIntegrityLeavesNothingBehind pins the placement of
-// the check inside New. It runs before newStore (whose initFiles writes
-// tools.json and CREATES ConfigDir — a check after it would be judging a
-// directory this library just made), before the MkdirAll of bin/, and
-// before newJobQueue, whose worker goroutine a later error would leak
-// because the caller gets a nil Engine and can never Close it.
+// the first check inside New. It runs before newStore (whose initFiles
+// writes tools.json, so an unfit existing ConfigDir is refused before
+// anything is written through it), before bin/ is created, and before
+// newJobQueue, whose worker goroutine a later error would leak because
+// the caller gets a nil Engine and can never Close it.
 func TestNew_VerifyRootIntegrityLeavesNothingBehind(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
