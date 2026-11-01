@@ -27,6 +27,9 @@ func npmModulesDir(toolsDir string) string {
 func pythonDir(toolsDir string) string    { return filepath.Join(toolsDir, "python") }
 func pythonBinDir(toolsDir string) string { return filepath.Join(pythonDir(toolsDir), "bin") }
 
+// pythonToolDir holds one uv venv per pip: tool (UV_TOOL_DIR).
+func pythonToolDir(toolsDir string) string { return filepath.Join(pythonDir(toolsDir), "tools") }
+
 // pythonInterpreterDir holds the uv-managed CPython builds every pip: venv
 // links to (UV_PYTHON_INSTALL_DIR).
 func pythonInterpreterDir(toolsDir string) string {

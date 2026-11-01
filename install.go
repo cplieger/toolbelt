@@ -845,7 +845,7 @@ func (in *installer) pmEnv() []string {
 		"GOBIN=" + in.binDir(),
 		"GOPATH=" + filepath.Join(in.toolsDir, "go"),
 		"NPM_CONFIG_PREFIX=" + in.npmDir(),
-		"UV_TOOL_DIR=" + filepath.Join(in.pythonDir(), "tools"),
+		"UV_TOOL_DIR=" + pythonToolDir(in.toolsDir),
 		"UV_TOOL_BIN_DIR=" + pythonBinDir(in.toolsDir),
 		// A tool venv breaks when its interpreter is removed, and uv's
 		// discovery otherwise takes a PATH python3, which a runtime update

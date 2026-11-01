@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -91,8 +93,8 @@ type probeVerdict struct {
 // probeCache memoizes exec probes so the read path (Inventory, which a
 // settings UI polls) does not spawn a subprocess per tool per call.
 //
-// Presence is re-checked on every probe — it is a stat, and a deleted
-// binary must be noticed immediately. Only the EXEC verdict is cached,
+// Presence, and a pip: venv's interpreter, are re-checked on every probe —
+// each is a cheap local read, and a deleted file must be noticed at once. Only the EXEC verdict is cached,
 // keyed by a fingerprint of the probe target (resolved path, size,
 // mtime), the recorded version, and the declared version args, so any
 // reinstall, relink or version bump invalidates it without a TTL.
@@ -142,10 +144,10 @@ func (e *Engine) binDir() string { return binDir(e.toolsDir) }
 // must exist AND execute, and when the definition declares its
 // version-reporting shape the answer must contain the recorded version,
 // so a truncated download, a wrong-architecture binary, a dangling
-// symlink, or the wrong version all read as NOT installed. A bin the
-// engine cannot execute falls back to presence only, at Warn. An apt
-// package, and an npm package that ships no bin, are proven by their
-// package manager's record instead.
+// symlink, a dead venv interpreter, or the wrong version all read as NOT
+// installed. A bin the engine cannot execute falls back to presence only,
+// at Warn. An apt package, and an npm package that ships no bin, are
+// proven by their package manager's record instead.
 func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeTool(name, t, s).OK
 }
@@ -166,6 +168,14 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	for _, b := range bins {
 		if _, err := os.Stat(filepath.Join(e.binDir(), b)); err != nil {
 			return probeVerdict{OK: false, Mode: probeModePresence, Reason: "bin " + b + " is missing"}
+		}
+	}
+	if kind == SourcePip {
+		if home, gone := e.pipInterpreterGone(ref); gone {
+			return probeVerdict{
+				OK: false, Mode: probeModePresence, CannotExec: true,
+				Reason: "venv interpreter " + home + " is missing",
+			}
 		}
 	}
 	target := filepath.Join(e.binDir(), probeBin(name, t, bins))
@@ -254,6 +264,54 @@ func (e *Engine) probeNpmPackage(ref, want string) (probeVerdict, bool) {
 		}, true
 	}
 	return probeVerdict{OK: true, Mode: probeModePackage}, true
+}
+
+// pyvenvCap bounds a pyvenv.cfg read; uv writes a few lines.
+const pyvenvCap = 64 << 10
+
+// pipVenvSeparators are the runs PEP 503 folds to one "-"
+// (https://packaging.python.org/en/latest/specifications/name-normalization/).
+var pipVenvSeparators = regexp.MustCompile(`[-_.]+`)
+
+// pipInterpreterGone reports whether the uv venv behind a pip: ref names an
+// interpreter directory that no longer exists. The interpreter lives outside
+// the venv, so the launcher's fingerprint cannot see it go. A missing or
+// home-less pyvenv.cfg is not evidence; the exec probe decides then.
+func (e *Engine) pipInterpreterGone(ref string) (home string, gone bool) {
+	root, err := os.OpenRoot(pythonToolDir(e.toolsDir))
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = root.Close() }()
+	// uv names the venv after the normalized package name, extras dropped.
+	name, _, _ := strings.Cut(ref, "[")
+	venv := strings.ToLower(pipVenvSeparators.ReplaceAllString(name, "-"))
+	f, err := root.Open(filepath.Join(venv, "pyvenv.cfg"))
+	if err != nil {
+		return "", false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, pyvenvCap))
+	if err != nil {
+		return "", false
+	}
+	if home = pyvenvHome(string(data)); home == "" {
+		return "", false
+	}
+	_, err = os.Stat(home)
+	return home, errors.Is(err, fs.ErrNotExist)
+}
+
+// pyvenvHome reads the home key, parsed as CPython's site module does
+// (https://docs.python.org/3/library/site.html).
+func pyvenvHome(cfg string) string {
+	for line := range strings.Lines(cfg) {
+		key, value, ok := strings.Cut(line, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "home") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // declaresBin reports whether a package.json "bin" value names anything.

@@ -419,6 +419,143 @@ func TestProbeInstalled_DeclaringVersionArgsReprobes(t *testing.T) {
 	}
 }
 
+// writeVenv writes a uv tool venv's pyvenv.cfg naming home as the
+// interpreter's directory (https://docs.python.org/3/library/venv.html).
+func writeVenv(t *testing.T, e *Engine, venv, home string) {
+	t.Helper()
+	dir := filepath.Join(e.toolsDir, "python", "tools", venv)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "home = " + home + "\nimplementation = CPython\nuv = 0.13.6\n"
+	if err := os.WriteFile(filepath.Join(dir, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestProbeInstalled_PipVenvInterpreter pins that a pip: launcher whose venv
+// interpreter is gone reads as not installed and unrunnable, though the
+// launcher file itself is intact. uv names a tool's venv after the
+// normalized package name without extras
+// (https://packaging.python.org/en/latest/specifications/name-normalization/).
+func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
+	cases := []struct {
+		name           string
+		ref            string
+		setup          func(t *testing.T, e *Engine)
+		want           bool
+		wantReason     string
+		wantCannotExec bool
+	}{
+		{
+			name: "live interpreter",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				writeVenv(t, e, "x", t.TempDir())
+			},
+			want: true,
+		},
+		{
+			name: "interpreter gone",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				writeVenv(t, e, "x", filepath.Join(t.TempDir(), "cpython-3.14.7", "bin"))
+			},
+			want: false, wantCannotExec: true, wantReason: "cpython-3.14.7",
+		},
+		{
+			name: "normalized venv name without extras",
+			ref:  "Ruamel.Yaml__Clib[cli]",
+			setup: func(t *testing.T, e *Engine) {
+				writeVenv(t, e, "ruamel-yaml-clib", filepath.Join(t.TempDir(), "gone"))
+			},
+			want: false, wantCannotExec: true, wantReason: "gone",
+		},
+		{
+			name:  "no venv falls back to the exec probe",
+			ref:   "x",
+			setup: func(*testing.T, *Engine) {},
+			want:  true,
+		},
+		{
+			name: "pyvenv.cfg without home falls back to the exec probe",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				writeVenv(t, e, "x", "")
+			},
+			want: true,
+		},
+		{
+			name: "a venv link leaving the tool dir is not read",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				outside := t.TempDir()
+				cfg := "home = " + filepath.Join(outside, "gone") + "\n"
+				if err := os.WriteFile(filepath.Join(outside, "pyvenv.cfg"), []byte(cfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				tools := filepath.Join(e.toolsDir, "python", "tools")
+				if err := os.MkdirAll(tools, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(tools, "x")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			captureLogs(e)
+			writeStub(t, e, "x", "echo x 1.0.0")
+			tc.setup(t, e)
+			tool := Tool{Source: "pip:" + tc.ref}
+			status := ToolStatus{InstalledVersion: "1.0.0", PMBins: []string{"x"}}
+
+			got := e.probeTool("x", &tool, &status)
+
+			if got.OK != tc.want {
+				t.Errorf("probe OK = %v (%s: %s), want %v", got.OK, got.Mode, got.Reason, tc.want)
+			}
+			if got.CannotExec != tc.wantCannotExec {
+				t.Errorf("probe CannotExec = %v, want %v (reason %q)", got.CannotExec, tc.wantCannotExec, got.Reason)
+			}
+			if tc.wantReason != "" && !strings.Contains(got.Reason, tc.wantReason) {
+				t.Errorf("probe reason = %q, want it to carry %q", got.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter pins that
+// removing a venv's interpreter is noticed on the next probe, though the
+// launcher (the cache's fingerprint) is unchanged.
+func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) {
+	e := newTestEngine(t, nil)
+	captureLogs(e)
+	writeStub(t, e, "x", "echo x 1.0.0")
+	home := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeVenv(t, e, "x", home)
+	tool := Tool{Source: "pip:x", VersionArgs: []string{"--version"}}
+	status := ToolStatus{InstalledVersion: "1.0.0", PMBins: []string{"x"}}
+	if v := e.probeTool("x", &tool, &status); !v.OK {
+		t.Fatalf("probe with a live interpreter = %+v, want OK", v)
+	}
+
+	if err := os.Remove(home); err != nil {
+		t.Fatal(err)
+	}
+
+	if v := e.probeTool("x", &tool, &status); v.OK || !v.CannotExec {
+		t.Errorf("probe after the interpreter was removed = %+v, want not OK and CannotExec", v)
+	}
+}
+
 // TestProbeBin_PicksOneTarget pins which bin the probe executes: the
 // declared probe name, else the derived one, else the first recorded bin —
 // never one subprocess per recorded name.

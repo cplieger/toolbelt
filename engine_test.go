@@ -2714,6 +2714,67 @@ func TestInstallTool_ReinstallsWhenThePythonRequestChanged(t *testing.T) {
 	}
 }
 
+// TestInstall_RebuildsAVenvWhoseInterpreterIsGone pins the recovery path:
+// after an inventory read cached the launcher as working, its venv's
+// interpreter is deleted; an explicit install must then rebuild the venv
+// through uv on the engine-managed interpreters instead of reporting
+// "already installed".
+func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\n" +
+		"echo \"$* UV_MANAGED_PYTHON=$UV_MANAGED_PYTHON UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR\" >> " + argv + "\n" +
+		"home=\"$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin\"\n" +
+		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x\"\n" +
+		"echo \"home = $home\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
+		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
+		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e := pipEngine(t, "")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dead := filepath.Join(t.TempDir(), "cpython-3.14.7", "bin")
+	if err := os.MkdirAll(dead, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeVenv(t, e, "x", dead)
+	if !inventoryRow(t, e, "x").Installed {
+		t.Fatal("inventory before the interpreter died: x not installed")
+	}
+	if err := os.RemoveAll(filepath.Dir(dead)); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	interpreters := filepath.Join(e.toolsDir, "python", "interpreters")
+	want := []string{"tool install --reinstall x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("uv runs = %q, want %q", got, want)
+	}
+	cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), "home = "+interpreters+string(os.PathSeparator)) {
+		t.Errorf("rebuilt pyvenv.cfg = %q, want home under %s", cfg, interpreters)
+	}
+}
+
 func TestPatch_PythonRequest(t *testing.T) {
 	t.Run("a change on an enabled row reinstalls with the request", func(t *testing.T) {
 		argv := fakeUV(t)
