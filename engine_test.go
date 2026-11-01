@@ -2791,17 +2791,24 @@ func TestInstallTool_ReinstallsWhenThePythonRequestChanged(t *testing.T) {
 }
 
 // venvUV puts a uv on PATH that appends its argv and interpreter env to the
-// returned file. `tool uninstall` drops the x venv and launcher; `tool
-// install` builds the venv on a managed interpreter unless a venv with a
-// resolvable bin/python exists, which it keeps as uv keeps a venv whose
-// receipt pins a Python request.
-func venvUV(t *testing.T) string {
+// returned file, modelling uv 0.13.6's venv handling. `tool uninstall` drops
+// the x venv and launcher. `tool install` exits 1 when failInstall is set,
+// before touching anything, as uv does when resolution fails; otherwise it
+// keeps a venv with a resolvable bin/python unless --force is passed, and
+// builds a missing one on a managed interpreter.
+func venvUV(t *testing.T, failInstall bool) string {
 	t.Helper()
 	dir := t.TempDir()
 	argv := filepath.Join(dir, "argv")
+	fail := ""
+	if failInstall {
+		fail = "exit 1\n"
+	}
 	script := "#!/bin/sh\n" +
 		"echo \"$* UV_MANAGED_PYTHON=$UV_MANAGED_PYTHON UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR\" >> " + argv + "\n" +
 		"if [ \"$2\" = uninstall ]; then rm -rf \"$UV_TOOL_DIR/x\" \"$UV_TOOL_BIN_DIR/x\"; exit 0; fi\n" +
+		fail +
+		"case \" $* \" in *\" --force \"*) rm -rf \"$UV_TOOL_DIR/x\";; esac\n" +
 		"if [ ! -e \"$UV_TOOL_DIR/x/bin/python\" ]; then\n" +
 		"home=\"$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin\"\n" +
 		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x/bin\"\n" +
@@ -2820,30 +2827,31 @@ func venvUV(t *testing.T) string {
 
 // TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter pins the migration of a
 // venv built before the engine managed interpreters: it reads as not
-// installed, and an install uninstalls it so uv rebuilds it on a managed
-// interpreter. A venv already on one is reinstalled in place.
+// installed, and an install forces uv to build a new venv on a managed
+// interpreter (a plain --reinstall keeps a receipt-pinned venv where it is).
+// A venv already on one is reinstalled in place.
 func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
 	cases := []struct {
 		name      string
 		recorded  string
 		home      func(e *Engine) string
 		installed bool
-		uninstall bool
+		force     bool
 	}{
 		{
 			name: "unmanaged interpreter", recorded: "1.0.0",
 			home:      func(*Engine) string { return newInterpreterHome(t, t.TempDir()) },
-			installed: false, uninstall: true,
+			installed: false, force: true,
 		},
 		{
 			name: "managed interpreter with an outdated version", recorded: "0.9.0",
 			home:      func(e *Engine) string { return newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)) },
-			installed: true, uninstall: false,
+			installed: true, force: false,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			argv := venvUV(t)
+			argv := venvUV(t, false)
 			e := pipEngine(t, "")
 			writeStub(t, e, "x", "echo x 1.0.0")
 			if err := e.store.setToolStatus("x", func(s *ToolStatus) {
@@ -2866,11 +2874,11 @@ func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
 				t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
 			}
 			interpreters := pythonInterpreterDir(e.toolsDir)
-			env := " UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters
-			want := []string{"tool install --reinstall x==1.0.0" + env}
-			if tc.uninstall {
-				want = append([]string{"tool uninstall x" + env}, want...)
+			cmd := "tool install --reinstall x==1.0.0"
+			if tc.force {
+				cmd = "tool install --reinstall --force x==1.0.0"
 			}
+			want := []string{cmd + " UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
 			if got := readArgv(t, argv); !slices.Equal(got, want) {
 				t.Errorf("uv runs = %q, want %q", got, want)
 			}
@@ -2888,13 +2896,59 @@ func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
 	}
 }
 
+// TestInstall_UnresolvableRebuildKeepsTheVenv pins that rebuilding a venv on
+// an unmanaged interpreter never removes it first: when uv cannot resolve the
+// new one, the old venv and its launcher still run the tool.
+func TestInstall_UnresolvableRebuildKeepsTheVenv(t *testing.T) {
+	argv := venvUV(t, true)
+	e := pipEngine(t, "")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	home := newInterpreterHome(t, t.TempDir())
+	writeVenv(t, e, "x", home)
+	launcher := filepath.Join(pythonBinDir(e.toolsDir), "x")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho x 1.0.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if final := waitJob(t, e, job.ID); final.State != JobFailed {
+		t.Fatalf("install job = %s, want failed (tail %v)", final.State, final.OutputTail)
+	}
+	want := []string{"tool install --reinstall --force x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(e.toolsDir)}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("uv runs = %q, want %q", got, want)
+	}
+	cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+	if err != nil {
+		t.Errorf("venv after the failed rebuild: %v", err)
+	} else if !strings.Contains(string(cfg), "home = "+home+"\n") {
+		t.Errorf("pyvenv.cfg = %q, want the old home %s", cfg, home)
+	}
+	if _, err := os.Stat(launcher); err != nil {
+		t.Errorf("launcher after the failed rebuild: %v", err)
+	}
+}
+
 // TestInstall_RebuildsAVenvWhoseInterpreterIsGone pins the recovery path:
 // after an inventory read cached the launcher as working, its venv's
 // interpreter is deleted; an explicit install must then rebuild the venv
 // through uv on the engine-managed interpreters instead of reporting
 // "already installed".
 func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
-	argv := venvUV(t)
+	argv := venvUV(t, false)
 	e := pipEngine(t, "")
 	writeStub(t, e, "x", "echo x 1.0.0")
 	if err := e.store.setToolStatus("x", func(s *ToolStatus) {

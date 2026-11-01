@@ -1017,16 +1017,15 @@ func (in *installer) installPip(ctx context.Context, pkg string, t *Tool, prev [
 	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir), pythonInterpreterDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
-	// uv keeps a venv on its old interpreter when the receipt pins a Python
-	// request and none is passed (existing_environment_usable in
-	// https://github.com/astral-sh/uv/blob/main/crates/uv-tool-commands/src/install.rs),
-	// so a venv on an unmanaged interpreter is uninstalled to be rebuilt.
-	if _, _, foreign := pipInterpreter(in.toolsDir, pkg); foreign != "" {
-		if err := in.runPM(ctx, "uv", "tool", "uninstall", pipVenvName(pkg)); err != nil {
-			return nil, fmt.Errorf("uninstall the venv built on %s: %w", foreign, err)
-		}
-	}
 	args := []string{"tool", "install", "--reinstall"}
+	// uv keeps a venv on its old interpreter when the receipt pins a Python
+	// request and none is passed; --force skips that check
+	// (https://github.com/astral-sh/uv/blob/0.13.6/crates/uv-tool-commands/src/install.rs#L515)
+	// and uv still resolves before replacing the venv (#L924 there), so a
+	// rebuild that cannot resolve leaves the old venv working.
+	if _, _, foreign := pipInterpreter(in.toolsDir, pkg); foreign != "" {
+		args = append(args, "--force")
+	}
 	if t.Python != "" {
 		args = append(args, "--python", t.Python)
 	}
