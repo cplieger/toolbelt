@@ -1077,6 +1077,43 @@ func TestPMEnv_PinsUvToTheEngineManagedInterpreters(t *testing.T) {
 	}
 }
 
+// TestPMEnv_PutsEveryBuildCacheInThePrivateCacheDir pins where the caches a
+// build reuses live: GOPATH and GOMODCACHE (modules and checksum database,
+// https://go.dev/ref/mod#environment-variables), GOCACHE (go help cache),
+// npm's cache (https://docs.npmjs.com/cli/v11/using-npm/config#cache), uv's
+// (https://docs.astral.sh/uv/concepts/cache/#cache-directory) and cargo's
+// registry under CARGO_HOME (https://doc.rust-lang.org/cargo/guide/cargo-home.html).
+// The defaults sit under the consumer's HOME, and an ambient value wins over none.
+func TestPMEnv_PutsEveryBuildCacheInThePrivateCacheDir(t *testing.T) {
+	ambient := filepath.Join(t.TempDir(), "home")
+	for _, k := range []string{"GOPATH", "GOMODCACHE", "GOCACHE", "NPM_CONFIG_CACHE", "UV_CACHE_DIR", "CARGO_HOME"} {
+		t.Setenv(k, filepath.Join(ambient, k))
+	}
+	tools := t.TempDir()
+	in := &installer{toolsDir: tools}
+
+	got := map[string][]string{}
+	for _, kv := range in.pmEnv() {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = append(got[k], v)
+	}
+
+	cache := filepath.Join(tools, "cache")
+	want := map[string]string{
+		"GOPATH":           filepath.Join(cache, "go"),
+		"GOMODCACHE":       filepath.Join(cache, "go", "pkg", "mod"),
+		"GOCACHE":          filepath.Join(cache, "go-build"),
+		"NPM_CONFIG_CACHE": filepath.Join(cache, "npm"),
+		"UV_CACHE_DIR":     filepath.Join(cache, "uv"),
+		"CARGO_HOME":       filepath.Join(cache, "cargo"),
+	}
+	for k, v := range want {
+		if !slices.Equal(got[k], []string{v}) {
+			t.Errorf("%s = %q, want exactly [%q]", k, got[k], v)
+		}
+	}
+}
+
 // fakeUV puts a uv on PATH that appends its argv to the returned file and
 // publishes a runnable launcher x into UV_TOOL_BIN_DIR, as `uv tool install`
 // does for a package whose entry point is x.
@@ -1275,6 +1312,77 @@ printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 777 "$BIN/m"`, Probe: "m"},
 			}
 			if perm := fi.Mode().Perm(); perm != 0o666 {
 				t.Errorf("the file outside the tree went from 0666 to %04o through a symlink", perm)
+			}
+		})
+	}
+}
+
+// TestInstall_BuildsRunWithThePrivateCacheDir pins that every backend that
+// runs a build finds the cache dir owner-only when it starts, even after an
+// operator removed it: the build would otherwise create it through the umask,
+// and a group member could then change a cached module the next install
+// reuses.
+func TestInstall_BuildsRunWithThePrivateCacheDir(t *testing.T) {
+	// Each fake records the cache dir's mode, found through the env it was given.
+	const record = `stat -c %a "$(dirname "$GOCACHE")" > "$RECORD"`
+	cases := []struct {
+		name   string
+		id     string
+		tool   Tool
+		script map[string]string
+	}{
+		{name: "npm", id: "p", tool: Tool{Source: "npm:p", Version: "1.0.0"}, script: map[string]string{"npm": record + `
+m="$NPM_CONFIG_PREFIX/lib/node_modules/p"; mkdir -p "$m"; printf '{"name":"p","version":"1.0.0"}' > "$m/package.json"`}},
+		{name: "uv", id: "x", tool: Tool{Source: "pip:x", Version: "1.0.0"}, script: map[string]string{"uv": record + `
+py="$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin"; mkdir -p "$py" "$UV_TOOL_DIR/x/bin"; touch "$py/python3"
+echo "home = $py" > "$UV_TOOL_DIR/x/pyvenv.cfg"; ln -s "$py/python3" "$UV_TOOL_DIR/x/bin/python"
+printf '#!/bin/sh\necho x 1.0.0\n' > "$UV_TOOL_BIN_DIR/x"; chmod 755 "$UV_TOOL_BIN_DIR/x"`}},
+		{name: "go", id: "g", tool: Tool{Source: "go:example.com/g", Version: "v1.0.0"}, script: map[string]string{"go": record + `
+printf '#!/bin/sh\necho g 1.0.0\n' > "$GOBIN/g"; chmod 755 "$GOBIN/g"`}},
+		{name: "cargo", id: "c", tool: Tool{Source: "cargo:c", Version: "1.0.0"}, script: map[string]string{"cargo": record + `
+printf '#!/bin/sh\necho c 1.0.0\n' > "$BIN_DIR/c"; chmod 755 "$BIN_DIR/c"`}},
+		{name: "manual", id: "m", tool: Tool{Source: SourceManual, Version: "1", Probe: "m", Install: record + ` &&
+printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 755 "$BIN/m"`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{
+				Backends: map[string]string{SourceNpm: "", SourcePip: "", SourceGo: "", SourceCargo: ""},
+			})
+			captureLogs(e)
+			rec := filepath.Join(t.TempDir(), "mode")
+			t.Setenv("RECORD", rec)
+			t.Setenv("BIN_DIR", e.binDir())
+			fake := t.TempDir()
+			for name, body := range tc.script {
+				if err := os.WriteFile(filepath.Join(fake, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := os.RemoveAll(filepath.Join(e.toolsDir, "cache")); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools[tc.id] = tc.tool
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install(tc.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if final := waitJob(t, e, job.ID); final.State != JobDone {
+				t.Fatalf("install = %s %q, tail %v", final.State, final.Error, final.OutputTail)
+			}
+			got, err := os.ReadFile(rec)
+			if err != nil {
+				t.Fatalf("the build did not record the cache dir: %v", err)
+			}
+			if mode := strings.TrimSpace(string(got)); mode != "700" {
+				t.Errorf("cache dir mode when the build ran = %s, want 700", mode)
 			}
 		})
 	}

@@ -37,6 +37,16 @@ func pythonInterpreterDir(toolsDir string) string {
 	return filepath.Join(pythonDir(toolsDir), "interpreters")
 }
 
+// cacheDir holds the download and build caches of every build the engine
+// runs. go, npm, uv and cargo reuse a cached module, package or build output
+// without fetching it again, so an entry another account can change changes
+// the next install; the directory is therefore private to the engine's uid.
+func cacheDir(toolsDir string) string { return filepath.Join(toolsDir, "cache") }
+
+// privateDirs are the managed directories no account but the engine's may
+// enter, whatever the modes beneath them.
+func privateDirs(toolsDir string) []string { return []string{cacheDir(toolsDir)} }
+
 // managedDirs is every directory the engine owns, in audit order.
 func managedDirs(toolsDir string) []string {
 	return []string{
