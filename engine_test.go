@@ -280,6 +280,53 @@ func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	}
 }
 
+// TestInstall_LibraryOnlyNpmPackageIsAlreadyInstalled pins convergence for an
+// npm package that ships no bin (a preset or shared config): its installed
+// package.json is the proof, so neither an install nor a reconcile reruns npm,
+// and the inventory reads it as installed.
+func TestInstall_LibraryOnlyNpmPackageIsAlreadyInstalled(t *testing.T) {
+	const pkg = "@size-limit/preset-app"
+	fake := t.TempDir()
+	marker := filepath.Join(fake, "npm-ran")
+	if err := os.WriteFile(filepath.Join(fake, "npm"),
+		[]byte("#!/bin/sh\ntouch "+marker+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourceNpm: ""}})
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools[pkg] = Tool{Source: "npm:" + pkg, Version: "14.3.0"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.setToolStatus(pkg, func(s *ToolStatus) { s.InstalledVersion = "14.3.0" }); err != nil {
+		t.Fatal(err)
+	}
+	writeNpmPackage(t, e, pkg, `{"name":"@size-limit/preset-app","version":"14.3.0"}`)
+
+	job, err := e.Install(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if final.State != JobDone {
+		t.Errorf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if out := strings.Join(final.OutputTail, "\n"); !strings.Contains(out, pkg+" 14.3.0 already installed") {
+		t.Errorf("install output = %q, want it to report the package already installed", out)
+	}
+	if out := reconcileOutput(t, e); strings.Contains(out, "installing missing tools") {
+		t.Errorf("reconcile output = %q, want nothing missing", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("npm ran for a package that is already installed")
+	}
+	if row := inventoryByName(t, e)[pkg]; !row.Installed {
+		t.Errorf("inventory row = %+v, want installed", row)
+	}
+}
+
 // TestInstall_EnablesAnObligatoryDependency pins the dependency cascade:
 // asking for a tool is asking for what it cannot run without. The
 // refusal this replaced was a dead end — the dependent's install failed

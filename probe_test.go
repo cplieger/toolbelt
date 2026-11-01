@@ -17,6 +17,19 @@ func writeStub(t *testing.T, e *Engine, name, body string) {
 	}
 }
 
+// writeNpmPackage writes pkg's package.json where npm's global install puts
+// it under the engine's npm prefix.
+func writeNpmPackage(t *testing.T, e *Engine, pkg, manifest string) {
+	t.Helper()
+	dir := filepath.Join(e.toolsDir, "npm", "lib", "node_modules", pkg)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestProbeInstalled_ExecutesTheTool pins install detection: presence of
 // bin/<name> is not proof, so a corrupt/wrong-arch binary, a dangling
 // link, or the wrong version all read as NOT installed. It also pins
@@ -158,6 +171,109 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			// Naming the missing bin is the whole diagnostic: every
 			// RECORDED bin is checked, not just the one that gets run.
 			want: false, wantReason: "bin tsserver is missing",
+		},
+		{
+			// An npm package can ship no bin at all (a preset or shared
+			// config), so its installed package.json is the only proof.
+			name: "npm library package at the recorded version",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "@size-limit/preset-app", `{"name":"@size-limit/preset-app","version":"14.3.0"}`)
+				return Tool{Source: "npm:@size-limit/preset-app"}, ToolStatus{InstalledVersion: "14.3.0"}
+			},
+			want: true, wantMode: "package",
+		},
+		{
+			name: "npm library package at another version",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "@size-limit/preset-app", `{"name":"@size-limit/preset-app","version":"14.2.0"}`)
+				return Tool{Source: "npm:@size-limit/preset-app"}, ToolStatus{InstalledVersion: "14.3.0"}
+			},
+			want: false, wantMode: "package", wantReason: `package.json reports "14.2.0", recorded version is "14.3.0"`,
+		},
+		{
+			name: "npm library package before the first status write",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "stylelint-config-standard", `{"name":"stylelint-config-standard","version":"40.0.0"}`)
+				return Tool{Source: "npm:stylelint-config-standard"}, ToolStatus{}
+			},
+			want: true, wantMode: "package",
+		},
+		{
+			name: "npm package declaring a bin is probed through its bin",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "@size-limit/preset-app", `{"name":"@size-limit/preset-app","version":"14.3.0","bin":"cli.js"}`)
+				return Tool{Source: "npm:@size-limit/preset-app"}, ToolStatus{InstalledVersion: "14.3.0"}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			name: "npm package declaring a bin map is probed through its bin",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "tool", `{"name":"tool","version":"1.2.3","bin":{"tool":"cli.js"}}`)
+				return Tool{Source: "npm:tool"}, ToolStatus{InstalledVersion: "1.2.3"}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			name: "npm package with an empty bin map is a library package",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "tool", `{"name":"tool","version":"1.2.3","bin":{}}`)
+				return Tool{Source: "npm:tool"}, ToolStatus{InstalledVersion: "1.2.3"}
+			},
+			want: true, wantMode: "package",
+		},
+		{
+			name: "npm package.json without a version proves nothing",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "tool", `{"name":"tool"}`)
+				return Tool{Source: "npm:tool"}, ToolStatus{}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			// A recorded bin is the install's footprint, so it is checked
+			// even when package.json no longer declares one.
+			name: "npm package with a recorded bin is probed through it",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "tool", `{"name":"tool","version":"1.2.3"}`)
+				return Tool{Source: "npm:tool"}, ToolStatus{InstalledVersion: "1.2.3", PMBins: []string{"tool"}}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			name: "npm package declaring a bin directory is probed through its bin",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "tool", `{"name":"tool","version":"1.2.3","directories":{"bin":"./bin"}}`)
+				return Tool{Source: "npm:tool"}, ToolStatus{InstalledVersion: "1.2.3"}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			name: "npm package that is not installed is probed through its bin",
+			setup: func(*testing.T, *Engine) (Tool, ToolStatus) {
+				return Tool{Source: "npm:tool"}, ToolStatus{InstalledVersion: "1.2.3"}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			// npm refs are not validated at the door, so the read must
+			// stay inside node_modules: the package.json planted at the
+			// escape target would otherwise read as installed.
+			name: "npm ref escaping node_modules is not read",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "other", `{"name":"other","version":"1.0.0"}`)
+				writeNpmPackage(t, e, "../../x", `{"name":"x","version":"1.2.3"}`)
+				return Tool{Source: "npm:../../x"}, ToolStatus{InstalledVersion: "1.2.3"}
+			},
+			want: false, wantReason: "bin tool is missing",
+		},
+		{
+			name: "npm library package with an unparseable package.json",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "tool", `{"version":`)
+				return Tool{Source: "npm:tool"}, ToolStatus{InstalledVersion: "1.2.3"}
+			},
+			want: false, wantReason: "bin tool is missing",
 		},
 		{
 			name: "nothing installed at all",

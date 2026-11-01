@@ -3,8 +3,10 @@ package toolbelt
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +65,9 @@ const (
 	// a regular executable file), so only presence was checked. Logged,
 	// never presented as verified.
 	probeModePresence = "presence"
+	// probeModePackage: an npm package that ships no bin, checked
+	// against the version in its installed package.json.
+	probeModePackage = "package"
 )
 
 // probeVerdict is what one probe established.
@@ -133,14 +138,14 @@ func (c *probeCache) forget(name string) {
 // binDir is the single PATH dir the engine publishes into.
 func (e *Engine) binDir() string { return binDir(e.toolsDir) }
 
-// probeInstalled reports whether the tool is installed. Presence of
-// bin/<name> is necessary but not sufficient: the recorded bin must
-// exist AND execute, and when the definition declares its
-// version-reporting shape the answer must contain the recorded version
-// — so a truncated download, a wrong-architecture binary, a dangling
-// symlink, or the wrong version all read as NOT installed and route to
-// a reinstall. A bin the engine cannot execute at all falls back to
-// presence only and says so at Warn.
+// probeInstalled reports whether the tool is installed. The recorded bin
+// must exist AND execute, and when the definition declares its
+// version-reporting shape the answer must contain the recorded version,
+// so a truncated download, a wrong-architecture binary, a dangling
+// symlink, or the wrong version all read as NOT installed. A bin the
+// engine cannot execute falls back to presence only, at Warn. An apt
+// package, and an npm package that ships no bin, are proven by their
+// package manager's record instead.
 func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeTool(name, t, s).OK
 }
@@ -148,8 +153,14 @@ func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 // probeTool is probeInstalled's full verdict (mode + reason), cached per
 // tool and logged once per fingerprint change.
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
-	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceApt {
+	kind, ref, _ := strings.Cut(t.Source, ":")
+	if kind == SourceApt {
 		return probeApt(ref)
+	}
+	if kind == SourceNpm && len(s.Bins)+len(s.PMBins) == 0 {
+		if v, ok := e.probeNpmPackage(ref, s.InstalledVersion); ok {
+			return v
+		}
 	}
 	bins := recordedBins(name, t, s)
 	for _, b := range bins {
@@ -194,6 +205,66 @@ func probeApt(pkg string) probeVerdict {
 	// The dpkg status IS the version, so this is the one source whose
 	// probe verifies the answer without executing anything.
 	return probeVerdict{OK: true, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + version}
+}
+
+// npmPackageCap bounds a package.json read; a real one is a few KiB.
+const npmPackageCap = 1 << 20
+
+// probeNpmPackage checks an npm package that ships no bin against the
+// version in its installed package.json. ok is false when the bin probe
+// must decide instead: the package declares a bin, or its package.json is
+// missing or unreadable. The read goes through os.Root because npm refs
+// are not validated, so a ".." ref must not reach outside node_modules.
+// Like probeApt it is not cached: a file read notices a removal at once.
+func (e *Engine) probeNpmPackage(ref, want string) (probeVerdict, bool) {
+	root, err := os.OpenRoot(npmModulesDir(e.toolsDir))
+	if err != nil {
+		return probeVerdict{}, false
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.Open(filepath.Join(ref, "package.json"))
+	if err != nil {
+		return probeVerdict{}, false
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, npmPackageCap+1))
+	if err != nil || len(data) > npmPackageCap {
+		return probeVerdict{}, false
+	}
+	// npm links a bin from "bin" (a path or a name-to-path map) or from
+	// every file in "directories.bin":
+	// https://docs.npmjs.com/cli/v11/configuring-npm/package-json#bin
+	var pkg struct {
+		Bin         any    `json:"bin"`
+		Version     string `json:"version"`
+		Directories struct {
+			Bin string `json:"bin"`
+		} `json:"directories"`
+	}
+	if json.Unmarshal(data, &pkg) != nil || pkg.Version == "" {
+		return probeVerdict{}, false
+	}
+	if declaresBin(pkg.Bin) || pkg.Directories.Bin != "" {
+		return probeVerdict{}, false
+	}
+	if want != "" && strings.TrimPrefix(pkg.Version, "v") != strings.TrimPrefix(want, "v") {
+		return probeVerdict{
+			OK: false, Mode: probeModePackage,
+			Reason: fmt.Sprintf("package.json reports %q, recorded version is %q", pkg.Version, want),
+		}, true
+	}
+	return probeVerdict{OK: true, Mode: probeModePackage}, true
+}
+
+// declaresBin reports whether a package.json "bin" value names anything.
+func declaresBin(bin any) bool {
+	switch b := bin.(type) {
+	case string:
+		return b != ""
+	case map[string]any:
+		return len(b) > 0
+	}
+	return false
 }
 
 // logVerdict reports a FRESH verdict (cache hits stay quiet, so a stable

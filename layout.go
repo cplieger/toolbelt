@@ -16,6 +16,13 @@ func optDir(toolsDir string) string { return filepath.Join(toolsDir, "opt") }
 func npmDir(toolsDir string) string    { return filepath.Join(toolsDir, "npm") }
 func npmBinDir(toolsDir string) string { return filepath.Join(npmDir(toolsDir), "bin") }
 
+// npmModulesDir is where npm's global install under the prefix puts each
+// package (https://docs.npmjs.com/cli/v11/configuring-npm/folders). npm
+// creates it, so it is not in managedDirs.
+func npmModulesDir(toolsDir string) string {
+	return filepath.Join(npmDir(toolsDir), "lib", "node_modules")
+}
+
 // pythonDir is uv's tool root; pythonBinDir is the launcher dir under it.
 func pythonDir(toolsDir string) string    { return filepath.Join(toolsDir, "python") }
 func pythonBinDir(toolsDir string) string { return filepath.Join(pythonDir(toolsDir), "bin") }
