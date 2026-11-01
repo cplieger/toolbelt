@@ -1352,9 +1352,9 @@ func TestInventory_LatestFromCacheAndSystem(t *testing.T) {
 	}
 	// Seed the version cache as an update job would.
 	e.versions.mu.Lock()
-	e.versions.cache[SourceManual] = "" // manual: never cached
-	e.versions.cache["npm:x"] = "9.9.9"
-	e.versions.cache["npm:y"] = "9.9.9"
+	e.versions.cache[latestKey{source: SourceManual}] = "" // manual: never cached
+	e.versions.cache[latestKey{source: "npm:x"}] = "9.9.9"
+	e.versions.cache[latestKey{source: "npm:y"}] = "9.9.9"
 	e.versions.mu.Unlock()
 
 	inv, err := e.Inventory()

@@ -34,7 +34,7 @@ const versionResponseCap = 4 << 20
 // and reconcile jobs.
 type versionResolver struct {
 	client *http.Client
-	cache  map[string]string // source -> latest version
+	cache  map[latestKey]string
 	// aptIdx guarantees a package index exists before apt-cache is asked
 	// anything. Both consumer images ship with /var/lib/apt/lists empty,
 	// and apt-cache answers "no Candidate line" rather than erroring on a
@@ -46,38 +46,62 @@ type versionResolver struct {
 }
 
 func newVersionResolver(client *http.Client, aptIdx *aptIndex) *versionResolver {
-	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx}
+	return &versionResolver{client: client, cache: map[latestKey]string{}, aptIdx: aptIdx}
 }
 
-// Cached returns the cached latest version for a source, if any.
-func (v *versionResolver) Cached(source string) string {
+// latestKey keys the latest-version cache: the answer for a source depends
+// on whether the recorded version admits prereleases.
+type latestKey struct {
+	source   string
+	allowPre bool
+}
+
+func toolLatestKey(t *Tool, aq *AquaPackage) latestKey {
+	return latestKey{source: t.Source, allowPre: recordedPrerelease(t, aq)}
+}
+
+// Cached returns the cached latest version for the tool, if any.
+func (v *versionResolver) Cached(t *Tool, aq *AquaPackage) string {
+	key := toolLatestKey(t, aq)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.cache[source]
+	return v.cache[key]
 }
 
 // Latest resolves the newest upstream version for the tool and caches
 // it. aq carries the catalog's aqua definition when the source is
-// aqua: (for version_source/filter/prefix semantics).
-func (v *versionResolver) Latest(ctx context.Context, source string, aq *AquaPackage) (string, error) {
-	latest, err := v.resolve(ctx, source, aq)
+// aqua: (for version_source/filter/prefix semantics). Where the engine
+// picks the highest of a version list, a prerelease counts only when the
+// tool's recorded version is itself a prerelease.
+func (v *versionResolver) Latest(ctx context.Context, t *Tool, aq *AquaPackage) (string, error) {
+	key := toolLatestKey(t, aq)
+	latest, err := v.resolve(ctx, key, aq)
 	if err != nil {
 		return "", err
 	}
-	if !validVersion(source, latest) {
-		return "", fmt.Errorf("upstream %s: %v", source, versionRejected(source, latest))
+	if !validVersion(t.Source, latest) {
+		return "", fmt.Errorf("upstream %s: %v", t.Source, versionRejected(t.Source, latest))
 	}
 	v.mu.Lock()
-	v.cache[source] = latest
+	v.cache[key] = latest
 	v.mu.Unlock()
 	return latest, nil
 }
 
-func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPackage) (string, error) {
-	kind, ref, _ := strings.Cut(source, ":")
+// recordedPrerelease reports whether the tool is on a prerelease line.
+func recordedPrerelease(t *Tool, aq *AquaPackage) bool {
+	prefix := ""
+	if aq != nil {
+		prefix = aq.VersionPrefix
+	}
+	return isPrereleaseTag(t.Version, prefix)
+}
+
+func (v *versionResolver) resolve(ctx context.Context, key latestKey, aq *AquaPackage) (string, error) {
+	kind, ref, _ := strings.Cut(key.source, ":")
 	switch kind {
 	case SourceAqua:
-		return v.latestAqua(ctx, ref, aq)
+		return v.latestAqua(ctx, ref, aq, key.allowPre)
 	case SourceNpm:
 		return v.latestNpm(ctx, ref)
 	case SourcePip:
@@ -85,13 +109,13 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 	case SourceCargo:
 		return v.latestCrate(ctx, ref)
 	case SourceGo:
-		return v.latestGoModule(ctx, ref)
+		return v.latestGoModule(ctx, ref, key.allowPre)
 	case SourceRelease:
-		return v.latestRelease(ctx, ref)
+		return v.latestRelease(ctx, ref, key.allowPre)
 	case SourceApt:
 		return v.latestApt(ctx, ref)
 	default:
-		return "", fmt.Errorf("no version source for %q", source)
+		return "", fmt.Errorf("no version source for %q", key.source)
 	}
 }
 
@@ -101,14 +125,14 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 // GitHub paths the aqua source already uses. The registry's version_prefix
 // hint is not applied here: the tag is what the download URL needs, and
 // stripping a prefix would produce a version that names no release.
-func (v *versionResolver) latestRelease(ctx context.Context, ref string) (string, error) {
+func (v *versionResolver) latestRelease(ctx context.Context, ref string, allowPre bool) (string, error) {
 	rr, err := parseReleaseRef(ref)
 	if err != nil {
 		return "", err
 	}
 	switch rr.Host {
 	case releaseHostGitLab:
-		return v.latestGitLabRelease(ctx, rr)
+		return v.latestGitLabRelease(ctx, rr, allowPre)
 	default:
 		return v.latestGitHubRelease(ctx, rr)
 	}
@@ -128,14 +152,28 @@ func (v *versionResolver) latestGitHubRelease(ctx context.Context, rr releaseRef
 	return rel.TagName, nil
 }
 
-func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef) (string, error) {
+// latestGitLabRelease picks by version from the newest page of releases,
+// because GitLab marks no release as a prerelease and orders by release date
+// (https://docs.gitlab.com/api/releases/#list-releases), so a back-branch
+// patch released last would otherwise read as latest. A page with no
+// version-shaped tag keeps GitLab's newest.
+func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef, allowPre bool) (string, error) {
 	var rels []struct {
 		TagName string `json:"tag_name"`
 	}
 	project := url.PathEscape(rr.Owner + "/" + rr.Repo)
-	api := "https://gitlab.com/api/v4/projects/" + project + "/releases?per_page=1"
+	api := "https://gitlab.com/api/v4/projects/" + project + "/releases?per_page=100"
 	if err := v.getJSON(ctx, api, &rels); err != nil {
 		return "", err
+	}
+	var tags []string
+	for _, r := range rels {
+		if parseTagVersion(r.TagName, "") != nil {
+			tags = append(tags, r.TagName)
+		}
+	}
+	if len(tags) > 0 {
+		return latestTag(tags, "", allowPre), nil
 	}
 	if len(rels) == 0 || rels[0].TagName == "" {
 		return "", fmt.Errorf("%s/%s has no releases", rr.Owner, rr.Repo)
@@ -158,16 +196,16 @@ func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, er
 // release index when it publishes one; the tag list (filtered by
 // version_filter/version_prefix) for github_tag versioning and for http
 // and github_content types; else the GitHub releases/latest endpoint.
-func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPackage) (string, error) {
+func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPackage, allowPre bool) (string, error) {
 	owner, repo, ok := strings.Cut(ref, "/")
 	if !ok {
 		return "", fmt.Errorf("bad aqua ref %q", ref)
 	}
 	if feed, ok := runtimeVersionFeeds[ref]; ok {
-		return v.latestFromFeed(ctx, feed, aq)
+		return v.latestFromFeed(ctx, feed, aq, allowPre)
 	}
 	if aq != nil && (aq.VersionSource == "github_tag" || aq.Type == aquaTypeHTTP || aq.Type == "github_content") {
-		return v.latestGitHubTag(ctx, owner, repo, aq)
+		return v.latestGitHubTag(ctx, owner, repo, aq, allowPre)
 	}
 	var rel struct {
 		TagName string `json:"tag_name"`
@@ -181,7 +219,7 @@ func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPa
 	if aq != nil && !evalVersionFilter(aq.VersionFilter, rel.TagName, aq.VersionPrefix) {
 		// Latest release fails the filter (e.g. a "latest"-named tag);
 		// fall back to scanning the tag list.
-		return v.latestGitHubTag(ctx, owner, repo, aq)
+		return v.latestGitHubTag(ctx, owner, repo, aq, allowPre)
 	}
 	return rel.TagName, nil
 }
@@ -195,7 +233,7 @@ var runtimeVersionFeeds = map[string]string{
 	"golang/go":   "https://go.dev/dl/?mode=json",
 }
 
-func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq *AquaPackage) (string, error) {
+func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq *AquaPackage, allowPre bool) (string, error) {
 	prefix, filter := "", ""
 	if aq != nil {
 		prefix, filter = aq.VersionPrefix, aq.VersionFilter
@@ -215,7 +253,7 @@ func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no version in %s passes the version filter", feedURL)
 	}
-	return maxVersionTag(candidates, prefix), nil
+	return latestTag(candidates, prefix, allowPre), nil
 }
 
 // tagPageCap bounds the GitHub tag pagination walk. golang/go needs
@@ -227,9 +265,9 @@ const tagPageCap = 20
 // version_filter and version_prefix. The GitHub tags endpoint has NO
 // documented ordering (golang/go's first page is 2012-era weekly.*
 // tags), so — like aqua's own version getter — this paginates,
-// collects every filter-passing candidate, and picks the maximum by
-// version comparison, never trusting response order.
-func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo string, aq *AquaPackage) (string, error) {
+// collects every filter-passing candidate, and picks the maximum with
+// latestTag, never trusting response order.
+func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo string, aq *AquaPackage, allowPre bool) (string, error) {
 	prefix := ""
 	filter := ""
 	if aq != nil {
@@ -257,7 +295,7 @@ func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo strin
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no tag of %s/%s passes the version filter", owner, repo)
 	}
-	return maxVersionTag(candidates, prefix), nil
+	return latestTag(candidates, prefix, allowPre), nil
 }
 
 // tagPasses reports whether a tag satisfies the package's version prefix
@@ -267,6 +305,31 @@ func tagPasses(name, prefix, filter string) bool {
 		return false
 	}
 	return evalVersionFilter(filter, name, prefix)
+}
+
+// latestTag picks the highest candidate as maxVersionTag does, counting a
+// prerelease only when allowPre is set or no candidate is a release, so a
+// project that publishes only prereleases still resolves.
+func latestTag(candidates []string, prefix string, allowPre bool) string {
+	if !allowPre {
+		var releases []string
+		for _, c := range candidates {
+			if ver := parseTagVersion(c, prefix); ver != nil && ver.Prerelease() == "" {
+				releases = append(releases, c)
+			}
+		}
+		if len(releases) > 0 {
+			candidates = releases
+		}
+	}
+	return maxVersionTag(candidates, prefix)
+}
+
+// isPrereleaseTag reports whether tag parses as a version with a prerelease
+// part (v27.0.0-alpha.0, go1.28rc1, a Go pseudo-version).
+func isPrereleaseTag(tag, prefix string) bool {
+	ver := parseTagVersion(tag, prefix)
+	return ver != nil && ver.Prerelease() != ""
 }
 
 // maxVersionTag picks the highest candidate by go-version comparison
@@ -364,12 +427,12 @@ func (v *versionResolver) latestCrate(ctx context.Context, name string) (string,
 // latestGoModule resolves a go: package path to the latest version of the
 // module that owns it, as the go command does: the longest path prefix the
 // proxy knows as a module, read from its version list.
-func (v *versionResolver) latestGoModule(ctx context.Context, pkgPath string) (string, error) {
+func (v *versionResolver) latestGoModule(ctx context.Context, pkgPath string, allowPre bool) (string, error) {
 	if err := module.CheckImportPath(pkgPath); err != nil {
 		return "", fmt.Errorf("invalid go package path %q: %w", pkgPath, err)
 	}
 	for _, mod := range goModulePrefixes(pkgPath) {
-		ver, found, err := v.latestModuleVersion(ctx, mod)
+		ver, found, err := v.latestModuleVersion(ctx, mod, allowPre)
 		if err != nil {
 			return "", err
 		}
@@ -396,7 +459,7 @@ func goModulePrefixes(pkgPath string) []string {
 // found is false when the proxy has no such module. The list is read rather
 // than @latest because @latest is the go command's fallback for an empty
 // list and can lag it (https://go.dev/ref/mod#goproxy-protocol).
-func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath string) (version string, found bool, err error) {
+func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath string, allowPre bool) (version string, found bool, err error) {
 	esc, err := module.EscapePath(modPath)
 	if err != nil {
 		return "", false, fmt.Errorf("invalid module path %q: %w", modPath, err)
@@ -410,7 +473,7 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 		return "", false, err
 	}
 	listed := strings.Fields(string(body))
-	pick := highestModuleVersion(listed)
+	pick := highestModuleVersion(listed, allowPre)
 	if pick == "" {
 		var doc struct {
 			Version string `json:"Version"`
@@ -436,7 +499,7 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 			return semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0
 		})
 	})
-	if p := highestModuleVersion(kept); p != "" {
+	if p := highestModuleVersion(kept, allowPre); p != "" {
 		pick = p
 	}
 	return pick, true, nil
@@ -470,9 +533,26 @@ func (v *versionResolver) moduleRetractions(ctx context.Context, base, version s
 
 // highestModuleVersion picks the go command's "latest" from a version list:
 // canonical semver only, +incompatible versions only when nothing else is
-// listed, the highest release, else the highest prerelease. Empty means the
-// list holds no usable version.
-func highestModuleVersion(listed []string) string {
+// listed, the highest release, else the highest prerelease. allowPre lets a
+// prerelease above every release win. Empty means the list holds no usable
+// version.
+func highestModuleVersion(listed []string, allowPre bool) string {
+	candidates := moduleCandidates(listed)
+	if !allowPre {
+		releases := slices.DeleteFunc(slices.Clone(candidates), func(ver string) bool {
+			return semver.Prerelease(ver) != ""
+		})
+		if len(releases) > 0 {
+			candidates = releases
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return slices.MaxFunc(candidates, semver.Compare)
+}
+
+func moduleCandidates(listed []string) []string {
 	var compatible, incompatible []string
 	for _, ver := range listed {
 		switch canon := semver.Canonical(ver); ver {
@@ -482,24 +562,10 @@ func highestModuleVersion(listed []string) string {
 			incompatible = append(incompatible, ver)
 		}
 	}
-	candidates := compatible
-	if len(candidates) == 0 {
-		candidates = incompatible
+	if len(compatible) == 0 {
+		return incompatible
 	}
-	best, bestPre := "", ""
-	for _, ver := range candidates {
-		if semver.Prerelease(ver) != "" {
-			if bestPre == "" || semver.Compare(ver, bestPre) > 0 {
-				bestPre = ver
-			}
-		} else if best == "" || semver.Compare(ver, best) > 0 {
-			best = ver
-		}
-	}
-	if best == "" {
-		return bestPre
-	}
-	return best
+	return compatible
 }
 
 // isNotFound reports whether err is the proxy saying it has no such module

@@ -158,7 +158,7 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, 
 	if v.Installed {
 		v.Checksum = s.Checksum
 	}
-	if latest := e.versions.Cached(t.Source); latest != "" && latest != t.Version {
+	if latest := e.versions.Cached(t, e.aquaDef(t.Source)); latest != "" && latest != t.Version {
 		v.Latest = latest
 	}
 	return v
@@ -519,7 +519,7 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		return t, err
 	}
 	if t.Version == "" {
-		latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+		latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
 		if err != nil {
 			return t, fmt.Errorf("resolve latest version: %w", err)
 		}
@@ -1592,7 +1592,7 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 	if t.Version != "" {
 		return &t, nil
 	}
-	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+	latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
 	if err != nil {
 		return nil, fmt.Errorf("resolve latest version: %w", err)
 	}
@@ -1817,7 +1817,7 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 		output(fmt.Sprintf("%s pinned at %s, skipping", n, t.Version))
 		return false, nil
 	}
-	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+	latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
 	if err != nil {
 		output(fmt.Sprintf("%s: version check failed: %v", n, err))
 		if errors.Is(err, ErrGitHubRateLimited) {
