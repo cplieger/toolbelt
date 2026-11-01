@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cplieger/keyenc"
@@ -93,10 +94,10 @@ type probeVerdict struct {
 // probeCache memoizes exec probes so Inventory, which a settings UI polls,
 // does not spawn a subprocess per tool per call. Presence and a pip: venv's
 // interpreter are re-checked on every probe, so a deleted file shows at once.
-// The exec verdict is keyed by the probe target (resolved path, size, mtime),
-// the recorded version, the declared version args and, for a pip: venv, its
-// resolved interpreter, so a reinstall, relink, version bump or interpreter
-// change invalidates it without a TTL.
+// The exec verdict is keyed by the probe target's fileIdentity, the recorded
+// version, the declared version args and, for a pip: venv, its resolved
+// interpreter's fileIdentity, so a reinstall, relink, version bump or
+// interpreter change invalidates it without a TTL.
 type probeCache struct {
 	entries map[string]probeCacheEntry
 	mu      sync.Mutex
@@ -308,7 +309,7 @@ func pipVenvName(ref string) string {
 // change. missing names the first one gone; else foreign is the resolved
 // interpreter when it lies outside pythonInterpreterDir, a tree the engine
 // does not manage and so cannot keep alive; otherwise identity is the
-// resolved interpreter's path, mode, size and mtime. All are empty when
+// resolved interpreter's fileIdentity. All are empty when
 // there is no pyvenv.cfg or a venv path leaves the tool dir.
 func pipInterpreter(toolsDir, ref string) (identity, missing, foreign string) {
 	toolDir := pythonToolDir(toolsDir)
@@ -349,19 +350,38 @@ func pipInterpreter(toolsDir, ref string) (identity, missing, foreign string) {
 		}
 		return "", "", ""
 	}
-	fi, err := os.Stat(resolved)
-	if err != nil {
-		return "", "", ""
-	}
 	if !underDir(resolved, pythonInterpreterDir(toolsDir)) {
 		return "", "", resolved
 	}
-	return keyenc.Join(
+	parts, err := fileIdentity(resolved)
+	if err != nil {
+		return "", "", ""
+	}
+	return keyenc.Join(parts...), "", ""
+}
+
+// fileIdentity is the stat identity of the file at resolved, as key parts.
+// Device, inode and ctime catch a replacement that keeps mode, size and
+// mtime (a rename over it, or a rewrite with its mtime put back): setting an
+// mtime stamps ctime with the current time (utimensat(2)).
+func fileIdentity(resolved string) ([]string, error) {
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, fmt.Errorf("stat %s: no device, inode or ctime", resolved)
+	}
+	return []string{
 		resolved,
 		fi.Mode().String(),
 		strconv.FormatInt(fi.Size(), 10),
 		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
-	), "", ""
+		strconv.FormatUint(st.Dev, 10),
+		strconv.FormatUint(st.Ino, 10),
+		strconv.FormatInt(st.Ctim.Nano(), 10),
+	}, nil
 }
 
 // underDir reports whether the resolved path lies below dir, compared with
@@ -537,17 +557,11 @@ func probeFingerprint(target, want string, declaredArgs []string) (string, error
 	if err != nil {
 		return "", err
 	}
-	fi, err := os.Stat(resolved)
+	parts, err := fileIdentity(resolved)
 	if err != nil {
 		return "", err
 	}
-	return keyenc.Join(
-		resolved,
-		strconv.FormatInt(fi.Size(), 10),
-		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
-		want,
-		keyenc.Join(declaredArgs...),
-	), nil
+	return keyenc.Join(append(parts, want, keyenc.Join(declaredArgs...))...), nil
 }
 
 // versionAnswered reports whether a probe's output claims the recorded

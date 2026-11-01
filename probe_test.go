@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -417,6 +418,106 @@ func TestProbeInstalled_DeclaringVersionArgsReprobes(t *testing.T) {
 	}
 }
 
+// replaceMode is how replaceKeepingStat swaps a file's content.
+type replaceMode int
+
+const (
+	replaceByRename replaceMode = iota
+	replaceInPlace
+)
+
+// replaceKeepingStat gives path new content of the same length, then puts
+// back its mode and mtime, so only device, inode or ctime can tell the
+// files apart. replaceByRename renames a new file over path (a new inode);
+// replaceInPlace rewrites path's own inode and waits for its ctime to move,
+// which the kernel stamps at clock-tick granularity (inode(7)).
+func replaceKeepingStat(t *testing.T, path, content string, how replaceMode) {
+	t.Helper()
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Size() != int64(len(content)) {
+		t.Fatalf("replacement is %d bytes, %s is %d", len(content), path, before.Size())
+	}
+	oldCtime := before.Sys().(*syscall.Stat_t).Ctim.Nano()
+	restore := func(p string) {
+		t.Helper()
+		if err := os.Chmod(p, before.Mode().Perm()); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	switch how {
+	case replaceByRename:
+		next := path + ".next"
+		if err := os.WriteFile(next, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		restore(next)
+		if err := os.Rename(next, path); err != nil {
+			t.Fatal(err)
+		}
+	case replaceInPlace:
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			restore(path)
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Sys().(*syscall.Stat_t).Ctim.Nano() != oldCtime {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("ctime of %s did not move within 2s", path)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Mode() != before.Mode() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("replacement changed mode, size or mtime: %v %d %v, was %v %d %v",
+			after.Mode(), after.Size(), after.ModTime(), before.Mode(), before.Size(), before.ModTime())
+	}
+}
+
+// TestProbeInstalled_CachedVerdictFollowsAReplacementKeepingSizeAndMtime
+// pins that a probe target swapped for a same-mode, same-size file with its
+// mtime put back is probed again rather than served from the cache.
+func TestProbeInstalled_CachedVerdictFollowsAReplacementKeepingSizeAndMtime(t *testing.T) {
+	cases := map[string]replaceMode{
+		"renamed over":       replaceByRename,
+		"rewritten in place": replaceInPlace,
+	}
+	for name, how := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			captureLogs(e)
+			writeStub(t, e, "tool", "echo 1.0.0")
+			tool := Tool{Source: SourceManual, VersionArgs: []string{"--version"}}
+			status := ToolStatus{InstalledVersion: "1.0.0", Bins: []string{"tool"}}
+			if v := e.probeTool("tool", &tool, &status); !v.OK {
+				t.Fatalf("probe of the original = %+v, want OK", v)
+			}
+
+			replaceKeepingStat(t, filepath.Join(e.binDir(), "tool"), "#!/bin/sh\necho 2.0.0\n", how)
+
+			if v := e.probeTool("tool", &tool, &status); v.OK || v.Mode != probeModeVersion {
+				t.Errorf("probe of the replacement = %+v, want not OK in version mode", v)
+			}
+		})
+	}
+}
+
 // writeVenv lays out a uv tool venv as uv builds one: pyvenv.cfg naming
 // home as the interpreter's directory
 // (https://docs.python.org/3/library/venv.html) and bin/python an absolute
@@ -722,6 +823,20 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 				if err := os.Chtimes(python, later, later); err != nil {
 					t.Fatal(err)
 				}
+			},
+			wantMode: probeModeVersion,
+		},
+		{
+			name: "interpreter renamed over, keeping mode, size and mtime",
+			change: func(t *testing.T, python string) {
+				replaceKeepingStat(t, python, "#!/bin/sh\necho x 2.0.0\n", replaceByRename)
+			},
+			wantMode: probeModeVersion,
+		},
+		{
+			name: "interpreter rewritten in place, keeping mode, size and mtime",
+			change: func(t *testing.T, python string) {
+				replaceKeepingStat(t, python, "#!/bin/sh\necho x 2.0.0\n", replaceInPlace)
 			},
 			wantMode: probeModeVersion,
 		},
