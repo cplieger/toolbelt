@@ -889,8 +889,8 @@ func TestProbeBin_PicksOneTarget(t *testing.T) {
 }
 
 // TestVersionAnswered pins the version-answer comparison: upstream
-// banners disagree about the v prefix and case, so containment on the
-// trimmed version is the contract.
+// banners disagree about the v prefix and case, and another version fails,
+// including one the recorded version is a substring of.
 func TestVersionAnswered(t *testing.T) {
 	cases := []struct {
 		out  string
@@ -902,13 +902,21 @@ func TestVersionAnswered(t *testing.T) {
 		{out: "v24.18.0", want: "v24.18.0", ok: true},
 		{out: "24.18.0", want: "v24.18.0", ok: true},
 		{out: "V1.2.3", want: "1.2.3", ok: true},
-		{out: "1.2.30", want: "1.2.3", ok: true}, // containment: deliberately lenient
+		{out: "ripgrep 14.1.1 (rev 4649aa9700)", want: "14.1.1", ok: true},
+		{out: "jq-1.8.1-dirty", want: "1.8.1", ok: true},
+		{out: "1.2.30", want: "1.2.3", ok: false},
+		{out: "11.2.3", want: "1.2.3", ok: false},
+		{out: "1.2.3.4", want: "1.2.3", ok: false},
+		{out: "0.1.2.3", want: "1.2.3", ok: false},
+		{out: "v1.2.3", want: "1.2", ok: false},
+		{out: "go version go1.26.50 linux/amd64", want: "go1.26.5", ok: false},
+		{out: "tool 11.2.3, built against 1.2.3", want: "1.2.3", ok: true},
 		{out: "9.9.9", want: "1.2.3", ok: false},
 		{out: "", want: "1.2.3", ok: false},
 		{out: "anything", want: "", ok: true},
 	}
 	for _, tc := range cases {
-		t.Run(tc.out+"/"+tc.want, func(t *testing.T) {
+		t.Run(strings.ReplaceAll(tc.out, "/", "_")+" against "+tc.want, func(t *testing.T) {
 			if got := versionAnswered(tc.out, tc.want); got != tc.ok {
 				t.Fatalf("versionAnswered(%q, %q) = %v, want %v", tc.out, tc.want, got, tc.ok)
 			}

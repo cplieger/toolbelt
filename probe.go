@@ -576,15 +576,38 @@ func probeFingerprint(target, want string, declaredArgs []string) (string, error
 
 // versionAnswered reports whether a probe's output claims the recorded
 // version. Upstream banners are inconsistent about the v prefix and case
-// ("jq-1.8.1", "go version go1.26.5", "v24.18.0"), so the comparison is
-// a case-insensitive containment check on the version with any leading v
-// trimmed from both sides.
+// ("jq-1.8.1", "go version go1.26.5", "v24.18.0"), so the version, any
+// leading v trimmed, is found case-insensitively; an occurrence that
+// continues a longer version (1.2.3 inside 11.2.3 or 1.2.30) does not count.
 func versionAnswered(out, want string) bool {
 	needle := strings.ToLower(strings.TrimPrefix(want, "v"))
 	if needle == "" {
 		return true
 	}
-	return strings.Contains(strings.ToLower(out), needle)
+	hay := strings.ToLower(out)
+	for from := 0; ; {
+		i := strings.Index(hay[from:], needle)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(needle)
+		if !versionContinues(hay[:start], true) && !versionContinues(hay[end:], false) {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+// versionContinues reports whether side, the text before (before is true) or
+// after a version match, extends it with a digit or a dot-and-digit.
+func versionContinues(side string, before bool) bool {
+	digitAt := func(i int) bool { return i >= 0 && i < len(side) && side[i] >= '0' && side[i] <= '9' }
+	if before {
+		n := len(side)
+		return digitAt(n-1) || n >= 2 && side[n-1] == '.' && digitAt(n-2)
+	}
+	return digitAt(0) || len(side) >= 2 && side[0] == '.' && digitAt(1)
 }
 
 // firstLine is the reportable head of a probe answer (bounded, so a
