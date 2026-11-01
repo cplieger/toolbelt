@@ -515,7 +515,7 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		Python:      strings.TrimSpace(req.Python),
 	}
 	if len(req.VersionArgs) > 0 {
-		t.VersionArgs = slices.Clone(req.VersionArgs)
+		t.VersionArgs = req.VersionArgs
 	}
 	if cat, ok := e.cat().Lookup(name); ok {
 		mergeCatalogDefaults(&t, &cat)
@@ -588,18 +588,13 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 	if t.Description == "" {
 		t.Description = cat.Description
 	}
-	// Clone the two slice fields. Everything else hydrated here is a string,
-	// but these cross from the catalog — held in an atomic.Pointer and swapped
-	// whole on refresh, so every reader shares one copy — into a manifest row,
-	// which IS mutated (Add, Patch, remove). Sharing the backing array would
-	// make a future append or sort on a row rewrite what every other reader of
-	// the live catalog sees. Today's writers all REPLACE the slice rather than
-	// writing through it, so this closes the next edit rather than a live bug.
+	// The slices share the catalog's backing arrays (CatalogEntry's doc):
+	// a merged row is only read, then marshalled into tools.json.
 	if t.Requires == nil {
-		t.Requires = slices.Clone(cat.Requires)
+		t.Requires = cat.Requires
 	}
 	if t.VersionArgs == nil {
-		t.VersionArgs = slices.Clone(cat.VersionArgs)
+		t.VersionArgs = cat.VersionArgs
 	}
 	if t.Install == "" {
 		t.Install = cat.Install
@@ -777,7 +772,7 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 		t.Uninstall = *req.Uninstall
 	}
 	if req.VersionArgs != nil {
-		t.VersionArgs = slices.Clone(*req.VersionArgs)
+		t.VersionArgs = *req.VersionArgs
 	}
 	return out
 }
