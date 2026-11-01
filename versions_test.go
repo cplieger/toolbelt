@@ -620,15 +620,6 @@ func TestLatestGoModule_ResolvesTheOwningModule(t *testing.T) {
 			},
 			want: "v1.6.0",
 		},
-		{
-			name: "incompatible versions lose to a compatible one",
-			pkg:  "example.com/m",
-			routes: map[string]string{
-				"/example.com/m/@v/list":       "v1.4.0\nv2.0.0+incompatible\n",
-				"/example.com/m/@v/v1.4.0.mod": "module example.com/m\n",
-			},
-			want: "v1.4.0",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -639,6 +630,141 @@ func TestLatestGoModule_ResolvesTheOwningModule(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("Latest(go:%s) = %q, want %q", tc.pkg, got, tc.want)
+			}
+		})
+	}
+}
+
+// The go command admits +incompatible versions to "latest" only when the
+// highest unretracted compatible version's .mod is the synthesized
+// "module <path>\n" (cmd/go/internal/modload query.go filterVersions). The
+// archiver, blackfriday and docker cases are live proxy data, their answers
+// those of `go list -m <module>@latest` (go1.27.3).
+func TestLatestGoModule_IncompatibleVersions(t *testing.T) {
+	const realMod = "module example.com/m\n\ngo 1.21\n"
+	const legacyMod = "module example.com/m\n"
+	cases := []struct {
+		name, mod, pkg, list, recorded, want string
+		routes                               map[string]string
+		wantErr                              bool
+	}{
+		{
+			name:   "a real go.mod on the highest compatible version excludes them",
+			list:   "v1.4.0\nv2.0.0+incompatible\n",
+			routes: map[string]string{"v1.4.0.mod": realMod},
+			want:   "v1.4.0",
+		},
+		{
+			name:   "a synthesized go.mod on the highest compatible version admits them",
+			list:   "v1.4.0\nv2.0.0+incompatible\n",
+			routes: map[string]string{"v1.4.0.mod": legacyMod},
+			want:   "v2.0.0+incompatible",
+		},
+		{
+			name:   "only incompatible versions listed",
+			list:   "v2.0.0+incompatible\nv2.1.0+incompatible\n",
+			routes: map[string]string{"v2.1.0+incompatible.mod": legacyMod},
+			want:   "v2.1.0+incompatible",
+		},
+		{
+			name: "mholt/archiver: legacy v1, the list beats a lagging @latest",
+			mod:  "github.com/mholt/archiver",
+			pkg:  "github.com/mholt/archiver/cmd/arc",
+			list: "v1.1.1\nv1.1.2\nv2.0.0+incompatible\nv2.1.0+incompatible\nv3.0.0+incompatible\nv3.0.1+incompatible\nv3.1.0+incompatible\nv3.1.1+incompatible\n",
+			routes: map[string]string{
+				"v1.1.2.mod":              "module github.com/mholt/archiver\n",
+				"v3.1.1+incompatible.mod": "module github.com/mholt/archiver\n",
+				"latest":                  `{"Version":"v2.1.0+incompatible"}`,
+			},
+			want: "v3.1.1+incompatible",
+		},
+		{
+			name:   "russross/blackfriday: v1.6.0 has a go.mod",
+			mod:    "github.com/russross/blackfriday",
+			pkg:    "github.com/russross/blackfriday",
+			list:   "v1.5.1\nv1.5.2\nv1.6.0\nv1.6.0-pre.1\nv2.0.0+incompatible\n",
+			routes: map[string]string{"v1.6.0.mod": "module github.com/russross/blackfriday\n\ngo 1.13\n"},
+			want:   "v1.6.0",
+		},
+		{
+			name: "docker/docker: a command inside a legacy module skips an incompatible rc",
+			mod:  "github.com/docker/docker",
+			pkg:  "github.com/docker/docker/cmd/dockerd",
+			list: "v1.13.0\nv1.13.1\nv28.5.1+incompatible\nv28.5.2+incompatible\nv28.6.0-rc.1+incompatible\n",
+			routes: map[string]string{
+				"v1.13.1.mod":              "module github.com/docker/docker\n",
+				"v28.5.2+incompatible.mod": "module github.com/docker/docker\n",
+			},
+			want: "v28.5.2+incompatible",
+		},
+		{
+			name:     "a prerelease row follows an incompatible rc",
+			list:     "v1.13.1\nv28.5.2+incompatible\nv28.6.0-rc.1+incompatible\n",
+			recorded: "v28.6.0-rc.0+incompatible",
+			routes: map[string]string{
+				"v1.13.1.mod":              legacyMod,
+				"v28.5.2+incompatible.mod": legacyMod,
+			},
+			want: "v28.6.0-rc.1+incompatible",
+		},
+		{
+			name: "a compatible prerelease with a go.mod still excludes them",
+			list: "v1.0.0\nv1.1.0-rc.1\nv2.0.0+incompatible\n",
+			routes: map[string]string{
+				"v1.0.0.mod":      legacyMod,
+				"v1.1.0-rc.1.mod": realMod,
+			},
+			want: "v1.0.0",
+		},
+		{
+			name: "a retracted compatible version does not decide",
+			list: "v1.0.0\nv1.1.0\nv2.0.0+incompatible\n",
+			routes: map[string]string{
+				"v1.0.0.mod": legacyMod,
+				"v1.1.0.mod": realMod + "retract v1.1.0\n",
+			},
+			want: "v2.0.0+incompatible",
+		},
+		{
+			name:    "the deciding go.mod missing from the proxy is an error",
+			list:    "v1.4.0\nv2.0.0+incompatible\n",
+			routes:  map[string]string{},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mod, pkg := "example.com/m", "example.com/m"
+			if tc.pkg != "" {
+				mod, pkg = tc.mod, tc.pkg
+			}
+			base := "/" + mod + "/@"
+			routes := map[string]string{base + "v/list": tc.list}
+			for p, body := range tc.routes {
+				if p == "latest" {
+					routes[base+p] = body
+				} else {
+					routes[base+"v/"+p] = body
+				}
+			}
+			v, asked := goProxy(t, routes)
+			got, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg, Version: tc.recorded}, nil)
+			for i, p := range *asked {
+				if slices.Contains((*asked)[:i], p) {
+					t.Errorf("asked %s twice", p)
+				}
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("Latest(go:%s) = %q, want an error", pkg, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Latest(go:%s) = %v", pkg, err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest(go:%s) = %q, want %q", pkg, got, tc.want)
 			}
 		})
 	}

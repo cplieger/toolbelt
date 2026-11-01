@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -498,8 +499,8 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 	if err != nil {
 		return "", false, fmt.Errorf("invalid module path %q: %w", modPath, err)
 	}
-	base := "https://proxy.golang.org/" + esc + "/@"
-	body, err := v.getBytes(ctx, base+"v/list")
+	mp := &moduleProxy{v: v, path: modPath, base: "https://proxy.golang.org/" + esc + "/@", mods: map[string]proxyFile{}}
+	body, err := v.getBytes(ctx, mp.base+"v/list")
 	if isNotFound(err) {
 		return "", false, nil
 	}
@@ -508,35 +509,100 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 	}
 	listed := moduleCandidates(strings.Fields(string(body)))
 	if len(listed) == 0 {
-		return v.moduleLatestQuery(ctx, base, modPath, allowPre)
+		return v.moduleLatestQuery(ctx, mp.base, modPath, allowPre)
 	}
-	retracted, err := v.moduleRetractions(ctx, base, retractionSource(listed))
+	kept, err := mp.unretracted(ctx, listed)
 	if err != nil {
 		return "", false, err
 	}
-	kept := slices.DeleteFunc(slices.Clone(listed), func(ver string) bool {
-		return slices.ContainsFunc(retracted, func(r modfile.VersionInterval) bool {
-			return semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0
-		})
-	})
 	if len(kept) == 0 {
 		return "", false, fmt.Errorf("go module %q: %w", modPath, errAllRetracted)
 	}
-	pick := highestModuleVersion(kept, allowPre)
+	eligible, err := mp.withoutShadowedIncompatible(ctx, kept)
+	if err != nil {
+		return "", false, err
+	}
+	pick := highestModuleVersion(eligible, allowPre)
 	if pick == "" {
 		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
 	}
 	return pick, true, nil
 }
 
+// moduleProxy reads one module's go.mod files from the proxy during a single
+// lookup, each at most once.
+type moduleProxy struct {
+	v    *versionResolver
+	mods map[string]proxyFile
+	path string
+	base string
+}
+
+type proxyFile struct {
+	body  []byte
+	found bool
+}
+
+// unretracted drops the versions retracted by the go.mod of the version the
+// go command's "latest" names with retractions ignored
+// (https://go.dev/ref/mod#go-mod-file-retract).
+func (mp *moduleProxy) unretracted(ctx context.Context, listed []string) ([]string, error) {
+	eligible, err := mp.withoutShadowedIncompatible(ctx, listed)
+	if err != nil {
+		return nil, err
+	}
+	retracted, err := mp.retractions(ctx, retractionSource(eligible))
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(slices.Clone(listed), func(ver string) bool {
+		return slices.ContainsFunc(retracted, func(r modfile.VersionInterval) bool {
+			return semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0
+		})
+	}), nil
+}
+
+// withoutShadowedIncompatible drops the +incompatible versions when the
+// highest compatible version has a go.mod of its own, as the go command's
+// filterVersions does: the module then supports modules at that major, and a
+// legacy v2+ tag is no upgrade. A compatible prerelease decides too.
+func (mp *moduleProxy) withoutShadowedIncompatible(ctx context.Context, versions []string) ([]string, error) {
+	compatible := slices.DeleteFunc(slices.Clone(versions), isIncompatible)
+	if len(compatible) == 0 || len(compatible) == len(versions) {
+		return versions, nil
+	}
+	last := slices.MaxFunc(compatible, semver.Compare)
+	mod, found, err := mp.goMod(ctx, last)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("go module %q: go.mod at %s is not on the proxy", mp.path, last)
+	}
+	if bytes.Equal(mod, legacyGoMod(mp.path)) {
+		return versions, nil
+	}
+	return compatible, nil
+}
+
+// legacyGoMod is the go.mod the proxy synthesizes for a version without one
+// (cmd/go/internal/modfetch LegacyGoMod).
+func legacyGoMod(modPath string) []byte {
+	return []byte("module " + modfile.AutoQuote(modPath) + "\n")
+}
+
+func isIncompatible(ver string) bool {
+	return strings.HasSuffix(ver, "+incompatible")
+}
+
 // retractionSource is the version whose go.mod carries the retractions the go
 // command applies: its "latest" with retractions ignored, the highest release
 // or else the highest prerelease, whatever the row is recorded at.
-func retractionSource(listed []string) string {
-	if rel := highestModuleVersion(listed, false); rel != "" {
+func retractionSource(eligible []string) string {
+	if rel := highestModuleVersion(eligible, false); rel != "" {
 		return rel
 	}
-	return highestModuleVersion(listed, true)
+	return highestModuleVersion(eligible, true)
 }
 
 // moduleLatestQuery reads @latest, which for a module with no tagged version
@@ -561,19 +627,33 @@ func (v *versionResolver) moduleLatestQuery(ctx context.Context, base, modPath s
 	return doc.Version, true, nil
 }
 
-// moduleRetractions reads the retract directives of the module's go.mod at
-// version, which the go command applies to every listed version
-// (https://go.dev/ref/mod#go-mod-file-retract).
-func (v *versionResolver) moduleRetractions(ctx context.Context, base, version string) ([]modfile.VersionInterval, error) {
+// goMod reads the module's go.mod at version; found is false when the proxy
+// has none.
+func (mp *moduleProxy) goMod(ctx context.Context, version string) (body []byte, found bool, err error) {
+	if f, ok := mp.mods[version]; ok {
+		return f.body, f.found, nil
+	}
 	escVer, err := module.EscapeVersion(version)
 	if err != nil {
-		return nil, fmt.Errorf("invalid module version %q: %w", version, err)
+		return nil, false, fmt.Errorf("invalid module version %q: %w", version, err)
 	}
-	body, err := v.getBytes(ctx, base+"v/"+escVer+".mod")
+	body, err = mp.v.getBytes(ctx, mp.base+"v/"+escVer+".mod")
 	if isNotFound(err) {
-		return nil, nil
+		mp.mods[version] = proxyFile{}
+		return nil, false, nil
 	}
 	if err != nil {
+		return nil, false, err
+	}
+	mp.mods[version] = proxyFile{body: body, found: true}
+	return body, true, nil
+}
+
+// retractions reads the retract directives of the module's go.mod at
+// version, which the go command applies to every listed version.
+func (mp *moduleProxy) retractions(ctx context.Context, version string) ([]modfile.VersionInterval, error) {
+	body, found, err := mp.goMod(ctx, version)
+	if err != nil || !found {
 		return nil, err
 	}
 	f, err := modfile.ParseLax("go.mod", body, nil)
@@ -587,9 +667,8 @@ func (v *versionResolver) moduleRetractions(ctx context.Context, base, version s
 	return out, nil
 }
 
-// highestModuleVersion picks the highest of moduleCandidates' versions,
-// leaving out prereleases unless allowPre is set. Empty means none is
-// eligible.
+// highestModuleVersion picks the highest version, leaving out prereleases
+// unless allowPre is set. Empty means none is eligible.
 func highestModuleVersion(candidates []string, allowPre bool) string {
 	if !allowPre {
 		candidates = slices.DeleteFunc(slices.Clone(candidates), func(ver string) bool {
@@ -602,23 +681,13 @@ func highestModuleVersion(candidates []string, allowPre bool) string {
 	return slices.MaxFunc(candidates, semver.Compare)
 }
 
-// moduleCandidates keeps the versions the go command considers for "latest":
-// canonical semver, and +incompatible versions only when nothing else is
-// listed.
+// moduleCandidates keeps the versions the go command can select from a list:
+// canonical semver, with or without +incompatible.
 func moduleCandidates(listed []string) []string {
-	var compatible, incompatible []string
-	for _, ver := range listed {
-		switch canon := semver.Canonical(ver); ver {
-		case canon:
-			compatible = append(compatible, ver)
-		case canon + "+incompatible":
-			incompatible = append(incompatible, ver)
-		}
-	}
-	if len(compatible) == 0 {
-		return incompatible
-	}
-	return compatible
+	return slices.DeleteFunc(slices.Clone(listed), func(ver string) bool {
+		canon := semver.Canonical(ver)
+		return ver != canon && ver != canon+"+incompatible"
+	})
 }
 
 // isNotFound reports whether err is the proxy saying it has no such module
