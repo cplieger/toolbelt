@@ -650,21 +650,16 @@ type patchOutcome struct {
 	pythonChanged   bool
 	disabledChanged bool
 	nowDisabled     bool
-	// pinChanged and nowPinned carry a pin transition out to Patch, which
-	// is where the dpkg-level hold is applied. The mutation itself cannot
-	// do it: patchManifest runs inside the manifest lock and holding a
-	// package is a subprocess.
-	pinChanged bool
-	nowPinned  bool
+	pinChanged      bool
 }
 
 // Patch merges fields into an existing tool and enqueues the follow-up
 // job the transition needs: enable → install (when missing), disable →
 // footprint uninstall (template kept), version or python change on an
-// enabled tool → reinstall. Returns nil when no job is needed.
+// enabled tool → reinstall, pin change on an enabled apt: tool where apt is
+// available → install, which applies the dpkg hold. Returns nil when no job
+// is needed.
 func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
-	e.pinMu.Lock()
-	defer e.pinMu.Unlock()
 	var (
 		out patchOutcome
 		res *job
@@ -681,43 +676,33 @@ func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
 		res, rerr = e.queue.reserve(kind, names, nil)
 		return rerr
 	})
-	if err == nil && out.pinChanged {
-		// Before the publish, so a refused patch never reaches dpkg and the reinstall never meets a stale hold.
-		e.setAptHold(context.Background(), name, out.source, out.nowPinned)
-	}
 	return e.commitJob(res, err)
 }
 
-// setAptHold holds an apt package with `apt-mark hold`, or releases the
-// hold: apt upgrades a package as another install's dependency, and a hold
-// is the only thing apt respects. Other sources are a no-op. A failure warns
-// and leaves the manifest pin in force. The caller holds pinMu.
-func (e *Engine) setAptHold(ctx context.Context, name, source string, hold bool) {
-	pkg, ok := strings.CutPrefix(source, SourceApt+":")
-	if !ok || !AptAvailable() {
-		return
+// holdToPin makes an apt: row's dpkg hold equal its manifest pin, the hold
+// the engine wants: apt upgrades a package as another install's dependency,
+// and a hold is the only thing apt respects. It is the last step of every
+// job that installs an apt: row, whatever the install did. It reads the row
+// now rather than the job's copy, so a Remove during the job adds no hold,
+// and a Patch during it is settled by the job that Patch queued behind this
+// one. Other sources, a removed row and a host without apt are a no-op.
+func (e *Engine) holdToPin(ctx context.Context, name string) error {
+	if !AptAvailable() {
+		return nil
 	}
-	if err := e.inst.aptSetHold(ctx, pkg, hold); err != nil {
-		e.log.Warn("toolbelt: apt hold not applied; the pin holds in the manifest only",
-			"tool", name, "package", pkg, "hold", hold, "error", err)
-	}
-}
-
-// holdIfPinned holds an apt package an install just put on the host when its
-// row is pinned: a recreated container or a pinned Add has no dpkg hold, and
-// Patch holds only on a pin change. The row is read again under pinMu, so a
-// Patch or Remove that landed during the install is not undone.
-func (e *Engine) holdIfPinned(ctx context.Context, name string) {
-	e.pinMu.Lock()
-	defer e.pinMu.Unlock()
 	m, err := e.store.LoadManifest()
 	if err != nil {
-		e.log.Warn("toolbelt: apt hold not applied; the manifest could not be read", "tool", name, "error", err)
-		return
+		return fmt.Errorf("apt hold: %w", err)
 	}
-	if t, ok := m.Tools[name]; ok && t.Pin {
-		e.setAptHold(ctx, name, t.Source, true)
+	t, ok := m.Tools[name]
+	pkg, isApt := strings.CutPrefix(t.Source, SourceApt+":")
+	if !ok || !isApt {
+		return nil
 	}
+	if err := e.inst.syncAptHold(ctx, pkg, t.Pin); err != nil {
+		return fmt.Errorf("apt hold: %w", err)
+	}
+	return nil
 }
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
@@ -778,9 +763,6 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 		out.pinChanged = *req.Pin != t.Pin
 		t.Pin = *req.Pin
 	}
-	out.nowPinned = t.Pin
-	// Carried so Patch can tell an apt row from any other kind without
-	// re-reading the manifest outside its lock.
 	out.source = t.Source
 	if req.Description != nil {
 		t.Description = *req.Description
@@ -805,7 +787,8 @@ func (out *patchOutcome) job(name string) (kind string, names []string) {
 	case out.disabledChanged && out.nowDisabled:
 		return JobKindDisable, append([]string{name}, out.cascaded...)
 	case out.disabledChanged && !out.nowDisabled,
-		(out.versionChanged || out.pythonChanged) && !out.nowDisabled:
+		(out.versionChanged || out.pythonChanged) && !out.nowDisabled,
+		out.pinChanged && sourceKind(out.source) == SourceApt && !out.nowDisabled && AptAvailable():
 		return JobKindInstall, []string{name}
 	default:
 		return "", nil
@@ -1005,11 +988,10 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	return nil
 }
 
-// Reconcile enqueues the convergence job: install missing enabled entries,
-// uninstall the engine-owned footprint of disabled ones and of orphaned
-// state rows. ReconcileFull also enqueues an update pass over unpinned
-// entries. A queued reconcile is returned rather than duplicated and a full
-// queue never refuses one, so err means a manifest read failure or shutdown.
+// Reconcile enqueues the convergence job (see ReconcileMissing and
+// ReconcileFull). A queued reconcile is returned rather than duplicated and a
+// full queue never refuses one, so err means a manifest read failure or
+// shutdown.
 //
 // enqueued is false, with a nil job and a nil error, when the manifest is
 // empty and no state row exists; a readiness gate branches on enqueued first.
@@ -1530,21 +1512,22 @@ func depsOf(name string, t *Tool, backends map[string]string) []string {
 	return deps
 }
 
-// installTool installs one tool when not already at its manifest
-// version, recording status either way. A sparse entry resolves its
-// version to latest here (and persists it); an entry the catalog
-// couldn't hydrate fails with a named error.
+// installTool installs one tool when not already at its manifest version,
+// recording status either way; a sparse entry resolves and persists latest.
 //
 // The status write is the install's COMMIT POINT: superseded versions are
-// pruned only after the new tree and its state record are both durable,
-// so a crash (or a full disk) can never leave a pruned previous version
-// next to a state file that was never written. verifyInstalled sits
-// between the two, so a binary that cannot run fails the install with
-// the predecessor still on disk.
-func (e *Engine) installTool(ctx context.Context, name string, output func(string)) error {
+// pruned only after the new tree and its state record are both durable, so a
+// crash or a full disk never leaves a pruned predecessor beside an unwritten
+// state file. verifyInstalled sits between the two, so a binary that cannot
+// run fails the install with the predecessor still on disk.
+func (e *Engine) installTool(ctx context.Context, name string, output func(string)) (err error) {
 	t, err := e.resolveInstallTarget(ctx, name, output)
 	if err != nil || t == nil {
 		return err
+	}
+	if sourceKind(t.Source) == SourceApt {
+		// WithoutCancel: installApt lifts the hold, so a cancelled job still owes it.
+		defer func() { err = e.settleAptHold(context.WithoutCancel(ctx), name, err, output) }()
 	}
 	st := e.store.State().Tools[name]
 	if st.InstalledVersion == t.Version && st.Python == t.Python && e.probeInstalled(name, t, &st) {
@@ -1562,15 +1545,33 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 	if serr := e.commitInstall(name, t, res); serr != nil {
 		return serr
 	}
-	if res.apt {
-		// The install has committed, so a cancelled job still owes its hold.
-		e.holdIfPinned(context.WithoutCancel(ctx), name)
-	}
 	if verr := e.verifyInstalled(name, t, output); verr != nil {
 		return verr
 	}
 	e.pruneSuperseded(name, t)
 	return nil
+}
+
+// settleAptHold runs holdToPin after an apt: install and joins its failure
+// to the install's, recording the result on the row. A job that ends with
+// both done clears the row's error, which the already-installed path would
+// otherwise keep from the hold failure this job repaired.
+func (e *Engine) settleAptHold(ctx context.Context, name string, installErr error, output func(string)) error {
+	herr := e.holdToPin(ctx, name)
+	if herr == nil {
+		if installErr == nil && e.store.State().Tools[name].LastError != "" {
+			if serr := e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = "" }); serr != nil {
+				return fmt.Errorf("record install state for %s: %w", name, serr)
+			}
+		}
+		return installErr
+	}
+	output(fmt.Sprintf("ERROR %s: %v", name, herr))
+	err := errors.Join(installErr, herr)
+	if serr := e.recordFailure(name, err); serr != nil {
+		e.log.Error("toolbelt: apt hold failure not recorded", "tool", name, "error", serr)
+	}
+	return err
 }
 
 // resolveInstallTarget prepares the entry installTool is about to act on:
@@ -1938,7 +1939,7 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 		switch {
 		case t.Disabled && status.owned():
 			extras = append(extras, n)
-		case !t.Disabled && !e.probeInstalled(n, &t, &status):
+		case !t.Disabled && !e.converged(n, &t, &status):
 			missing = append(missing, n)
 		}
 	}
@@ -1952,6 +1953,20 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 	slices.Sort(extras)
 	slices.Sort(orphans)
 	return missing, extras, orphans
+}
+
+// converged is probeInstalled, and for an apt: row also a dpkg hold equal to
+// its pin, so Reconcile repairs a hold that a failed apt-mark, a recreated
+// container or a hand-run apt-mark left wrong.
+func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
+	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")
+	if !ok || !AptAvailable() {
+		return e.probeInstalled(name, t, s)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	st := aptInstalled(ctx, pkg)
+	return st.installed && st.held == t.Pin
 }
 
 // sweepOrphans uninstalls engine-owned footprints whose manifest row is

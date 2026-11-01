@@ -231,13 +231,13 @@ func probeApt(pkg string) probeVerdict {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	version, installed := aptInstalled(ctx, pkg)
-	if !installed {
+	st := aptInstalled(ctx, pkg)
+	if !st.installed {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "dpkg reports " + pkg + " is not installed"}
 	}
 	// The dpkg status IS the version, so this is the one source whose
 	// probe verifies the answer without executing anything.
-	return probeVerdict{OK: true, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + version}
+	return probeVerdict{OK: true, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + st.version}
 }
 
 // npmPackageCap bounds a package.json read; a real one is a few KiB.

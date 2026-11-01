@@ -66,27 +66,30 @@ func aptValidName(s string) bool {
 	return !strings.HasSuffix(s, "-")
 }
 
-// aptSetHold marks an apt package held (or releases the hold), which is
-// what makes a pinned row survive apt's own dependency resolution: a held
-// package is one apt refuses to upgrade or remove as a side effect of some
-// other install.
+// syncAptHold makes an installed package's dpkg hold equal hold, and is the
+// only caller of apt-mark. apt will not upgrade or remove a held package as
+// another install's side effect, which is what a pin means. A package that
+// is not installed, or already in that state, is left alone.
 //
 // dpkg's own marking, not a preferences file. A pin is per-package state
 // with exactly this meaning, and /etc/apt/preferences.d would put this
 // engine's opinion in a file an operator also edits by hand.
-func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) error {
+func (in *installer) syncAptHold(ctx context.Context, pkg string, hold bool) error {
 	// The name goes to apt-mark as an argv element, so no shell parses it,
 	// but the grammar gate still runs: a name this engine would refuse to
 	// install is a name it must not mark either.
 	if !aptValidName(pkg) {
 		return fmt.Errorf("refusing to hold %q: not a valid package name", pkg)
 	}
+	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
+	defer cancel()
+	if st := aptInstalled(ctx, pkg); !st.installed || st.held == hold {
+		return nil
+	}
 	action := "unhold"
 	if hold {
 		action = "hold"
 	}
-	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
-	defer cancel()
 	cmd, err := systemCommand(ctx, "apt-mark", action, "--", pkg)
 	if err != nil {
 		return err
@@ -130,37 +133,47 @@ func AptAvailable() bool {
 	return hasSystemBin("apt-get")
 }
 
-// aptInstalled reports whether a package is installed AND its version.
-// See aptStatusFrom for why the status word, not just the version, decides.
-func aptInstalled(ctx context.Context, pkg string) (version string, installed bool) {
-	cmd, err := systemCommand(ctx, "dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", pkg)
+// aptStatus is one package's dpkg record. held is the selection apt-mark
+// sets, which dpkg reports as the "hold" want state (dpkg-query(1), Status).
+type aptStatus struct {
+	version   string
+	installed bool
+	held      bool
+}
+
+// aptInstalled reads a package's dpkg record; a package dpkg does not know
+// reads as not installed. See aptStatusFrom for why the status word, not
+// just the version, decides.
+func aptInstalled(ctx context.Context, pkg string) aptStatus {
+	cmd, err := systemCommand(ctx, "dpkg-query", "-W", aptStatusFormat, "--", pkg)
 	if err != nil {
-		return "", false
+		return aptStatus{}
 	}
 	cmd.Env = aptEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		return "", false
+		return aptStatus{}
 	}
 	return aptStatusFrom(string(out))
 }
 
-// aptStatusFrom reads one `dpkg-query -W -f='${db:Status-Status}
-// ${Version}'` answer.
+// aptStatusFormat is the dpkg-query format aptStatusFrom parses.
+const aptStatusFormat = "-f=${db:Status-Want} ${db:Status-Status} ${Version}"
+
+// aptStatusFrom reads one aptStatusFormat answer.
 //
 // The status word is the whole point. dpkg keeps a record for a package
-// that has been REMOVED with its configuration files left in place, and
-// that record still carries a version: measured on apt 3.0.3, after
-// `apt-get remove nano`, the same query prints `config-files 8.4-1+deb13u1`
-// and exits 0 with no binary on disk. A version-only read therefore
-// reports a removed package as installed, and after a container recreate
-// it would report every apt entry as present while nothing is.
-func aptStatusFrom(out string) (version string, installed bool) {
-	status, version, ok := strings.Cut(strings.TrimSpace(out), " ")
-	if !ok || status != aptStatusInstalled {
-		return "", false
+// REMOVED with its configuration files left, and that record still carries
+// a version: on apt 3.0.3, after `apt-get remove nano`, the query reports
+// status `config-files` at 8.4-1+deb13u1 and exits 0 with no binary on
+// disk. A version-only read reports that package installed, and after a
+// container recreate every apt entry as present while nothing is.
+func aptStatusFrom(out string) aptStatus {
+	fields := strings.SplitN(strings.TrimSpace(out), " ", 3)
+	if len(fields) != 3 || fields[1] != aptStatusInstalled {
+		return aptStatus{}
 	}
-	return strings.TrimSpace(version), true
+	return aptStatus{version: strings.TrimSpace(fields[2]), installed: true, held: fields[0] == "hold"}
 }
 
 // aptCandidate reports the version apt would install now. It is what an apt
@@ -259,6 +272,14 @@ func (in *installer) installApt(ctx context.Context, pkg string) error {
 	}
 	if err := in.aptKnownName(ctx, pkg); err != nil {
 		return err
+	}
+	// apt-get -y refuses to change a held package. Lifting this package's
+	// hold, rather than passing --allow-change-held-packages, keeps every
+	// other held package fixed: that flag covers the whole transaction, so a
+	// dependency another pin holds could move (apt-get(8)). The job restores
+	// the hold as its last step (Engine.holdToPin).
+	if err := in.syncAptHold(ctx, pkg, false); err != nil {
+		return fmt.Errorf("lift the hold for the install: %w", err)
 	}
 	return in.aptGetInstall(ctx, []string{pkg})
 }

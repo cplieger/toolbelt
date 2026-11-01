@@ -148,11 +148,6 @@ type Engine struct {
 	probes    probeCache
 	catState  catalogState
 	refreshWG sync.WaitGroup
-	// pinMu makes a pin's manifest write and its apt-mark call one step:
-	// without it two patches, or a patch and an install's hold, can finish
-	// apt-mark in the opposite order from their writes, leaving dpkg's hold
-	// disagreeing with the manifest pin.
-	pinMu sync.Mutex
 	// keepVersions mirrors Config.KeepVersions (0 = DefaultKeepVersions).
 	keepVersions int
 }

@@ -32,7 +32,7 @@ The handler has no authentication and adds no middleware except its own cache po
 
 `POST {prefix}` takes `name` and the optional `source` (required when the catalog does not know the name), `version`, `description`, `origin`, `install`, `uninstall`, `probe`, `python`, `requires`, `version_args`, `pin` and `disabled`. An empty `version_args` takes the catalog's.
 
-`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them too. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry.
+`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them too. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry. A `pin` change on an enabled `apt:` entry returns the job that sets the package's dpkg hold.
 
 `DELETE` takes `force` in the query. A cascade that includes an essential tool is refused whole.
 

@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -53,30 +54,28 @@ func TestAptValidName(t *testing.T) {
 	}
 }
 
-// TestAptStatusFrom is the five-state dpkg table; the middle row is the
-// defect aptStatusFrom exists to catch (see its doc comment).
+// TestAptStatusFrom is the dpkg state table; the removed-config-files row is
+// the defect aptStatusFrom exists to catch (see its doc comment), and the
+// want word is apt-mark's hold (dpkg-query(1)).
 func TestAptStatusFrom(t *testing.T) {
 	cases := []struct {
-		state    string
-		out      string
-		wantVer  string
-		wantInst bool
+		state string
+		out   string
+		want  aptStatus
 	}{
-		{state: "installed", out: "installed 5.2.37-2+b9\n", wantVer: "5.2.37-2+b9", wantInst: true},
-		{state: "removed-config-files", out: "config-files 8.4-1+deb13u1\n", wantInst: false},
-		{state: "purged", out: "not-installed \n", wantInst: false},
-		{state: "half-configured", out: "half-configured 1.0\n", wantInst: false},
-		{state: "library-no-binary", out: "installed 2.41-12+deb13u3\n", wantVer: "2.41-12+deb13u3", wantInst: true},
-		{state: "empty-output", out: "", wantInst: false},
+		{state: "installed", out: "install installed 5.2.37-2+b9\n", want: aptStatus{version: "5.2.37-2+b9", installed: true}},
+		{state: "held", out: "hold installed 1.7.1-6\n", want: aptStatus{version: "1.7.1-6", installed: true, held: true}},
+		{state: "removed-config-files", out: "deinstall config-files 8.4-1+deb13u1\n"},
+		{state: "held but removed", out: "hold config-files 8.4-1+deb13u1\n"},
+		{state: "purged", out: "unknown not-installed \n"},
+		{state: "half-configured", out: "install half-configured 1.0\n"},
+		{state: "library-no-binary", out: "install installed 2.41-12+deb13u3\n", want: aptStatus{version: "2.41-12+deb13u3", installed: true}},
+		{state: "empty-output", out: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
-			gotVer, gotInst := aptStatusFrom(tc.out)
-			if gotInst != tc.wantInst {
-				t.Errorf("aptStatusFrom(%q) installed = %v, want %v", tc.out, gotInst, tc.wantInst)
-			}
-			if gotVer != tc.wantVer {
-				t.Errorf("aptStatusFrom(%q) version = %q, want %q", tc.out, gotVer, tc.wantVer)
+			if got := aptStatusFrom(tc.out); got != tc.want {
+				t.Errorf("aptStatusFrom(%q) = %+v, want %+v", tc.out, got, tc.want)
 			}
 		})
 	}
@@ -90,15 +89,15 @@ func TestAptStatusFrom_AgreesWithRealDpkg(t *testing.T) {
 	if _, err := exec.LookPath("dpkg-query"); err != nil {
 		t.Skip("dpkg-query is not on this host")
 	}
-	out, err := exec.Command("dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", "bash").Output()
+	out, err := exec.Command("dpkg-query", "-W", aptStatusFormat, "--", "bash").Output()
 	if err != nil {
 		t.Skipf("bash is not a dpkg-managed package here: %v", err)
 	}
-	version, installed := aptStatusFrom(string(out))
-	if !installed {
+	st := aptStatusFrom(string(out))
+	if !st.installed {
 		t.Fatalf("real dpkg output %q parsed as not installed", out)
 	}
-	if version == "" {
+	if st.version == "" {
 		t.Errorf("real dpkg output %q parsed to an empty version", out)
 	}
 }
@@ -551,51 +550,62 @@ func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
 	}
 }
 
-// TestAptSetHold covers why a pin needs a dpkg hold: apt can still
+// TestSyncAptHold covers why a pin needs a dpkg hold: apt can still
 // upgrade a package as a DEPENDENCY of some other install, moving it
-// underneath a pin that reported it frozen. The name still goes
-// through the install grammar gate.
-func TestAptSetHold(t *testing.T) {
-	t.Run("hold and unhold are distinct actions", func(t *testing.T) {
-		for _, tc := range []struct {
-			hold bool
-			want string
-		}{{true, "hold"}, {false, "unhold"}} {
-			// The stub is reached by pointing the RESOLVER at it, not by
-			// replacing PATH: apt-mark is pinned to the trusted system
-			// directories now, so a PATH fake is unreachable — and in the
-			// negative case below that failure mode is silent, because a
-			// sentinel the stub can never write reads exactly like a gate that
-			// refused. Redirects only: the child's PATH is the trusted set
-			// first, which under the stub is this directory alone, so a script
-			// calling `touch` or `printf` would fail for want of the binary and
+// underneath a pin that reported it frozen. apt-mark runs only when dpkg's
+// record differs from the wanted hold, and the name still goes through the
+// install grammar gate.
+func TestSyncAptHold(t *testing.T) {
+	cases := []struct {
+		name   string
+		dpkg   string
+		hold   bool
+		marked string
+	}{
+		{name: "an unheld package is held", dpkg: "install installed 1.0", hold: true, marked: "hold\n--\njq\n"},
+		{name: "a held package is released", dpkg: "hold installed 1.0", hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package stays held without apt-mark", dpkg: "hold installed 1.0", hold: true},
+		{name: "an unheld package stays unheld without apt-mark", dpkg: "install installed 1.0", hold: false},
+		{name: "a package dpkg does not report installed is left alone", dpkg: "hold config-files 1.0", hold: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Redirects and builtins only: the child's PATH is the trusted
+			// set first, which under the stub is this directory alone, so a
+			// script calling `touch` would fail for want of the binary and
 			// its FAILURE would be mistaken for the behaviour under test.
-			// Measured: that is what made the grammar-gate case vacuous.
 			log := filepath.Join(t.TempDir(), "args")
-			stubSystemBin(t, "apt-mark",
-				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n")
+			dir := filepath.Dir(stubSystemBin(t, "apt-mark",
+				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n"))
+			if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\necho '"+tc.dpkg+"'\n"), 0o755); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
 
 			in := &installer{output: func(string) {}}
-			if err := in.aptSetHold(t.Context(), "jq", tc.hold); err != nil {
-				t.Fatalf("aptSetHold(jq, %v) = %v, want nil", tc.hold, err)
+			if err := in.syncAptHold(t.Context(), "jq", tc.hold); err != nil {
+				t.Fatalf("syncAptHold(jq, %v) = %v, want nil", tc.hold, err)
 			}
+
 			got, err := os.ReadFile(log)
-			if err != nil {
-				t.Fatalf("Setup: read args: %v", err)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("read args: %v", err)
 			}
 			// The -- guard travels too: a package name is untrusted input and
 			// apt-mark would otherwise read a leading dash as a flag.
-			if want := tc.want + "\n--\njq\n"; string(got) != want {
-				t.Errorf("aptSetHold(jq, %v) ran apt-mark %q, want %q", tc.hold, got, want)
+			if string(got) != tc.marked {
+				t.Errorf("syncAptHold(jq, %v) over dpkg %q ran apt-mark %q, want %q", tc.hold, tc.dpkg, got, tc.marked)
 			}
-		}
-	})
+		})
+	}
 
 	// The gate runs BEFORE the subprocess: a refused name must not reach
 	// apt-mark at all, so the check cannot be "apt-mark rejected it".
 	t.Run("an invalid package name is refused without running apt-mark", func(t *testing.T) {
 		sentinel := filepath.Join(t.TempDir(), "ran")
-		stubSystemBin(t, "apt-mark", "#!/bin/sh\n: > "+sentinel+"\n")
+		dir := filepath.Dir(stubSystemBin(t, "apt-mark", "#!/bin/sh\n: > "+sentinel+"\n"))
+		if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\necho 'install installed 1.0'\n"), 0o755); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
 
 		in := &installer{output: func(string) {}}
 		// Grammar-invalid only. A dotted name like "jq." is grammar-LEGAL by
@@ -604,8 +614,8 @@ func TestAptSetHold(t *testing.T) {
 		// holding a name no package matches fails harmlessly at apt-mark rather
 		// than installing something the caller never asked for.
 		for _, bad := range []string{"pkg-", "jq;rm -rf /", "-jq", "", "JQ", "jq amd64"} {
-			if err := in.aptSetHold(t.Context(), bad, true); err == nil {
-				t.Errorf("aptSetHold(%q) = nil, want a refusal", bad)
+			if err := in.syncAptHold(t.Context(), bad, true); err == nil {
+				t.Errorf("syncAptHold(%q) = nil, want a refusal", bad)
 			}
 		}
 		if _, err := os.Stat(sentinel); err == nil {

@@ -3236,28 +3236,48 @@ func fakeRoot(t *testing.T) {
 	t.Cleanup(func() { geteuid = prev })
 }
 
-// aptStub is an apt-mark and apt-get pair that log each call. A call whose
-// first argument has a gate waits until open(that argument) before it ends.
+// aptStub models dpkg for one package with apt-mark, apt-get, dpkg-query and
+// apt-cache stubs that log each call. The files installed and held in its dir
+// are dpkg's record, which dpkg-query prints in the -f format it is given; a call whose first argument has a gate waits until
+// open(that argument). apt-get refuses a held package without
+// --allow-change-held-packages, as apt-get -y does (apt-get(8)); mark-fail
+// and get-fail make apt-mark and apt-get fail.
 type aptStub struct {
 	dir, log string
 }
 
 // stubApt puts the stubs ahead of the real trusted dirs rather than
-// replacing them: the queue's jobs still resolve bash there, and the set
-// must be in place before the engine's worker starts reading it.
+// replacing them: the stubs and the queue's jobs still resolve sh, touch and
+// rm there, and the set must be in place before the engine's worker starts
+// reading it.
 func stubApt(t *testing.T, gated ...string) *aptStub {
 	t.Helper()
 	s := &aptStub{dir: t.TempDir()}
 	s.log = filepath.Join(s.dir, "apt.log")
+	d := s.dir + "/"
 	gate := ""
 	for _, g := range gated {
-		gate += g + ") while [ ! -e " + filepath.Join(s.dir, g) + " ]; do sleep 0.02; done;;\n"
+		gate += g + ") while [ ! -e " + d + g + " ]; do sleep 0.02; done;;\n"
 	}
-	body := "case \"$1\" in\n" + gate + "esac\n"
-	for name, tag := range map[string]string{"apt-mark": "mark", "apt-get": "apt-get"} {
-		script := "#!/bin/sh\necho \"" + tag + " $*\" >> " + s.log + "\n" + body +
-			"echo \"" + tag + "-end $1\" >> " + s.log + "\n"
-		if err := os.WriteFile(filepath.Join(s.dir, name), []byte(script), 0o755); err != nil {
+	wait := "case \"$1\" in\n" + gate + "esac\n"
+	scripts := map[string]string{
+		"apt-mark": "echo \"mark $*\" >> " + s.log + "\n" + wait +
+			"[ -e " + d + "mark-fail ] && { echo 'E: apt-mark failed' >&2; exit 1; }\n" +
+			"case \"$1\" in hold) touch " + d + "held;; unhold) rm -f " + d + "held;; esac\n" +
+			"echo \"mark-end $1\" >> " + s.log + "\n",
+		"apt-get": "echo \"apt-get $*\" >> " + s.log + "\n" + wait +
+			"if [ -e " + d + "held ]; then case \" $* \" in *' --allow-change-held-packages '*) ;; *)\n" +
+			"echo 'E: Held packages were changed and -y was used without --allow-change-held-packages.' >&2; exit 100;; esac; fi\n" +
+			"[ -e " + d + "get-fail ] && { echo 'E: install failed' >&2; exit 100; }\n" +
+			"touch " + d + "installed\n" +
+			"echo \"apt-get-end $1\" >> " + s.log + "\n",
+		"dpkg-query": "[ -e " + d + "installed ] || { echo 'dpkg-query: no packages found' >&2; exit 1; }\n" +
+			"want=install; [ -e " + d + "held ] && want=hold\n" +
+			"case \"$2\" in *Status-Want*) echo \"$want installed 1.7.1-1\";; *) echo 'installed 1.7.1-1';; esac\n",
+		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: 1.7.1-1\\n'\n",
+	}
+	for name, body := range scripts {
+		if err := os.WriteFile(filepath.Join(s.dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
 			t.Fatalf("Setup: %v", err)
 		}
 	}
@@ -3265,6 +3285,31 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 	systemBinDirs = append([]string{s.dir}, prev...)
 	t.Cleanup(func() { systemBinDirs = prev })
 	return s
+}
+
+// set creates the named state files (installed, held, mark-fail, get-fail).
+func (s *aptStub) set(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(s.dir, n), nil, 0o600); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+}
+
+// clear removes a state file.
+func (s *aptStub) clear(t *testing.T, name string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+}
+
+// held reports dpkg's hold in the model.
+func (s *aptStub) held(t *testing.T) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(s.dir, "held"))
+	return err == nil
 }
 
 // open releases the calls waiting on gate; safe from another goroutine.
@@ -3287,6 +3332,12 @@ func (s *aptStub) lines(t *testing.T) []string {
 	return strings.Split(strings.TrimSpace(string(data)), "\n")
 }
 
+// ran reports whether any logged call starts with prefix.
+func (s *aptStub) ran(t *testing.T, prefix string) bool {
+	t.Helper()
+	return slices.ContainsFunc(s.lines(t), func(l string) bool { return strings.HasPrefix(l, prefix) })
+}
+
 // await reports whether a call logged line within d.
 func (s *aptStub) await(t *testing.T, line string, d time.Duration) bool {
 	t.Helper()
@@ -3302,19 +3353,9 @@ func (s *aptStub) await(t *testing.T, line string, d time.Duration) bool {
 	}
 }
 
-// lastMark is the apt-mark action that finished last, "" when none did.
-func (s *aptStub) lastMark(t *testing.T) string {
-	t.Helper()
-	last := ""
-	for _, l := range s.lines(t) {
-		if action, ok := strings.CutPrefix(l, "mark-end "); ok {
-			last = action
-		}
-	}
-	return last
-}
-
-func setAptRow(t *testing.T, e *Engine, pin bool) {
+// setAptRow writes a jq apt: row at 1.6-1; recorded also writes a state row
+// at that version, so the install fast path takes it as already installed.
+func setAptRow(t *testing.T, e *Engine, pin, recorded bool) {
 	t.Helper()
 	if err := e.store.MutateManifest(func(m *Manifest) error {
 		m.Tools["jq"] = Tool{Source: "apt:jq", Version: "1.6-1", Pin: pin}
@@ -3322,21 +3363,64 @@ func setAptRow(t *testing.T, e *Engine, pin bool) {
 	}); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	if !recorded {
+		return
+	}
+	if err := e.store.setToolStatus("jq", func(st *ToolStatus) { st.InstalledVersion = "1.6-1" }); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
 }
 
-// TestPatch_AptHoldFollowsTheAcceptedPatch: the dpkg hold is applied only
-// to an accepted patch, and before its job can run, so a refused patch
-// leaves apt's state as it found it and a reinstall never meets a stale
-// hold (apt-get -y refuses to change a held package without
-// --allow-change-held-packages, apt-get(8)).
-func TestPatch_AptHoldFollowsTheAcceptedPatch(t *testing.T) {
+// wantJobState waits for the job and checks its terminal state.
+func wantJobState(t *testing.T, e *Engine, jv *Job, want string) {
+	t.Helper()
+	if jv == nil {
+		t.Fatalf("job = nil, want one ending %s", want)
+	}
+	if got := waitJob(t, e, jv.ID); got.State != want {
+		t.Errorf("job %s = %s (%s), want %s; output %q", jv.Kind, got.State, got.Error, want, got.OutputTail)
+	}
+}
+
+// TestAptHold_FollowsThePin: the manifest pin is the dpkg hold the engine
+// wants, so every job that installs an apt: row ends with the hold equal to
+// the row's pin as it stands then, a hold failure fails the job, and
+// Reconcile repairs a hold that disagrees with the pin.
+func TestAptHold_FollowsThePin(t *testing.T) {
 	yes, no, v := true, false, "1.7.1-1"
-	t.Run("a refused patch runs no apt-mark", func(t *testing.T) {
+	patch := func(t *testing.T, e *Engine, req *PatchRequest) *Job {
+		t.Helper()
+		jv, err := e.Patch("jq", req)
+		if err != nil {
+			t.Fatalf("Patch = %v", err)
+		}
+		return jv
+	}
+	install := func(t *testing.T, e *Engine) *Job {
+		t.Helper()
+		jv, err := e.Install("jq")
+		if err != nil {
+			t.Fatalf("Install(jq) = %v", err)
+		}
+		return jv
+	}
+	reconcile := func(t *testing.T, e *Engine) *Job {
+		t.Helper()
+		jv, _, err := e.Reconcile(ReconcileMissing)
+		if err != nil {
+			t.Fatalf("Reconcile = %v", err)
+		}
+		return jv
+	}
+	const aptGetLine = "apt-get -o DPkg::Lock::Timeout=60 -y --no-install-recommends install -- jq"
+
+	t.Run("a refused patch runs no apt call", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t)
+		s.set(t, "installed")
 		e := newTestEngine(t, nil)
 		saturateQueue(t, e)
-		setAptRow(t, e, false)
+		setAptRow(t, e, false, true)
 
 		if _, err := e.Patch("jq", &PatchRequest{Pin: &yes, Version: &v}); !errors.Is(err, ErrQueueFull) {
 			t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
@@ -3345,24 +3429,58 @@ func TestPatch_AptHoldFollowsTheAcceptedPatch(t *testing.T) {
 			t.Errorf("apt calls = %q for a refused patch, want none", got)
 		}
 	})
-	t.Run("an accepted pin holds the package", func(t *testing.T) {
+	t.Run("a pin holds the installed package without reinstalling it", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t)
+		s.set(t, "installed")
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, false)
+		setAptRow(t, e, false, true)
 
-		if _, err := e.Patch("jq", &PatchRequest{Pin: &yes}); err != nil {
-			t.Fatalf("Patch(pin) = %v", err)
+		wantJobState(t, e, patch(t, e, &PatchRequest{Pin: &yes}), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after a pin; calls %q", s.lines(t))
 		}
-		if got := s.lines(t); !slices.Equal(got, []string{"mark hold -- jq", "mark-end hold"}) {
-			t.Errorf("apt calls = %q, want one hold -- jq", got)
+		if s.ran(t, "apt-get") {
+			t.Errorf("calls = %q, want no apt-get for an installed package", s.lines(t))
 		}
 	})
-	t.Run("a patch after a remove runs no apt-mark", func(t *testing.T) {
+	t.Run("an unpin releases the hold", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Pin: &no}), JobDone)
+
+		if s.held(t) {
+			t.Errorf("held = true after an unpin; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a pin where apt is unavailable queues no job", func(t *testing.T) {
+		prev := geteuid
+		geteuid = func() int { return 1000 }
+		t.Cleanup(func() { geteuid = prev })
+		s := stubApt(t)
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+
+		if jv := patch(t, e, &PatchRequest{Pin: &yes}); jv != nil {
+			t.Errorf("Patch(pin) job = %+v, want none without apt", jv)
+		}
+		if m, _ := e.store.LoadManifest(); !m.Tools["jq"].Pin {
+			t.Error("manifest pin = false, want the pin stored")
+		}
+		if got := s.lines(t); got != nil {
+			t.Errorf("apt calls = %q, want none", got)
+		}
+	})
+	t.Run("a patch after a remove runs no apt call", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t)
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, false)
+		setAptRow(t, e, false, false)
 		if _, _, err := e.Remove("jq"); err != nil {
 			t.Fatalf("Remove = %v", err)
 		}
@@ -3374,144 +3492,179 @@ func TestPatch_AptHoldFollowsTheAcceptedPatch(t *testing.T) {
 			t.Errorf("apt calls = %q for a removed row, want none", got)
 		}
 	})
-	t.Run("an unhold finishes before the reinstall runs apt-get", func(t *testing.T) {
+	t.Run("a version patch on a held pinned row installs and stays held", func(t *testing.T) {
 		fakeRoot(t)
-		s := stubApt(t, "unhold")
+		s := stubApt(t)
+		s.set(t, "installed", "held")
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, true)
-		time.AfterFunc(100*time.Millisecond, func() { s.open(t, "unhold") })
+		setAptRow(t, e, true, true)
 
-		jv, err := e.Patch("jq", &PatchRequest{Pin: &no, Version: &v})
-		if err != nil || jv == nil {
-			t.Fatalf("Patch(unpin, version) = %v, %v, want a reinstall job", jv, err)
+		wantJobState(t, e, patch(t, e, &PatchRequest{Version: &v, Pin: &yes}), JobDone)
+
+		if !s.ran(t, "apt-get-end") {
+			t.Errorf("calls = %q, want apt-get to install the new version", s.lines(t))
 		}
-		waitJob(t, e, jv.ID)
-		lines := s.lines(t)
-		markEnd := slices.Index(lines, "mark-end unhold")
-		firstGet := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "apt-get ") })
-		if markEnd < 0 || firstGet < 0 || firstGet < markEnd {
-			t.Errorf("apt calls = %q, want unhold -- jq to finish before the first apt-get", lines)
-		}
-		if slices.Contains(lines, "mark hold -- jq") {
-			t.Errorf("apt calls = %q, want no hold for the unpinned row", lines)
+		if !s.held(t) {
+			t.Errorf("held = false, want the pinned row held after its install; calls %q", s.lines(t))
 		}
 	})
-	t.Run("a pin during a slow unhold ends held", func(t *testing.T) {
+	t.Run("an explicit update of a held pinned row installs and stays held", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		jv, err := e.Update("jq")
+		if err != nil {
+			t.Fatalf("Update(jq) = %v", err)
+		}
+		wantJobState(t, e, jv, JobDone)
+
+		if m, _ := e.store.LoadManifest(); m.Tools["jq"].Version != v {
+			t.Errorf("manifest version = %q, want the candidate %s", m.Tools["jq"].Version, v)
+		}
+		if !s.held(t) {
+			t.Errorf("held = false, want the pinned row held after its update; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a failed install restores the hold it lifted", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held", "get-fail")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Version: &v}), JobFailed)
+
+		if !s.held(t) {
+			t.Errorf("held = false after a failed install of a pinned row; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a failed apt-mark fails the install and reconcile repairs it", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "mark-fail")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, false)
+
+		wantJobState(t, e, install(t, e), JobFailed)
+		if got := e.store.State().Tools["jq"].LastError; !strings.Contains(got, "apt-mark hold jq") {
+			t.Errorf("recorded error = %q, want the apt-mark failure", got)
+		}
+		s.clear(t, "mark-fail")
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after the reconcile; calls %q", s.lines(t))
+		}
+		if got := e.store.State().Tools["jq"].LastError; got != "" {
+			t.Errorf("recorded error = %q after the repair, want none", got)
+		}
+	})
+	t.Run("reconcile holds a pinned package the image already ships", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after the reconcile; calls %q", s.lines(t))
+		}
+		if s.ran(t, "apt-get") {
+			t.Errorf("calls = %q, want no apt-get for an installed package", s.lines(t))
+		}
+	})
+	t.Run("reconcile releases a hold on an unpinned row", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if s.held(t) {
+			t.Errorf("held = true after the reconcile of an unpinned row; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a converged row reconciles without apt-get or apt-mark", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if s.ran(t, "mark") || s.ran(t, "apt-get") {
+			t.Errorf("calls = %q, want none for a converged row", s.lines(t))
+		}
+	})
+	t.Run("overlapping pin patches end with the hold equal to the last pin", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t, "unhold")
+		s.set(t, "installed", "held")
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, true)
-		unpinned := make(chan error, 1)
-		go func() {
-			_, err := e.Patch("jq", &PatchRequest{Pin: &no})
-			unpinned <- err
-		}()
+		setAptRow(t, e, true, true)
+
+		unpin := patch(t, e, &PatchRequest{Pin: &no})
 		if !s.await(t, "mark unhold -- jq", 5*time.Second) {
 			t.Fatalf("Setup: the unpin never ran apt-mark: %q", s.lines(t))
 		}
-		pinned := make(chan error, 1)
-		go func() {
-			_, err := e.Patch("jq", &PatchRequest{Pin: &yes})
-			pinned <- err
-		}()
-		// The engine under test never logs this while the unhold is open;
-		// one whose pin outruns the unhold does within the window.
-		s.await(t, "mark-end hold", 300*time.Millisecond)
-		// Nor may the pin's write land before the unpin's apt-mark ends: a
-		// write that waits only for apt-mark can still take it first.
-		if m, err := e.store.LoadManifest(); err != nil || m.Tools["jq"].Pin {
-			t.Errorf("manifest pin = true (%v) while the unpin's apt-mark runs, want the pin's write to wait", err)
-		}
-
+		pin := patch(t, e, &PatchRequest{Pin: &yes})
 		s.open(t, "unhold")
+		wantJobState(t, e, unpin, JobDone)
+		wantJobState(t, e, pin, JobDone)
 
-		if err := <-unpinned; err != nil {
-			t.Errorf("Patch(unpin) = %v", err)
-		}
-		if err := <-pinned; err != nil {
-			t.Errorf("Patch(pin) = %v", err)
-		}
-		m, err := e.store.LoadManifest()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !m.Tools["jq"].Pin {
+		if m, _ := e.store.LoadManifest(); !m.Tools["jq"].Pin {
 			t.Errorf("manifest pin = false, want the later patch's true")
 		}
-		if got := s.lastMark(t); got != "hold" {
-			t.Errorf("last apt-mark to finish = %q, want hold to match the manifest pin; calls %q", got, s.lines(t))
+		if !s.held(t) {
+			t.Errorf("held = false, want the last patch's pin; calls %q", s.lines(t))
 		}
 	})
-}
-
-// TestInstall_HoldsAPinnedAptPackage: an install of a pinned apt row holds
-// the package, since a recreated container or a pinned Add starts with no
-// dpkg hold, and it reads the pin after apt-get so a patch or remove during
-// the install stands.
-func TestInstall_HoldsAPinnedAptPackage(t *testing.T) {
-	no := false
-	install := func(t *testing.T, e *Engine) *Job {
-		t.Helper()
-		jv, err := e.Install("jq")
-		if err != nil || jv == nil {
-			t.Fatalf("Install(jq) = %v, %v, want a job", jv, err)
-		}
-		return jv
-	}
-	t.Run("a pinned row is held after apt-get", func(t *testing.T) {
+	t.Run("an install of an unpinned row runs no apt-mark", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t)
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, true)
+		setAptRow(t, e, false, false)
 
-		waitJob(t, e, install(t, e).ID)
+		wantJobState(t, e, install(t, e), JobDone)
 
-		lines := s.lines(t)
-		getEnd := slices.Index(lines, "apt-get-end -o")
-		hold := slices.Index(lines, "mark hold -- jq")
-		if getEnd < 0 || hold < getEnd {
-			t.Errorf("apt calls = %q, want hold -- jq after apt-get", lines)
+		if s.ran(t, "mark") || s.held(t) {
+			t.Errorf("calls = %q, want no apt-mark", s.lines(t))
 		}
 	})
-	t.Run("an unpinned row is not held", func(t *testing.T) {
-		fakeRoot(t)
-		s := stubApt(t)
-		e := newTestEngine(t, nil)
-		setAptRow(t, e, false)
-
-		waitJob(t, e, install(t, e).ID)
-
-		if got := s.lastMark(t); got != "" {
-			t.Errorf("apt calls = %q, want no apt-mark", s.lines(t))
-		}
-	})
-	t.Run("an unpin during the install is not undone", func(t *testing.T) {
+	t.Run("an unpin during the install stands", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t, "-o")
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, true)
+		setAptRow(t, e, true, false)
 		jv := install(t, e)
-		if !s.await(t, "apt-get -o DPkg::Lock::Timeout=60 -y --no-install-recommends install -- jq", 5*time.Second) {
+		if !s.await(t, aptGetLine, 5*time.Second) {
 			t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
 		}
 
-		if _, err := e.Patch("jq", &PatchRequest{Pin: &no}); err != nil {
-			t.Fatalf("Patch(unpin) = %v", err)
-		}
+		unpin := patch(t, e, &PatchRequest{Pin: &no})
 		s.open(t, "-o")
-		waitJob(t, e, jv.ID)
+		wantJobState(t, e, jv, JobDone)
+		wantJobState(t, e, unpin, JobDone)
 
-		if got := s.lastMark(t); got != "unhold" {
-			t.Errorf("last apt-mark = %q, want the unpin's unhold to stand; calls %q", got, s.lines(t))
+		if s.held(t) {
+			t.Errorf("held = true, want the unpin to stand; calls %q", s.lines(t))
 		}
 	})
-	t.Run("a remove during the install leaves no hold", func(t *testing.T) {
+	t.Run("a remove during the install adds no hold", func(t *testing.T) {
 		fakeRoot(t)
 		s := stubApt(t, "-o")
 		e := newTestEngine(t, nil)
-		setAptRow(t, e, true)
+		setAptRow(t, e, true, false)
 		jv := install(t, e)
-		if !s.await(t, "apt-get -o DPkg::Lock::Timeout=60 -y --no-install-recommends install -- jq", 5*time.Second) {
+		if !s.await(t, aptGetLine, 5*time.Second) {
 			t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
 		}
 
@@ -3521,8 +3674,8 @@ func TestInstall_HoldsAPinnedAptPackage(t *testing.T) {
 		s.open(t, "-o")
 		waitJob(t, e, jv.ID)
 
-		if got := s.lastMark(t); got != "" {
-			t.Errorf("apt calls = %q, want no apt-mark for a removed row", s.lines(t))
+		if s.held(t) || s.ran(t, "mark hold") {
+			t.Errorf("calls = %q, want no hold for a removed row", s.lines(t))
 		}
 	})
 }
