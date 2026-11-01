@@ -1109,14 +1109,14 @@ func readArgv(t *testing.T, path string) []string {
 
 // TestInstallPip_PassesThePythonRequest pins the uv argv: a Python request
 // becomes `--python <req>` (https://docs.astral.sh/uv/reference/cli/#uv-tool-install),
-// and the interpreter dir uv downloads into exists with the managed mode
-// before uv runs.
+// no request becomes `--python 3`, and the interpreter dir uv downloads into
+// exists with the managed mode before uv runs.
 func TestInstallPip_PassesThePythonRequest(t *testing.T) {
 	cases := []struct {
 		name, python, want string
 	}{
 		{name: "with a request", python: "3.14", want: "tool install --reinstall --python 3.14 x==1.0.0"},
-		{name: "without a request", python: "", want: "tool install --reinstall x==1.0.0"},
+		{name: "without a request", python: "", want: "tool install --reinstall --python 3 x==1.0.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

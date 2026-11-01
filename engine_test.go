@@ -2793,9 +2793,11 @@ func TestInstallTool_ReinstallsWhenThePythonRequestChanged(t *testing.T) {
 // venvUV puts a uv on PATH that appends its argv and interpreter env to the
 // returned file, modelling uv 0.13.6's venv handling. `tool uninstall` drops
 // the x venv and launcher. `tool install` exits 1 when failInstall is set,
-// before touching anything, as uv does when resolution fails; otherwise it
-// keeps a venv with a resolvable bin/python unless --force is passed, and
-// builds a missing one on a managed interpreter.
+// before touching anything, as uv does when resolution fails. --python R
+// targets the newest UV_PYTHON_INSTALL_DIR entry cpython-R or cpython-R.*
+// (cpython-R.0 standing for a download) and rebuilds a venv not on it.
+// Without --python, as for a receipt that pins a request, a venv with a
+// resolvable bin/python is kept. --force drops the venv.
 func venvUV(t *testing.T, failInstall bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -2809,8 +2811,15 @@ func venvUV(t *testing.T, failInstall bool) string {
 		"if [ \"$2\" = uninstall ]; then rm -rf \"$UV_TOOL_DIR/x\" \"$UV_TOOL_BIN_DIR/x\"; exit 0; fi\n" +
 		fail +
 		"case \" $* \" in *\" --force \"*) rm -rf \"$UV_TOOL_DIR/x\";; esac\n" +
-		"if [ ! -e \"$UV_TOOL_DIR/x/bin/python\" ]; then\n" +
+		"req=; prev=\n" +
+		"for a in \"$@\"; do [ \"$prev\" = --python ] && req=\"$a\"; prev=\"$a\"; done\n" +
 		"home=\"$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin\"\n" +
+		"if [ -n \"$req\" ]; then\n" +
+		"target=$(ls -d \"$UV_PYTHON_INSTALL_DIR/cpython-$req\" \"$UV_PYTHON_INSTALL_DIR/cpython-$req\".* 2>/dev/null | sort -V | tail -n 1)\n" +
+		"home=\"${target:-$UV_PYTHON_INSTALL_DIR/cpython-$req.0}/bin\"\n" +
+		"grep -qxF \"home = $home\" \"$UV_TOOL_DIR/x/pyvenv.cfg\" 2>/dev/null || rm -rf \"$UV_TOOL_DIR/x\"\n" +
+		"fi\n" +
+		"if [ ! -e \"$UV_TOOL_DIR/x/bin/python\" ]; then\n" +
 		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x/bin\"\n" +
 		"touch \"$home/python3\"\n" +
 		"echo \"home = $home\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
@@ -2827,26 +2836,25 @@ func venvUV(t *testing.T, failInstall bool) string {
 
 // TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter pins the migration of a
 // venv built before the engine managed interpreters: it reads as not
-// installed, and an install forces uv to build a new venv on a managed
-// interpreter (a plain --reinstall keeps a receipt-pinned venv where it is).
-// A venv already on one is reinstalled in place.
+// installed, and an install names the interpreter, so uv builds a new venv on
+// a managed one. A venv already on the newest managed one is reinstalled in
+// place.
 func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
 	cases := []struct {
 		name      string
 		recorded  string
 		home      func(e *Engine) string
 		installed bool
-		force     bool
 	}{
 		{
 			name: "unmanaged interpreter", recorded: "1.0.0",
 			home:      func(*Engine) string { return newInterpreterHome(t, t.TempDir()) },
-			installed: false, force: true,
+			installed: false,
 		},
 		{
 			name: "managed interpreter with an outdated version", recorded: "0.9.0",
 			home:      func(e *Engine) string { return newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)) },
-			installed: true, force: false,
+			installed: true,
 		},
 	}
 	for _, tc := range cases {
@@ -2874,11 +2882,7 @@ func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
 				t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
 			}
 			interpreters := pythonInterpreterDir(e.toolsDir)
-			cmd := "tool install --reinstall x==1.0.0"
-			if tc.force {
-				cmd = "tool install --reinstall --force x==1.0.0"
-			}
-			want := []string{cmd + " UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+			want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
 			if got := readArgv(t, argv); !slices.Equal(got, want) {
 				t.Errorf("uv runs = %q, want %q", got, want)
 			}
@@ -2927,7 +2931,7 @@ func TestInstall_UnresolvableRebuildKeepsTheVenv(t *testing.T) {
 	if final := waitJob(t, e, job.ID); final.State != JobFailed {
 		t.Fatalf("install job = %s, want failed (tail %v)", final.State, final.OutputTail)
 	}
-	want := []string{"tool install --reinstall --force x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(e.toolsDir)}
+	want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(e.toolsDir)}
 	if got := readArgv(t, argv); !slices.Equal(got, want) {
 		t.Errorf("uv runs = %q, want %q", got, want)
 	}
@@ -2975,7 +2979,7 @@ func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
 		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
 	}
 	interpreters := filepath.Join(e.toolsDir, "python", "interpreters")
-	want := []string{"tool install --reinstall x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+	want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
 	if got := readArgv(t, argv); !slices.Equal(got, want) {
 		t.Errorf("uv runs = %q, want %q", got, want)
 	}
@@ -2985,6 +2989,49 @@ func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
 	}
 	if !strings.Contains(string(cfg), "home = "+interpreters+string(os.PathSeparator)) {
 		t.Errorf("rebuilt pyvenv.cfg = %q, want home under %s", cfg, interpreters)
+	}
+}
+
+// TestInstall_ClearingThePythonRequestRebuildsOnTheNewest pins that removing
+// an entry's python request moves its venv to the newest managed interpreter:
+// uv keeps a venv whose receipt pins a request unless the install names an
+// interpreter (uv 0.13.6 install.rs#L1113).
+func TestInstall_ClearingThePythonRequestRebuildsOnTheNewest(t *testing.T) {
+	argv := venvUV(t, false)
+	e := pipEngine(t, "")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.Python = "3.14"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	interpreters := pythonInterpreterDir(e.toolsDir)
+	writeVenv(t, e, "x", interpreterHomeAt(t, interpreters, "cpython-3.14.10"))
+	newest := interpreterHomeAt(t, interpreters, "cpython-3.15.2")
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("uv runs = %q, want %q", got, want)
+	}
+	cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), "home = "+newest+"\n") {
+		t.Errorf("pyvenv.cfg = %q, want home %s", cfg, newest)
+	}
+	if got := e.store.State().Tools["x"].Python; got != "" {
+		t.Errorf("recorded python = %q, want empty", got)
 	}
 }
 

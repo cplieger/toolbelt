@@ -543,7 +543,12 @@ func writeVenv(t *testing.T, e *Engine, venv, home string) {
 
 func newInterpreterHome(t *testing.T, dir string) string {
 	t.Helper()
-	home := filepath.Join(dir, "cpython-3.15.2", "bin")
+	return interpreterHomeAt(t, dir, "cpython-3.15.2")
+}
+
+func interpreterHomeAt(t *testing.T, dir, name string) string {
+	t.Helper()
+	home := filepath.Join(dir, name, "bin")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}

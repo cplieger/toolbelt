@@ -1008,6 +1008,11 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 	return in.linkPMBins(pmBin, added, prev, pkg)
 }
 
+// anyManagedPython is the uv request for a pip: entry without one: uv takes
+// the newest managed interpreter it matches, and downloads one only when none
+// does (https://docs.astral.sh/uv/concepts/python-versions/#discovery-of-python-versions).
+const anyManagedPython = "3"
+
 // installPip installs one PyPI CLI tool via `uv tool install` (the
 // pipx-equivalent primitive: isolated per-tool venv, self-contained
 // launcher). `uv pip install --prefix` was tried first and rejected —
@@ -1017,19 +1022,13 @@ func (in *installer) installPip(ctx context.Context, pkg string, t *Tool, prev [
 	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir), pythonInterpreterDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
-	args := []string{"tool", "install", "--reinstall"}
-	// uv keeps a venv on its old interpreter when the receipt pins a Python
-	// request and none is passed; --force skips that check
-	// (https://github.com/astral-sh/uv/blob/0.13.6/crates/uv-tool-commands/src/install.rs#L515)
-	// and uv still resolves before replacing the venv (#L924 there), so a
-	// rebuild that cannot resolve leaves the old venv working.
-	if _, _, foreign := pipInterpreter(in.toolsDir, pkg); foreign != "" {
-		args = append(args, "--force")
-	}
-	if t.Python != "" {
-		args = append(args, "--python", t.Python)
-	}
-	args = append(args, pkg+"=="+t.Version)
+	python := cmp.Or(t.Python, anyManagedPython)
+	// The interpreter is named on every install: uv rebuilds a venv not on it
+	// but keeps one whose receipt pins a request when none is passed
+	// (https://github.com/astral-sh/uv/blob/0.13.6/crates/uv-tool-commands/src/install.rs#L1113),
+	// and resolves before replacing the venv (#L924 there). --force would
+	// also overwrite another tool's launcher of the same name.
+	args := []string{"tool", "install", "--reinstall", "--python", python, pkg + "==" + t.Version}
 	pmBin := pythonBinDir(in.toolsDir)
 	added, err := binDiff(pmBin, func() error {
 		return in.runPM(ctx, "uv", args...)
