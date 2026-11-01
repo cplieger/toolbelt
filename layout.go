@@ -16,11 +16,12 @@ func optDir(toolsDir string) string { return filepath.Join(toolsDir, "opt") }
 func npmDir(toolsDir string) string    { return filepath.Join(toolsDir, "npm") }
 func npmBinDir(toolsDir string) string { return filepath.Join(npmDir(toolsDir), "bin") }
 
+func npmLibDir(toolsDir string) string { return filepath.Join(npmDir(toolsDir), "lib") }
+
 // npmModulesDir is where npm's global install under the prefix puts each
-// package (https://docs.npmjs.com/cli/v11/configuring-npm/folders). npm
-// creates it, so it is not in managedDirs.
+// package (https://docs.npmjs.com/cli/v11/configuring-npm/folders).
 func npmModulesDir(toolsDir string) string {
-	return filepath.Join(npmDir(toolsDir), "lib", "node_modules")
+	return filepath.Join(npmLibDir(toolsDir), "node_modules")
 }
 
 // pythonDir is uv's tool root; pythonBinDir is the launcher dir under it.
@@ -43,8 +44,39 @@ func managedDirs(toolsDir string) []string {
 		optDir(toolsDir),
 		npmDir(toolsDir),
 		npmBinDir(toolsDir),
+		npmLibDir(toolsDir),
+		npmModulesDir(toolsDir),
 		pythonDir(toolsDir),
 		pythonBinDir(toolsDir),
+		pythonToolDir(toolsDir),
 		pythonInterpreterDir(toolsDir),
 	}
+}
+
+// writtenTree is what one install wrote under the managed root dir: the
+// entry sub, or every entry beneath dir when sub is ".".
+type writtenTree struct{ dir, sub string }
+
+// writtenTrees is every tree an install from source kind can write files
+// into that the engine later runs. apt: is dpkg's.
+func writtenTrees(toolsDir, kind, name string) []writtenTree {
+	bin := writtenTree{binDir(toolsDir), "."}
+	opt := writtenTree{optDir(toolsDir), name}
+	switch kind {
+	case SourceAqua, SourceRelease:
+		return []writtenTree{opt}
+	case SourceManual:
+		return []writtenTree{opt, bin}
+	case SourceGo, SourceCargo:
+		return []writtenTree{bin}
+	case SourceNpm:
+		return []writtenTree{{npmModulesDir(toolsDir), "."}, {npmBinDir(toolsDir), "."}}
+	case SourcePip:
+		return []writtenTree{
+			{pythonToolDir(toolsDir), "."},
+			{pythonInterpreterDir(toolsDir), "."},
+			{pythonBinDir(toolsDir), "."},
+		}
+	}
+	return nil
 }

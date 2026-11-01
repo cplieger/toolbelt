@@ -22,6 +22,8 @@ Every extracted file and the staging directory are flushed to disk before the re
 
 Downloads are capped at 1 GiB. Archive extraction refuses a symlink that points outside the install tree. Installs land in versioned directories that are swapped in one step.
 
+After an install, the engine clears the group and other write bits from every directory and file it may have written and later runs: the tool's tree under `opt/`, the files in `bin/`, every package under `npm/lib/node_modules`, and every venv, interpreter and launcher under `python/`. npm, uv, go and tar create files through the umask, and on a volume whose ACL grants the group write access, such as ZFS with `nfs4acl`, every new file is group-writable whatever the umask. Symlinks are left alone, and a change the filesystem does not store fails the install. The managed directories themselves are created owner-writable only and are otherwise left as they are; [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write.
+
 ## Network
 
 Every fetch goes through a client that allows only public IP addresses, checked when the connection is made, and only port 443, with its own redirect policy. Transient failures are retried and rate limits are respected through [cplieger/httpx](https://github.com/cplieger/httpx).

@@ -132,6 +132,33 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				return []wantFinding{{dir, "group- or other-writable (mode 0775)"}}
 			},
 		},
+		"npm modules dir is group-writable": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				dir := filepath.Join(toolsDir, "npm", "lib", "node_modules")
+				mkdirs(t, configDir, dir)
+				chmod(t, dir, 0o770)
+				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
+			},
+		},
+		"npm lib dir is a symlink out of the tree": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				outside := filepath.Join(filepath.Dir(toolsDir), "outside")
+				mkdirs(t, configDir, filepath.Join(toolsDir, "npm"), filepath.Join(outside, "node_modules"))
+				symlink(t, outside, filepath.Join(toolsDir, "npm", "lib"))
+				return []wantFinding{
+					{filepath.Join(toolsDir, "npm", "lib"), "is a symlink"},
+					{filepath.Join(toolsDir, "npm", "lib", "node_modules"), "outside the tool tree"},
+				}
+			},
+		},
+		"python tools dir is group-writable": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				dir := filepath.Join(toolsDir, "python", "tools")
+				mkdirs(t, configDir, dir)
+				chmod(t, dir, 0o770)
+				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
+			},
+		},
 		"bin dir is other-writable": {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, filepath.Join(toolsDir, "bin"))

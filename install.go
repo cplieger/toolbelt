@@ -210,6 +210,11 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 	if err != nil {
 		return installOutcome{}, err
 	}
+	for _, tree := range writtenTrees(in.toolsDir, kind, name) {
+		if err := stripGroupOtherWrite(tree.dir, tree.sub); err != nil {
+			return installOutcome{}, err
+		}
+	}
 	return out, nil
 }
 
@@ -995,7 +1000,7 @@ func binDiff(dir string, fn func() error) ([]string, error) {
 // installNpm installs one npm package globally under the engine's npm
 // prefix and symlinks its new bins into the bin dir.
 func (in *installer) installNpm(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.npmDir(), npmBinDir(in.toolsDir)); err != nil {
+	if err := ensureManagedDirs(in.npmDir(), npmBinDir(in.toolsDir), npmLibDir(in.toolsDir), npmModulesDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
 	pmBin := npmBinDir(in.toolsDir)
@@ -1019,7 +1024,7 @@ const anyManagedPython = "3"
 // its launcher points at the managed interpreter without the prefix's
 // site-packages, so every entry point dies with ModuleNotFoundError.
 func (in *installer) installPip(ctx context.Context, pkg string, t *Tool, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir), pythonInterpreterDir(in.toolsDir)); err != nil {
+	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir), pythonToolDir(in.toolsDir), pythonInterpreterDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
 	python := cmp.Or(t.Python, anyManagedPython)

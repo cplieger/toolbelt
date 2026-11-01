@@ -1109,8 +1109,8 @@ func readArgv(t *testing.T, path string) []string {
 
 // TestInstallPip_PassesThePythonRequest pins the uv argv: a Python request
 // becomes `--python <req>` (https://docs.astral.sh/uv/reference/cli/#uv-tool-install),
-// no request becomes `--python 3`, and the interpreter dir uv downloads into
-// exists with the managed mode before uv runs.
+// no request becomes `--python 3`, and the interpreter and venv dirs uv
+// writes into exist with the managed mode before uv runs.
 func TestInstallPip_PassesThePythonRequest(t *testing.T) {
 	cases := []struct {
 		name, python, want string
@@ -1133,9 +1133,148 @@ func TestInstallPip_PassesThePythonRequest(t *testing.T) {
 			if got := readArgv(t, argv); !slices.Equal(got, []string{tc.want}) {
 				t.Errorf("uv argv = %q, want [%q]", got, tc.want)
 			}
-			dir := filepath.Join(in.toolsDir, "python", "interpreters")
-			if got := storedDirMode(t, dir); got != managedDirStoredMode {
-				t.Errorf("mode of %s = %v, want %v", dir, got, managedDirStoredMode)
+			for _, sub := range []string{"interpreters", "tools"} {
+				dir := filepath.Join(in.toolsDir, "python", sub)
+				if got := storedDirMode(t, dir); got != managedDirStoredMode {
+					t.Errorf("mode of %s = %v, want %v", dir, got, managedDirStoredMode)
+				}
+			}
+		})
+	}
+}
+
+// TestInstall_StripsGroupAndOtherWriteFromWhatItWrote pins that an install
+// leaves nothing it wrote, and the engine later runs, writable by group or
+// other: on a ZFS nfs4acl volume npm, uv, go and tar create every entry 0770
+// whatever the umask. Each fake writes entries with those bits set and a
+// symlink to a file outside the tree, which must keep its mode. A managed
+// root keeps its mode: VerifyRootIntegrity reports it instead. Paths are
+// relative to ToolsDir.
+func TestInstall_StripsGroupAndOtherWriteFromWhatItWrote(t *testing.T) {
+	cases := []struct {
+		name   string
+		id     string
+		tool   Tool
+		script map[string]string // fake binaries put first on PATH
+		setup  func(t *testing.T, e *Engine, outside string)
+		loose  []string
+		kept   []string // managed roots set 0777 by setup
+	}{
+		{
+			name: "npm package tree", id: "p",
+			tool: Tool{Source: "npm:p", Version: "1.0.0"},
+			script: map[string]string{"npm": `m="$NPM_CONFIG_PREFIX/lib/node_modules"
+[ -d "$m" ] || { echo "npm found no $m"; exit 1; }
+mkdir -p "$m/p/lib"
+printf '{"name":"p","version":"1.0.0"}' > "$m/p/package.json"
+chmod 777 "$m/p" "$m/p/lib"; chmod 666 "$m/p/package.json"
+ln -s "$OUTSIDE" "$m/p/link"`},
+			loose: []string{"npm/lib/node_modules/p", "npm/lib/node_modules/p/lib", "npm/lib/node_modules/p/package.json"},
+		},
+		{
+			name: "uv venv, interpreter and launcher", id: "x",
+			tool: Tool{Source: "pip:x", Version: "1.0.0"},
+			script: map[string]string{"uv": `[ -d "$UV_TOOL_DIR" ] || { echo "uv found no $UV_TOOL_DIR"; exit 1; }
+py="$UV_PYTHON_INSTALL_DIR/cpython-3.15.2"
+mkdir -p "$py/bin" "$UV_TOOL_DIR/x/bin"
+touch "$py/bin/python3"; chmod 777 "$py" "$py/bin/python3"
+echo "home = $py/bin" > "$UV_TOOL_DIR/x/pyvenv.cfg"; chmod 666 "$UV_TOOL_DIR/x/pyvenv.cfg"
+chmod 777 "$UV_TOOL_DIR/x"
+ln -sf "$py/bin/python3" "$UV_TOOL_DIR/x/bin/python"
+ln -s "$OUTSIDE" "$UV_TOOL_DIR/x/link"
+printf '#!/bin/sh\necho x 1.0.0\n' > "$UV_TOOL_BIN_DIR/x"; chmod 777 "$UV_TOOL_BIN_DIR/x"`},
+			loose: []string{
+				"python/interpreters/cpython-3.15.2", "python/interpreters/cpython-3.15.2/bin/python3",
+				"python/tools/x", "python/tools/x/pyvenv.cfg", "python/bin/x",
+			},
+		},
+		{
+			name: "go binary in the bin dir", id: "g",
+			tool:   Tool{Source: "go:example.com/g", Version: "v1.0.0"},
+			script: map[string]string{"go": `printf '#!/bin/sh\necho g 1.0.0\n' > "$GOBIN/g"; chmod 777 "$GOBIN/g"`},
+			setup:  func(t *testing.T, e *Engine, _ string) { chmod(t, e.binDir(), 0o777) },
+			loose:  []string{"bin/g"},
+			kept:   []string{"bin"},
+		},
+		{
+			name: "aqua tool's earlier version tree", id: "tool",
+			tool: Tool{Source: "aqua:o/tool", Version: "v1.0.0"},
+			setup: func(t *testing.T, e *Engine, outside string) {
+				old := filepath.Join(e.toolsDir, "opt", "tool", "v0.9.0")
+				mkdirs(t, old)
+				writeFile(t, filepath.Join(old, "tool"), "#!/bin/sh\n")
+				chmod(t, old, 0o777)
+				chmod(t, filepath.Join(old, "tool"), 0o777)
+				symlink(t, outside, filepath.Join(old, "link"))
+			},
+			loose: []string{"opt/tool/v0.9.0", "opt/tool/v0.9.0/tool"},
+		},
+		{
+			name: "manual opt tree and bin file", id: "m",
+			tool: Tool{Source: SourceManual, Version: "1", Install: `mkdir -p "$OPT/v1/lib" && chmod 777 "$OPT" "$OPT/v1/lib" &&
+ln -s "$OUTSIDE" "$OPT/v1/link" &&
+printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 777 "$BIN/m"`, Probe: "m"},
+			loose: []string{"opt/m", "opt/m/v1/lib", "bin/m"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{
+				Entries: map[string]CatalogEntry{
+					"tool": {Name: "tool", Source: "aqua:o/tool", Aqua: aquaVersionServer(t)},
+				},
+				Backends: map[string]string{SourceNpm: "", SourcePip: "", SourceGo: ""},
+			})
+			captureLogs(e)
+			outside := filepath.Join(t.TempDir(), "outside")
+			writeFile(t, outside, "x")
+			chmod(t, outside, 0o666)
+			t.Setenv("OUTSIDE", outside)
+			fake := t.TempDir()
+			for name, body := range tc.script {
+				if err := os.WriteFile(filepath.Join(fake, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if tc.setup != nil {
+				tc.setup(t, e, outside)
+			}
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools[tc.id] = tc.tool
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install(tc.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if final := waitJob(t, e, job.ID); final.State != JobDone {
+				t.Fatalf("install = %s %q, tail %v", final.State, final.Error, final.OutputTail)
+			}
+			for _, rel := range tc.loose {
+				fi, err := os.Lstat(filepath.Join(e.toolsDir, rel))
+				if err != nil {
+					t.Errorf("stat %s: %v", rel, err)
+					continue
+				}
+				if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+					t.Errorf("%s is still mode %04o after the install", rel, perm)
+				}
+			}
+			for _, rel := range tc.kept {
+				if got := storedDirMode(t, filepath.Join(e.toolsDir, rel)); got.Perm() != 0o777 {
+					t.Errorf("managed root %s went from 0777 to %04o", rel, got.Perm())
+				}
+			}
+			fi, err := os.Stat(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := fi.Mode().Perm(); perm != 0o666 {
+				t.Errorf("the file outside the tree went from 0666 to %04o through a symlink", perm)
 			}
 		})
 	}
