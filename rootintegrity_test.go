@@ -159,31 +159,6 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
 			},
 		},
-		"cache dir is open to its group": {
-			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
-				dir := filepath.Join(toolsDir, "cache")
-				mkdirs(t, configDir, dir)
-				chmod(t, dir, 0o750)
-				return []wantFinding{{dir, "is open to group or other (mode 0750)"}}
-			},
-		},
-		"cache dir is traversable by other": {
-			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
-				dir := filepath.Join(toolsDir, "cache")
-				mkdirs(t, configDir, dir)
-				chmod(t, dir, 0o701)
-				return []wantFinding{{dir, "is open to group or other (mode 0701)"}}
-			},
-		},
-		"cache dir is a symlink out of the tree": {
-			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
-				outside := filepath.Join(filepath.Dir(toolsDir), "outside")
-				mkdirs(t, configDir, toolsDir, outside)
-				chmod(t, outside, 0o700)
-				symlink(t, outside, filepath.Join(toolsDir, "cache"))
-				return []wantFinding{{filepath.Join(toolsDir, "cache"), "is a symlink"}}
-			},
-		},
 		"bin dir is other-writable": {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, filepath.Join(toolsDir, "bin"))
@@ -272,9 +247,6 @@ func TestNew_VerifyRootIntegrityAcceptsFreshVolume(t *testing.T) {
 			t.Cleanup(e.Close)
 			if _, serr := os.Stat(filepath.Join(toolsDir, "bin")); serr != nil {
 				t.Errorf("New did not create the bin dir: %v", serr)
-			}
-			if got := storedDirMode(t, filepath.Join(toolsDir, "cache")); got != os.ModeDir|0o700 {
-				t.Errorf("cache dir mode = %v, want %v", got, os.ModeDir|0o700)
 			}
 			if _, serr := os.Stat(filepath.Join(configDir, "tools.json")); serr != nil {
 				t.Errorf("New did not seed the manifest: %v", serr)

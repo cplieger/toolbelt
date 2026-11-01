@@ -247,10 +247,6 @@ func New(cfg *Config) (*Engine, error) {
 	if err := ensureManagedDir(binDir(cfg.ToolsDir)); err != nil {
 		return nil, err
 	}
-	// A probe runs package managers too, which would create it through the umask.
-	if err := ensureDir(cacheDir(cfg.ToolsDir), privateDirMode); err != nil {
-		return nil, err
-	}
 	client := newEngineClient(cfg.GitHubToken)
 	e := &Engine{
 		store:           st,

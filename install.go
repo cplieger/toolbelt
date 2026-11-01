@@ -107,24 +107,18 @@ func (in *installer) pythonDir() string { return pythonDir(in.toolsDir) }
 // tree, writable only by the uid the engine runs as.
 const managedDirMode os.FileMode = 0o755
 
-// privateDirMode is the mode of each of privateDirs.
-const privateDirMode os.FileMode = 0o700
-
-// ensureManagedDir creates dir with managedDirMode (see ensureDir).
-func ensureManagedDir(dir string) error { return ensureDir(dir, managedDirMode) }
-
-// ensureDir creates dir and, when THIS call created it, verifies the
-// filesystem stored mode rather than assuming it did: mkdir(2) takes the
-// mode through the umask, and a group-write ACE or a setgid parent can both
-// store a wider mode than requested. bin/ is why this matters — a
-// group-writable bin/ lets any group member repoint a published PATH entry.
-// Only a directory THIS call created is chmod'ed; a pre-existing one is left
-// alone.
-func ensureDir(dir string, mode os.FileMode) error {
+// ensureManagedDir creates dir and, when THIS call created it, verifies
+// the filesystem stored managedDirMode rather than assuming it did:
+// mkdir(2) takes the mode through the umask, and a group-write ACE or a
+// setgid parent can both store a wider mode than requested. bin/ is why
+// this matters — a group-writable bin/ lets any group member repoint a
+// published PATH entry. Only a directory THIS call created is
+// chmod'ed; a pre-existing one is left alone.
+func ensureManagedDir(dir string) error {
 	if err := os.MkdirAll(filepath.Dir(dir), managedDirMode); err != nil {
 		return err
 	}
-	if mkErr := os.Mkdir(dir, mode); mkErr != nil {
+	if mkErr := os.Mkdir(dir, managedDirMode); mkErr != nil {
 		if !errors.Is(mkErr, os.ErrExist) {
 			return mkErr
 		}
@@ -139,7 +133,7 @@ func ensureDir(dir string, mode os.FileMode) error {
 		}
 		return nil
 	}
-	return enforceDirMode(dir, mode)
+	return enforceDirMode(dir, managedDirMode)
 }
 
 // ensureManagedDirs establishes several levels, outermost first, so each
@@ -189,13 +183,9 @@ const downloadAttemptBudget = 10 * time.Minute
 // only because the struct is too wide to copy per install (gocritic hugeParam).
 func (in *installer) install(ctx context.Context, name string, t *Tool, aq *AquaPackage, prev *ToolStatus) (installOutcome, error) {
 	var out installOutcome
+	var err error
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	fallback := derivedProbeName(name, t)
-	trees := writtenTrees(in.toolsDir, kind, name)
-	before, err := snapshotTrees(trees)
-	if err != nil {
-		return installOutcome{}, err
-	}
 	switch kind {
 	case SourceAqua:
 		out.bins, out.checksum, err = in.installAqua(ctx, name, t.Version, aq)
@@ -217,8 +207,8 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 	default:
 		return installOutcome{}, fmt.Errorf("unknown source %q", t.Source)
 	}
-	if joined := errors.Join(err, stripWritten(trees, before)); joined != nil {
-		return installOutcome{}, joined
+	if err != nil {
+		return installOutcome{}, err
 	}
 	return out, nil
 }
@@ -848,21 +838,13 @@ func (in *installer) linkBin(name, target string) error {
 var pmEnvDropped = []string{"UV_PYTHON", "UV_PYTHON_PREFERENCE", "UV_NO_MANAGED_PYTHON"}
 
 // pmEnv builds the environment for package-manager subprocesses: the
-// engine's bin dir leads PATH so freshly installed runtimes resolve, and
-// every cache a build reads is under cacheDir.
+// engine's bin dir leads PATH so freshly installed runtimes resolve.
 func (in *installer) pmEnv() []string {
-	cache := cacheDir(in.toolsDir)
 	set := []string{
 		"PATH=" + in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"GOBIN=" + in.binDir(),
-		"GOPATH=" + filepath.Join(cache, "go"),
-		// An ambient GOMODCACHE overrides GOPATH's (https://go.dev/ref/mod#environment-variables).
-		"GOMODCACHE=" + filepath.Join(cache, "go", "pkg", "mod"),
-		"GOCACHE=" + filepath.Join(cache, "go-build"),
+		"GOPATH=" + filepath.Join(in.toolsDir, "go"),
 		"NPM_CONFIG_PREFIX=" + in.npmDir(),
-		"NPM_CONFIG_CACHE=" + filepath.Join(cache, "npm"),
-		"UV_CACHE_DIR=" + filepath.Join(cache, "uv"),
-		"CARGO_HOME=" + filepath.Join(cache, "cargo"),
 		"UV_TOOL_DIR=" + pythonToolDir(in.toolsDir),
 		"UV_TOOL_BIN_DIR=" + pythonBinDir(in.toolsDir),
 		// A tool venv breaks when its interpreter is removed, and uv's
@@ -890,19 +872,9 @@ func (in *installer) pmEnv() []string {
 // through bin/ is the feature and a systemCommand pin would break every backend
 // install. pmEnv puts bin/ first for that reason.
 func (in *installer) runPM(ctx context.Context, name string, args ...string) error {
-	if err := in.ensureCacheDir(); err != nil {
-		return err
-	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = in.pmEnv()
 	return in.streamCmd(cmd, name)
-}
-
-// ensureCacheDir re-creates cacheDir before a build, since an operator may
-// clear it at any time and the build would otherwise create it through the
-// umask.
-func (in *installer) ensureCacheDir() error {
-	return ensureDir(cacheDir(in.toolsDir), privateDirMode)
 }
 
 // streamCmd streams cmd's combined output into the job log line by line; a
@@ -1184,9 +1156,6 @@ func (in *installer) runShell(ctx context.Context, command, version, optDir stri
 	// the managed tools is what the escape hatch is for.
 	cmd, err := systemCommand(ctx, "bash", "-c", command)
 	if err != nil {
-		return err
-	}
-	if err := in.ensureCacheDir(); err != nil {
 		return err
 	}
 	arm := runtime.GOARCH == goarchARM64

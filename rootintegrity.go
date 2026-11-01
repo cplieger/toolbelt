@@ -79,13 +79,13 @@ func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string) error {
 }
 
 // inspectRoots judges every managed root: ConfigDir, ToolsDir, and the
-// managedDirs and privateDirs beneath it. Each parent is judged too, since it can redirect
+// managedDirs beneath it. Each parent is judged too, since it can redirect
 // the directory beneath it. ConfigDir is exempt from the
 // containment leg alone (it is legitimately outside ToolsDir), not from
 // the symlink, type or mode legs.
 func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
-	out, _ := inspectRootDir(configDir, ownerWritable)
-	toolsFindings, toolsIsDir := inspectRootDir(toolsDir, ownerWritable)
+	out, _ := inspectRootDir(configDir)
+	toolsFindings, toolsIsDir := inspectRootDir(toolsDir)
 	out = append(out, toolsFindings...)
 
 	// Judged against the RESOLVED ToolsDir: a volume may sit behind a
@@ -101,18 +101,12 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 		}
 	}
 
-	judge := func(path string, rule modeRule) {
-		findings, isDir := inspectRootDir(path, rule)
+	for _, path := range managedDirs(toolsDir) {
+		findings, isDir := inspectRootDir(path)
 		out = append(out, findings...)
 		if isDir && contained {
 			out = append(out, inspectContainment(toolsRoot, path)...)
 		}
-	}
-	for _, path := range managedDirs(toolsDir) {
-		judge(path, ownerWritable)
-	}
-	for _, path := range privateDirs(toolsDir) {
-		judge(path, ownerOnly)
 	}
 
 	slices.SortFunc(out, func(a, b RootIntegrityFinding) int {
@@ -124,27 +118,14 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 	return out
 }
 
-// modeRule is the permission bits a root may not carry and how a finding
-// words them.
-type modeRule struct {
-	reason  string
-	refused os.FileMode
-}
-
-var (
-	ownerWritable = modeRule{refused: groupOtherWrite, reason: "is group- or other-writable (mode %04o)"}
-	// ownerOnly refuses traversal too: it alone reaches what is beneath.
-	ownerOnly = modeRule{refused: 0o077, reason: "is open to group or other (mode %04o)"}
-)
-
-// inspectRootDir applies the per-path legs, the mode leg by rule, and
-// reports whether the path is a real directory (which is what makes the
-// containment leg meaningful for it).
+// inspectRootDir applies the per-path legs and reports whether the path
+// is a real directory (which is what makes the containment leg
+// meaningful for it).
 //
 // os.Lstat, never os.Stat: a root that IS a symlink must be refused, not
 // followed. Every failure other than not-exist is a finding — an
 // unreadable root is not assumed clean.
-func inspectRootDir(path string, rule modeRule) ([]RootIntegrityFinding, bool) {
+func inspectRootDir(path string) ([]RootIntegrityFinding, bool) {
 	fi, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -157,8 +138,11 @@ func inspectRootDir(path string, rule modeRule) ([]RootIntegrityFinding, bool) {
 	case !fi.IsDir():
 		return []RootIntegrityFinding{{Path: path, Reason: "is not a directory"}}, false
 	}
-	if perm := fi.Mode().Perm(); perm&rule.refused != 0 {
-		return []RootIntegrityFinding{{Path: path, Reason: fmt.Sprintf(rule.reason, perm)}}, true
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return []RootIntegrityFinding{{
+			Path:   path,
+			Reason: fmt.Sprintf("is group- or other-writable (mode %04o)", perm),
+		}}, true
 	}
 	return nil, true
 }

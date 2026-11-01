@@ -37,16 +37,6 @@ func pythonInterpreterDir(toolsDir string) string {
 	return filepath.Join(pythonDir(toolsDir), "interpreters")
 }
 
-// cacheDir holds the download and build caches of every build the engine
-// runs. go, npm, uv and cargo reuse a cached module, package or build output
-// without fetching it again, so an entry another account can change changes
-// the next install; the directory is therefore private to the engine's uid.
-func cacheDir(toolsDir string) string { return filepath.Join(toolsDir, "cache") }
-
-// privateDirs are the managed directories no account but the engine's may
-// enter, whatever the modes beneath them.
-func privateDirs(toolsDir string) []string { return []string{cacheDir(toolsDir)} }
-
 // managedDirs is every directory the engine owns, in audit order.
 func managedDirs(toolsDir string) []string {
 	return []string{
@@ -61,37 +51,4 @@ func managedDirs(toolsDir string) []string {
 		pythonToolDir(toolsDir),
 		pythonInterpreterDir(toolsDir),
 	}
-}
-
-// writtenTree is a tree one install can write under the managed root dir:
-// the entry sub, or every entry beneath dir when sub is ".". Every entry of
-// an owned tree is the tool's; a shared root also holds other tools' and the
-// operator's files, so only what the install changed is its own.
-type writtenTree struct {
-	dir, sub string
-	owned    bool
-}
-
-// writtenTrees is every tree an install from source kind can write files
-// into that the engine later runs. apt: is dpkg's.
-func writtenTrees(toolsDir, kind, name string) []writtenTree {
-	bin := writtenTree{dir: binDir(toolsDir), sub: "."}
-	opt := writtenTree{dir: optDir(toolsDir), sub: name, owned: true}
-	switch kind {
-	case SourceAqua, SourceRelease:
-		return []writtenTree{opt}
-	case SourceManual:
-		return []writtenTree{opt, bin}
-	case SourceGo, SourceCargo:
-		return []writtenTree{bin}
-	case SourceNpm:
-		return []writtenTree{{dir: npmModulesDir(toolsDir), sub: "."}, {dir: npmBinDir(toolsDir), sub: "."}}
-	case SourcePip:
-		return []writtenTree{
-			{dir: pythonToolDir(toolsDir), sub: "."},
-			{dir: pythonInterpreterDir(toolsDir), sub: "."},
-			{dir: pythonBinDir(toolsDir), sub: "."},
-		}
-	}
-	return nil
 }
