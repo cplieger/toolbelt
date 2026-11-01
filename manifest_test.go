@@ -105,3 +105,16 @@ func TestParseManifest_RefusesABadPythonRequest(t *testing.T) {
 		})
 	}
 }
+
+// TestParseManifest_RefusesANulVersionArg: execve(2) arguments are
+// NUL-terminated, so a hand-edited element carrying one could never reach
+// the tool.
+func TestParseManifest_RefusesANulVersionArg(t *testing.T) {
+	doc := fmt.Sprintf(`{"version":%d,"tools":{"t":{"source":"manual","version_args":["--version","a\u0000b"]}}}`, ManifestVersion)
+
+	_, err := ParseManifest([]byte(doc))
+
+	if err == nil || !strings.Contains(err.Error(), "t: version_args[1] contains a NUL byte") {
+		t.Errorf("ParseManifest error = %v, want the NUL refusal naming the row and index", err)
+	}
+}

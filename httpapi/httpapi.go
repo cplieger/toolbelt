@@ -384,7 +384,7 @@ func patchTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	job, err := e.Patch(r.PathValue("name"), req)
+	job, err := e.Patch(r.PathValue("name"), &req)
 	if err != nil {
 		writeEngineError(w, r, err)
 		return

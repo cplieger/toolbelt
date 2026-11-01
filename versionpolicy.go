@@ -132,3 +132,14 @@ func validatePython(source, python string) error {
 	}
 	return nil
 }
+
+// validateVersionArgs refuses an element execve(2) cannot pass: arguments are
+// NUL-terminated, so the probe could never run the tool.
+func validateVersionArgs(args []string) error {
+	for i, a := range args {
+		if strings.ContainsRune(a, 0) {
+			return fmt.Errorf("version_args[%d] contains a NUL byte", i)
+		}
+	}
+	return nil
+}

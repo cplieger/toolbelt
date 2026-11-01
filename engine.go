@@ -440,6 +440,8 @@ type AddRequest struct {
 	Probe       string   `json:"probe,omitempty"`
 	Python      string   `json:"python,omitempty"` // pip: only; see Tool.Python
 	Requires    []string `json:"requires,omitempty"`
+	// VersionArgs sets Tool.VersionArgs; empty takes the catalog's.
+	VersionArgs []string `json:"version_args,omitempty"`
 	Pin         bool     `json:"pin,omitempty"`
 	// Disabled adds the entry as a template: recorded, not installed,
 	// no job enqueued (Add then returns a nil Job).
@@ -503,10 +505,16 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		Probe:       strings.TrimSpace(req.Probe),
 		Python:      strings.TrimSpace(req.Python),
 	}
+	if len(req.VersionArgs) > 0 {
+		t.VersionArgs = slices.Clone(req.VersionArgs)
+	}
 	if cat, ok := e.cat().Lookup(name); ok {
 		mergeCatalogDefaults(&t, &cat)
 	}
 	if err := validatePython(t.Source, t.Python); err != nil {
+		return t, err
+	}
+	if err := validateVersionArgs(t.VersionArgs); err != nil {
 		return t, err
 	}
 	if t.Disabled {
@@ -616,6 +624,10 @@ type PatchRequest struct {
 	// Python sets Tool.Python; "" clears it. A change on an enabled entry
 	// reinstalls it.
 	Python *string `json:"python,omitempty"`
+	// VersionArgs sets Tool.VersionArgs, taking effect at the next probe with
+	// no job. An empty list clears them, so the probe only requires an answer
+	// to --version (a source-less template takes the catalog's when hydrated).
+	VersionArgs *[]string `json:"version_args,omitempty"`
 	// Force permits disabling a tool that enabled entries require,
 	// cascading the disable to those dependents (one level, mirroring
 	// RemoveWithDependents).
@@ -645,10 +657,10 @@ type patchOutcome struct {
 // job the transition needs: enable → install (when missing), disable →
 // footprint uninstall (template kept), version or python change on an
 // enabled tool → reinstall. Returns nil when no job is needed.
-func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
+func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
 	var out patchOutcome
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return patchManifest(m, name, &req, &out, e.backends())
+		return patchManifest(m, name, req, &out, e.backends())
 	})
 	if err != nil {
 		return nil, err
@@ -762,6 +774,9 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	}
 	if req.Uninstall != nil {
 		t.Uninstall = *req.Uninstall
+	}
+	if req.VersionArgs != nil {
+		t.VersionArgs = slices.Clone(*req.VersionArgs)
 	}
 	return out
 }
@@ -1102,7 +1117,7 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 func (e *Engine) ensureJob(ctx context.Context, name string, t *Tool, inManifest bool) (*Job, error) {
 	if inManifest && t.Disabled {
 		f := false
-		jv, err := e.Patch(name, PatchRequest{Disabled: &f})
+		jv, err := e.Patch(name, &PatchRequest{Disabled: &f})
 		if err != nil {
 			return nil, err
 		}

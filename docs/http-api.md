@@ -21,7 +21,7 @@ The handler has no authentication and adds no middleware except its own cache po
 | `GET {prefix}` | `Inventory` | |
 | `GET {prefix}/search?q=` | `SearchWithCounts` | Add `&unavailable=1` to include tools the catalog cannot install, with the reason. See below |
 | `POST {prefix}` | `Add` | 202 `{job}`, with a null job for a template |
-| `PATCH {prefix}/{name}` | `Patch` | Enables or disables a tool. 409 `has_dependents` with the names |
+| `PATCH {prefix}/{name}` | `Patch` | Merges fields into an entry. A version or python change on an enabled entry starts a reinstall, enabling installs and disabling uninstalls. 409 `has_dependents` with the names |
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on a template |
 | `POST {prefix}/update` | `Update` | Optional `{"names": [...]}` body |
 | `DELETE {prefix}/{name}?force=1` | `Remove` or `RemoveWithDependents` | 202 `{job, dependents}`. 409 without `force`. 409 `essential` whatever `force` says |
@@ -30,7 +30,11 @@ The handler has no authentication and adds no middleware except its own cache po
 | `GET {prefix}/catalog` | `CatalogInfo` | Where the live catalog came from and how fresh it is |
 | `POST {prefix}/catalog/refresh` | `RefreshCatalog` | 202 `{job}`. 409 `not_configured` without `Config.Refresh` |
 
-`PATCH` takes `disabled` and `force` in the body. `DELETE` takes `force` in the query. A cascade that includes an essential tool is refused whole.
+`POST {prefix}` takes `name` and the optional `source` (required when the catalog does not know the name), `version`, `description`, `origin`, `install`, `uninstall`, `probe`, `python`, `requires`, `version_args`, `pin` and `disabled`. An empty `version_args` takes the catalog's.
+
+`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them too. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry.
+
+`DELETE` takes `force` in the query. A cascade that includes an essential tool is refused whole.
 
 Search results leave out each entry's embedded install definition. In the reply, `truncated` is true when a block was cut to its limit, and `matched` is how many rows the query found before the cut. `apt_state` is `unavailable`, `indexing` or `available`, and `apt_available` gives the same answer as a bool.
 
@@ -49,7 +53,7 @@ A request that a GitHub rate limit stops before any job starts gets a `503` repl
 {"reset_at": 1791192600000, "limit": 60, "authenticated": false}
 ```
 
-`reset_at` is in Unix milliseconds. For a limit on bursts of requests that names no time, it is one minute after the refusal. `limit` is the hourly limit, left out when GitHub did not send it. `authenticated` is false when the request carried no token. `secondary` is true when GitHub refused under its limit on bursts of requests rather than its hourly limit. `authenticated` is false when the request carried no token. `secondary` is true when GitHub refused under its limit on bursts of requests rather than its hourly limit.
+`reset_at` is in Unix milliseconds. For a limit on bursts of requests that names no time, it is one minute after the refusal. `limit` is the hourly limit, left out when GitHub did not send it. `authenticated` is false when the request carried no token. `secondary` is true when GitHub refused under its limit on bursts of requests rather than its hourly limit.
 
 To follow job progress, use the `Config` callbacks or poll `GET {prefix}/jobs`.
 

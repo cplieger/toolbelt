@@ -1100,3 +1100,45 @@ func TestAddRoute_RateLimitIsCoded(t *testing.T) {
 		t.Errorf("POST /api/tools rate_limit = %s, want %s", rl, want)
 	}
 }
+
+// TestPatchRoute_VersionArgs: the PATCH body carries version_args through to
+// the manifest, and the engine's NUL refusal answers as a bad request.
+func TestPatchRoute_VersionArgs(t *testing.T) {
+	dir := t.TempDir()
+	e, err := toolbelt.New(&toolbelt.Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	if _, err := e.Add(t.Context(), &toolbelt.AddRequest{Name: "m", Source: "manual", Version: "1", Disabled: true}); err != nil {
+		t.Fatalf("Setup: add m: %v", err)
+	}
+	h := Handler(e, "/api/tools")
+
+	rec, _ := serve(t, h, http.MethodPatch, "/api/tools/m", `{"version_args":["version"]}`)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("PATCH version_args = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "tools.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Tools map[string]struct {
+			VersionArgs []string `json:"version_args"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Tools["m"].VersionArgs; !slices.Equal(got, []string{"version"}) {
+		t.Errorf("tools.json version_args = %q, want [version]", got)
+	}
+
+	rec, _ = serve(t, h, http.MethodPatch, "/api/tools/m", `{"version_args":["a\u0000b"]}`)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "NUL") {
+		t.Errorf("PATCH NUL version_args = %d %s, want 400 naming the NUL", rec.Code, rec.Body.String())
+	}
+}

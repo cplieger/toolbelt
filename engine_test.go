@@ -347,7 +347,7 @@ func TestInstall_EnablesAnObligatoryDependency(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := false
-	job, err := e.Patch("dep", PatchRequest{Disabled: &enabled})
+	job, err := e.Patch("dep", &PatchRequest{Disabled: &enabled})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestInstallingFlag_CoversDependencies(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := false
-	job, err := e.Patch("dep", PatchRequest{Disabled: &enabled})
+	job, err := e.Patch("dep", &PatchRequest{Disabled: &enabled})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +473,7 @@ func TestInstallPlan_PublishesWhileTheJobRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	enabled := false
-	job, err := e.Patch("dep", PatchRequest{Disabled: &enabled})
+	job, err := e.Patch("dep", &PatchRequest{Disabled: &enabled})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -780,7 +780,7 @@ func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 	waitJob(t, e, job.ID)
 
 	pin := true
-	jv, err := e.Patch("t", PatchRequest{Pin: &pin})
+	jv, err := e.Patch("t", &PatchRequest{Pin: &pin})
 	if err != nil || jv != nil {
 		t.Errorf("pin patch: job=%v err=%v", jv, err)
 	}
@@ -790,7 +790,7 @@ func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 	}
 
 	v2 := "2.0.0"
-	jv, err = e.Patch("t", PatchRequest{Version: &v2})
+	jv, err = e.Patch("t", &PatchRequest{Version: &v2})
 	if err != nil || jv == nil {
 		t.Fatalf("version patch: job=%v err=%v", jv, err)
 	}
@@ -802,7 +802,7 @@ func TestPatch_PinSyncAndVersionJob(t *testing.T) {
 		t.Errorf("installed_version = %q, want 2.0.0", got)
 	}
 
-	if _, err := e.Patch("missing", PatchRequest{Pin: &pin}); !errors.Is(err, ErrNotFound) {
+	if _, err := e.Patch("missing", &PatchRequest{Pin: &pin}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("patch missing = %v, want ErrNotFound", err)
 	}
 }
@@ -1721,10 +1721,10 @@ func TestPatch_ForceDisableCascades(t *testing.T) {
 	addManual(t, e, "base", nil)
 	addManual(t, e, "dep", []string{"base"})
 	on := true
-	if _, err := e.Patch("base", PatchRequest{Disabled: &on}); !errors.Is(err, ErrHasDependents) {
+	if _, err := e.Patch("base", &PatchRequest{Disabled: &on}); !errors.Is(err, ErrHasDependents) {
 		t.Errorf("unforced disable with dependents: err = %v, want ErrHasDependents", err)
 	}
-	jv, err := e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+	jv, err := e.Patch("base", &PatchRequest{Disabled: &on, Force: true})
 	if err != nil || jv == nil {
 		t.Fatalf("forced disable: %v %v", jv, err)
 	}
@@ -2609,7 +2609,7 @@ func TestRemove_RefusesAnEssentialTool(t *testing.T) {
 
 	t.Run("disable is still allowed", func(t *testing.T) {
 		yes := true
-		if _, err := e.Patch("gh", PatchRequest{Disabled: &yes, Force: true}); err != nil {
+		if _, err := e.Patch("gh", &PatchRequest{Disabled: &yes, Force: true}); err != nil {
 			t.Errorf("Patch(gh, disabled) = %v, want nil: disable is the escape hatch", err)
 		}
 	})
@@ -2781,7 +2781,7 @@ func TestPatch_PythonRequest(t *testing.T) {
 		e := pipEngine(t, "")
 		py := "3.13"
 
-		job, err := e.Patch("x", PatchRequest{Python: &py})
+		job, err := e.Patch("x", &PatchRequest{Python: &py})
 
 		if err != nil || job == nil {
 			t.Fatalf("Patch(python) = %v, %v, want an install job", job, err)
@@ -2796,19 +2796,19 @@ func TestPatch_PythonRequest(t *testing.T) {
 	t.Run("the same value enqueues nothing", func(t *testing.T) {
 		e := pipEngine(t, "3.13")
 		py := "3.13"
-		if job, err := e.Patch("x", PatchRequest{Python: &py}); err != nil || job != nil {
+		if job, err := e.Patch("x", &PatchRequest{Python: &py}); err != nil || job != nil {
 			t.Errorf("Patch(same python) = %v, %v, want nil, nil", job, err)
 		}
 	})
 	t.Run("a template stores the request without a job", func(t *testing.T) {
 		e := pipEngine(t, "")
 		disabled := true
-		if _, err := e.Patch("x", PatchRequest{Disabled: &disabled}); err != nil {
+		if _, err := e.Patch("x", &PatchRequest{Disabled: &disabled}); err != nil {
 			t.Fatal(err)
 		}
 		py := "3.13"
 
-		job, err := e.Patch("x", PatchRequest{Python: &py})
+		job, err := e.Patch("x", &PatchRequest{Python: &py})
 
 		if err != nil || job != nil {
 			t.Errorf("Patch(python) on a template = %v, %v, want nil, nil", job, err)
@@ -2821,7 +2821,7 @@ func TestPatch_PythonRequest(t *testing.T) {
 		e := pipEngine(t, "3.13")
 		py := "/usr/bin/python3"
 
-		job, err := e.Patch("x", PatchRequest{Python: &py})
+		job, err := e.Patch("x", &PatchRequest{Python: &py})
 
 		if err == nil || job != nil {
 			t.Errorf("Patch(python path) = %v, %v, want an error", job, err)
@@ -2834,7 +2834,7 @@ func TestPatch_PythonRequest(t *testing.T) {
 		e := newTestEngine(t, nil)
 		addManual(t, e, "m", nil)
 		py := "3.13"
-		if _, err := e.Patch("m", PatchRequest{Python: &py}); err == nil || !strings.Contains(err.Error(), "only to pip:") {
+		if _, err := e.Patch("m", &PatchRequest{Python: &py}); err == nil || !strings.Contains(err.Error(), "only to pip:") {
 			t.Errorf("Patch(python) on a manual row error = %v, want the pip-only refusal", err)
 		}
 	})
@@ -2950,10 +2950,112 @@ func TestPatch_PythonQueueFullRollsBack(t *testing.T) {
 	}
 	py := "3.14"
 
-	if _, err := e.Patch("x", PatchRequest{Python: &py}); err == nil {
+	if _, err := e.Patch("x", &PatchRequest{Python: &py}); err == nil {
 		t.Error("Patch(python) on a full queue succeeded, want the queue-full error")
 	}
 	if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
 		t.Errorf("python after the refused patch = %q, want 3.13 restored", m.Tools["x"].Python)
 	}
+}
+
+// TestPatch_VersionArgs: version_args is probe input only, so a patch stores
+// it without a job and the next probe grades the version it declares
+// (Tool.VersionArgs); execve(2) arguments are NUL-terminated, so a NUL
+// element is refused rather than stored as a tool that can never execute.
+func TestPatch_VersionArgs(t *testing.T) {
+	t.Run("declaring args stores them and the next probe grades the version", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		writeStub(t, e, "m", "echo m 9.9.9")
+		if !inventoryRow(t, e, "m").Installed {
+			t.Fatal("Setup: undeclared args should only require an answer")
+		}
+		args := []string{"--version"}
+
+		job, err := e.Patch("m", &PatchRequest{VersionArgs: &args})
+
+		if err != nil || job != nil {
+			t.Fatalf("Patch(version_args) = %v, %v, want nil, nil", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); !slices.Equal(m.Tools["m"].VersionArgs, args) {
+			t.Errorf("stored version_args = %q, want %q", m.Tools["m"].VersionArgs, args)
+		}
+		if inventoryRow(t, e, "m").Installed {
+			t.Error("row prints 9.9.9 against recorded 1 under declared args, want not installed")
+		}
+	})
+	t.Run("an empty list clears them", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		declared := []string{"version"}
+		if _, err := e.Patch("m", &PatchRequest{VersionArgs: &declared}); err != nil {
+			t.Fatal(err)
+		}
+		empty := []string{}
+
+		if _, err := e.Patch("m", &PatchRequest{VersionArgs: &empty}); err != nil {
+			t.Fatal(err)
+		}
+
+		if m, _ := e.store.LoadManifest(); m.Tools["m"].VersionArgs != nil {
+			t.Errorf("stored version_args = %q, want nil", m.Tools["m"].VersionArgs)
+		}
+	})
+	t.Run("a NUL element is refused and nothing changes", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		bad := []string{"--version\x00"}
+
+		job, err := e.Patch("m", &PatchRequest{VersionArgs: &bad})
+
+		if err == nil || job != nil || !strings.Contains(err.Error(), "NUL") {
+			t.Errorf("Patch(NUL version_args) = %v, %v, want the NUL refusal", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); m.Tools["m"].VersionArgs != nil {
+			t.Errorf("stored version_args = %q, want nil unchanged", m.Tools["m"].VersionArgs)
+		}
+	})
+}
+
+// TestAdd_VersionArgs: an Add may declare the probe's args like every other
+// manifest field; an empty list is the same as none, so the catalog's apply.
+func TestAdd_VersionArgs(t *testing.T) {
+	cat := &Catalog{Entries: map[string]CatalogEntry{
+		"c": {Source: SourceManual, Version: "1", VersionArgs: []string{"version"}},
+	}}
+	cases := []struct {
+		name string
+		req  AddRequest
+		want []string
+	}{
+		{name: "declared on the request", req: AddRequest{Name: "m", Source: SourceManual, Version: "1", VersionArgs: []string{"-V"}}, want: []string{"-V"}},
+		{name: "the request wins over the catalog", req: AddRequest{Name: "c", VersionArgs: []string{"-V"}}, want: []string{"-V"}},
+		{name: "an empty list takes the catalog's", req: AddRequest{Name: "c", VersionArgs: []string{}}, want: []string{"version"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, cat)
+			tc.req.Disabled = true
+
+			if _, err := e.Add(t.Context(), &tc.req); err != nil {
+				t.Fatal(err)
+			}
+
+			if m, _ := e.store.LoadManifest(); !slices.Equal(m.Tools[tc.req.Name].VersionArgs, tc.want) {
+				t.Errorf("stored version_args = %q, want %q", m.Tools[tc.req.Name].VersionArgs, tc.want)
+			}
+		})
+	}
+	t.Run("a NUL element is refused before the latest version is resolved", func(t *testing.T) {
+		e := newTestEngineClient(t, nil, offlineClient(), nil)
+
+		_, err := e.Add(t.Context(), &AddRequest{Name: "m", Source: "npm:m", VersionArgs: []string{"a\x00b"}})
+
+		if err == nil || err.Error() != "version_args[0] contains a NUL byte" {
+			t.Errorf("Add error = %v, want the NUL refusal", err)
+		}
+		if m, _ := e.store.LoadManifest(); len(m.Tools) != 0 {
+			t.Errorf("manifest = %v, want no row", m.Tools)
+		}
+	})
 }

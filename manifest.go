@@ -242,7 +242,10 @@ func validateTool(t *Tool) error {
 	if t.Version != "" && !validVersion(t.Source, t.Version) {
 		return versionRejected(t.Source, t.Version)
 	}
-	return validatePython(t.Source, t.Python)
+	if err := validatePython(t.Source, t.Python); err != nil {
+		return err
+	}
+	return validateVersionArgs(t.VersionArgs)
 }
 
 // writeManifestLocked refuses a document readManifestLocked would refuse:
