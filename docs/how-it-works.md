@@ -75,7 +75,7 @@ Disabling an essential tool still works. It uninstalls the files and keeps the e
 - `Jobs() (active *Job, recent []*Job)` and `CancelJob(id) bool` show the queue and cancel a job.
 - `RefreshCatalog() (*Job, error)` starts a catalog refresh, and returns `ErrRefreshNotConfigured` when `Config.Refresh` is unset. `CatalogInfo() CatalogInfo` describes the live catalog. [The catalog](catalog.md) has both.
 
-A call that starts a job returns `ErrQueueFull` when 8 jobs already wait, and `ErrShuttingDown` once `Close` has begun. A reconcile is never refused for a full queue, because one queued reconcile covers every later request. An `Add` or `Patch` whose job is refused leaves the manifest as it was, every field and every cascaded dependent included.
+A call that starts a job returns `ErrQueueFull` when 8 jobs already wait, and `ErrShuttingDown` once `Close` has begun. A reconcile is never refused for a full queue, because one queued reconcile covers every later request. An `Add`, `Patch` or `Remove` whose job is refused does not write the manifest, so every field and every cascaded dependent stay as they were, and an edit another call makes meanwhile is never undone.
 
 `*DependentsError` carries the names behind `ErrHasDependents` for `errors.As`, `*RootIntegrityError` carries every path behind `ErrRootIntegrity`, and `*GitHubRateLimitError` carries the detail behind `ErrGitHubRateLimited`. The result types `Inventory`, `ToolInfo`, `SystemTool` and `Job` are also what the REST handler sends.
 
@@ -95,7 +95,7 @@ A cancelled job carries `cancel_cause`. It is `shutdown` when `Close` stopped it
 
 ## Debian packages
 
-An `apt:` entry is manifest intent like any other and installs a Debian package. Removing an `apt:` entry stops the engine installing the package and leaves the package in place, because packages are shared and the engine cannot prove nothing else needs one. Pinning an `apt:` entry also holds the package with `apt-mark`, so apt does not move it as another package's dependency.
+An `apt:` entry is manifest intent like any other and installs a Debian package. Removing an `apt:` entry stops the engine installing the package and leaves the package in place, because packages are shared and the engine cannot prove nothing else needs one. Pinning an `apt:` entry also holds the package with `apt-mark`, so apt does not move it as another package's dependency. Unpinning releases the hold before the patch's own reinstall starts.
 
 `Inventory` lists the Debian packages on the host that no entry owns, leaving out the ones apt installed automatically and Debian's required and important packages.
 

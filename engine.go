@@ -42,7 +42,7 @@ var (
 	ErrRootIntegrity = errors.New("managed root failed the integrity check")
 	// ErrQueueFull marks a job refused because the queue already holds its
 	// cap of waiting jobs. Transient: the request may be retried, and a
-	// refused Add or Patch has left the manifest as it was.
+	// refused Add, Patch or Remove has not written the manifest.
 	ErrQueueFull = errors.New("too many queued tool jobs")
 	// ErrShuttingDown marks a job refused because Close has begun.
 	ErrShuttingDown = errors.New("engine shutting down")
@@ -466,32 +466,35 @@ func (e *Engine) Add(ctx context.Context, req *AddRequest) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	var res *job
 	err = e.store.MutateManifest(func(m *Manifest) error {
 		if _, exists := m.Tools[name]; exists {
 			return fmt.Errorf("tool %q already exists", name)
 		}
 		m.Tools[name] = t
-		return nil
+		if t.Disabled {
+			return nil
+		}
+		var rerr error
+		res, rerr = e.queue.reserve(JobKindInstall, []string{name}, nil)
+		return rerr
 	})
+	return e.commitJob(res, err)
+}
+
+// commitJob ends the transaction Add, Patch and remove share: the job is
+// reserved inside the manifest mutation, so a refusal aborts the write and
+// no rollback can clobber a concurrent edit, and it is published only after
+// the write, so the worker never runs it against the old manifest.
+func (e *Engine) commitJob(res *job, err error) (*Job, error) {
 	if err != nil {
+		e.queue.release(res)
 		return nil, err
 	}
-	if t.Disabled {
+	if res == nil {
 		return nil, nil
 	}
-	jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
-	if err != nil {
-		// Queue full: undo the manifest row so a rejected add doesn't
-		// leave phantom intent with no install job.
-		if rollback := e.store.MutateManifest(func(m *Manifest) error {
-			delete(m.Tools, name)
-			return nil
-		}); rollback != nil {
-			e.log.Error("toolbelt: add rollback failed", "error", rollback)
-		}
-		return nil, err
-	}
-	return jv, nil
+	return e.queue.publish(res), nil
 }
 
 // resolveNewTool merges the request with catalog knowledge and, for
@@ -640,14 +643,11 @@ type PatchRequest struct {
 	Force bool `json:"force,omitempty"`
 }
 
-// patchOutcome records what a Patch mutation changed (for job selection
-// and rollback).
+// patchOutcome records what a Patch mutation changed, for job selection
+// and the apt hold.
 type patchOutcome struct {
-	source   string
-	cascaded []string
-	// before and after are the row around applyPatch, for revert.
-	before          Tool
-	after           Tool
+	source          string
+	cascaded        []string
 	versionChanged  bool
 	pythonChanged   bool
 	disabledChanged bool
@@ -665,27 +665,35 @@ type patchOutcome struct {
 // footprint uninstall (template kept), version or python change on an
 // enabled tool → reinstall. Returns nil when no job is needed.
 func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
-	var out patchOutcome
+	var (
+		out patchOutcome
+		res *job
+	)
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return patchManifest(m, name, req, &out, e.backends())
+		if err := patchManifest(m, name, req, &out, e.backends()); err != nil {
+			return err
+		}
+		kind, names := out.job(name)
+		if kind == "" {
+			return nil
+		}
+		var rerr error
+		res, rerr = e.queue.reserve(kind, names, nil)
+		return rerr
 	})
-	if err != nil {
-		return nil, err
+	if err == nil {
+		e.applyAptHold(name, &out)
 	}
-	jv, err := e.patchJob(name, &out)
-	if err != nil {
-		return nil, err
-	}
-	e.applyAptHold(name, &out)
-	return jv, nil
+	return e.commitJob(res, err)
 }
 
 // applyAptHold holds a pinned apt package with `apt-mark hold` and releases
 // the hold when the pin comes off: apt upgrades a package as another
 // install's dependency, and a hold is the only thing apt respects.
 //
-// It fires only on a pin transition, after patchJob, so a refused patch
-// never reaches dpkg. A failure warns and leaves the manifest pin in force.
+// Patch calls it between the manifest write and the job's publish, so a
+// refused patch never reaches dpkg and the patch's reinstall never meets a
+// stale hold. A failure warns and leaves the manifest pin in force.
 func (e *Engine) applyAptHold(name string, out *patchOutcome) {
 	pkg, ok := strings.CutPrefix(out.source, SourceApt+":")
 	if !ok || !out.pinChanged || !AptAvailable() {
@@ -718,9 +726,7 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 			return &DependentsError{Dependents: deps}
 		}
 	}
-	before := t
 	*out = applyPatch(&t, req)
-	out.before, out.after = before, t
 	m.Tools[name] = t
 	// A forced disable cascades to the enabled dependents (one level,
 	// mirroring RemoveWithDependents): a dependent left enabled would
@@ -737,8 +743,7 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 }
 
 // applyPatch overlays the request's set fields onto t, reporting the
-// transitions for job selection. A field it sets that revert does not
-// restore survives a patch the queue refused.
+// transitions for job selection.
 func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	var out patchOutcome
 	if req.Version != nil && *req.Version != t.Version {
@@ -780,68 +785,16 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	return out
 }
 
-// revert undoes applyPatch on t field by field, restoring only a field that
-// still holds the patched value so an edit made since survives.
-func (out *patchOutcome) revert(t *Tool) {
-	b, a := &out.before, &out.after
-	restoreField(&t.Version, b.Version, a.Version)
-	restoreField(&t.Python, b.Python, a.Python)
-	restoreField(&t.Disabled, b.Disabled, a.Disabled)
-	restoreField(&t.Pin, b.Pin, a.Pin)
-	restoreField(&t.Description, b.Description, a.Description)
-	restoreField(&t.Install, b.Install, a.Install)
-	restoreField(&t.Uninstall, b.Uninstall, a.Uninstall)
-	if slices.Equal(t.Requires, a.Requires) {
-		t.Requires = slices.Clone(b.Requires)
-	}
-	if slices.Equal(t.VersionArgs, a.VersionArgs) {
-		t.VersionArgs = slices.Clone(b.VersionArgs)
-	}
-}
-
-func restoreField[T comparable](cur *T, before, after T) {
-	if *cur == after {
-		*cur = before
-	}
-}
-
-// patchJob enqueues the job a patch outcome requires. When the queue
-// refuses it the whole patch is rolled back, cascade included, so the
-// manifest never claims a state no job will realize.
-func (e *Engine) patchJob(name string, out *patchOutcome) (*Job, error) {
-	var (
-		jv  *Job
-		err error
-	)
+// job names the job kind and tools the patch needs, or "" for none.
+func (out *patchOutcome) job(name string) (kind string, names []string) {
 	switch {
 	case out.disabledChanged && out.nowDisabled:
-		jv, err = e.queue.Enqueue(JobKindDisable, append([]string{name}, out.cascaded...))
+		return JobKindDisable, append([]string{name}, out.cascaded...)
 	case out.disabledChanged && !out.nowDisabled,
 		(out.versionChanged || out.pythonChanged) && !out.nowDisabled:
-		jv, err = e.queue.Enqueue(JobKindInstall, []string{name})
+		return JobKindInstall, []string{name}
 	default:
-		return nil, nil
-	}
-	if err != nil {
-		e.rollbackPatch(name, out.revert)
-		for _, d := range out.cascaded {
-			e.rollbackPatch(d, func(t *Tool) { restoreField(&t.Disabled, false, true) })
-		}
-		return nil, err
-	}
-	return jv, nil
-}
-
-// rollbackPatch applies undo to one row after a rejected enqueue.
-func (e *Engine) rollbackPatch(name string, undo func(*Tool)) {
-	if err := e.store.MutateManifest(func(m *Manifest) error {
-		if t, ok := m.Tools[name]; ok {
-			undo(&t)
-			m.Tools[name] = t
-		}
-		return nil
-	}); err != nil {
-		e.log.Error("toolbelt: patch rollback failed", "tool", name, "error", err)
+		return "", nil
 	}
 }
 
@@ -950,25 +903,22 @@ func (e *Engine) RemoveWithDependents(name string) (*Job, []string, error) {
 // between the two exported methods, and it is unexported precisely so no
 // caller has to read a bare boolean at a call site.
 func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
-	var dependents []string
+	var (
+		dependents []string
+		res        *job
+	)
 	removed := map[string]Tool{}
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge())
+		if err := removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge()); err != nil {
+			return err
+		}
+		names := slices.Sorted(maps.Keys(removed))
+		var rerr error
+		res, rerr = e.queue.reserve(JobKindUninstall, names, removed)
+		return rerr
 	})
-	if err != nil {
-		return nil, dependents, err
-	}
-	names := make([]string, 0, len(removed))
-	for n := range removed {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-	jv, err := e.queue.EnqueueRemoval(names, removed)
-	if err != nil {
-		e.rollbackRemoval(removed)
-		return nil, dependents, err
-	}
-	return jv, dependents, nil
+	jv, err := e.commitJob(res, err)
+	return jv, dependents, err
 }
 
 // removeKnowledge is the CATALOG-derived input a removal needs: what
@@ -1039,23 +989,6 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 		}
 	}
 	return nil
-}
-
-// rollbackRemoval restores manifest rows after a rejected uninstall job
-// so intent and on-disk reality don't diverge (the tool is still
-// installed on disk).
-func (e *Engine) rollbackRemoval(removed map[string]Tool) {
-	rollback := e.store.MutateManifest(func(m *Manifest) error {
-		for n := range removed {
-			if _, exists := m.Tools[n]; !exists {
-				m.Tools[n] = removed[n]
-			}
-		}
-		return nil
-	})
-	if rollback != nil {
-		e.log.Error("toolbelt: remove rollback failed", "error", rollback)
-	}
 }
 
 // Reconcile enqueues the convergence job: install missing enabled entries,
