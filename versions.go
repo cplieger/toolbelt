@@ -33,6 +33,10 @@ const versionResponseCap = 4 << 20
 // prereleases for a tool not recorded at one.
 var errOnlyPrereleases = errors.New("only prereleases are published; record a prerelease version to follow them")
 
+// errAllRetracted is the answer of a Go module whose every listed version is
+// retracted; the go command's "latest" finds no version then either.
+var errAllRetracted = errors.New("every published version is retracted")
+
 // versionResolver finds the latest upstream version for a tool source.
 // Results are cached in memory so Inventory can surface "update
 // available" without network calls; the cache is refreshed by update
@@ -506,11 +510,7 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 	if len(listed) == 0 {
 		return v.moduleLatestQuery(ctx, base, modPath, allowPre)
 	}
-	pick := highestModuleVersion(listed, allowPre)
-	if pick == "" {
-		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
-	}
-	retracted, err := v.moduleRetractions(ctx, base, pick)
+	retracted, err := v.moduleRetractions(ctx, base, retractionSource(listed))
 	if err != nil {
 		return "", false, err
 	}
@@ -519,10 +519,24 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 			return semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0
 		})
 	})
-	if p := highestModuleVersion(kept, allowPre); p != "" {
-		pick = p
+	if len(kept) == 0 {
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errAllRetracted)
+	}
+	pick := highestModuleVersion(kept, allowPre)
+	if pick == "" {
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
 	}
 	return pick, true, nil
+}
+
+// retractionSource is the version whose go.mod carries the retractions the go
+// command applies: its "latest" with retractions ignored, the highest release
+// or else the highest prerelease, whatever the row is recorded at.
+func retractionSource(listed []string) string {
+	if rel := highestModuleVersion(listed, false); rel != "" {
+		return rel
+	}
+	return highestModuleVersion(listed, true)
 }
 
 // moduleLatestQuery reads @latest, which for a module with no tagged version

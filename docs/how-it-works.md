@@ -36,7 +36,7 @@ A source names where a tool comes from.
 
 A language source is a tool too. An `npm:` install adds `node` from the catalog, `pip:` adds `uv`, `cargo:` adds `rust`, and `go:` adds the Go toolchain.
 
-A `go:` entry names the package `go install` builds, such as `golang.org/x/tools/gopls`. Its latest version comes from the Go module proxy's version list for the module that contains the package, leaving out retracted versions.
+A `go:` entry names the package `go install` builds, such as `golang.org/x/tools/gopls`. Its latest version comes from the Go module proxy's version list for the module that contains the package, leaving out retracted versions. When every listed version is retracted, the lookup fails, as `go install <package>@latest` does.
 
 uv builds each `pip:` tool on a Python interpreter it downloads into `python/interpreters` under `ToolsDir`, never on a Python found on `PATH`. An entry's `python` field, such as `3.14`, asks for a version, for a package whose wheels do not yet support the newest Python. Without it, uv takes the newest interpreter already in that directory, or downloads the newest.
 

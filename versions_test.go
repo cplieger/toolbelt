@@ -684,24 +684,72 @@ func TestLatestGoModule_SkipsPrereleases(t *testing.T) {
 	}
 }
 
-// The go command leaves retracted versions out of "latest"
-// (https://go.dev/ref/mod#go-mod-file-retract); the retractions are read from
-// the latest version's go.mod.
+// The go command leaves retracted versions out of "latest" and reads the
+// retractions from the go.mod of the version "latest" names when nothing is
+// retracted: the highest release, else the highest prerelease
+// (https://go.dev/ref/mod#go-mod-file-retract).
 func TestLatestGoModule_SkipsRetractedVersions(t *testing.T) {
 	cases := []struct {
-		name, mod, want string
+		name, list, recorded, want string
+		mods                       map[string]string
+		wantErr                    error
 	}{
-		{name: "single version retracted", mod: "module example.com/m\nretract v1.1.0\n", want: "v1.0.0"},
-		{name: "range retracted", mod: "module example.com/m\nretract [v1.0.5, v1.1.0]\n", want: "v1.0.0"},
-		{name: "everything retracted keeps the highest", mod: "module example.com/m\nretract [v1.0.0, v1.1.0]\n", want: "v1.1.0"},
+		{
+			name: "single version retracted",
+			list: "v1.0.0\nv1.1.0\n",
+			mods: map[string]string{"v1.1.0": "module example.com/m\nretract v1.1.0\n"},
+			want: "v1.0.0",
+		},
+		{
+			name: "range retracted",
+			list: "v1.0.0\nv1.1.0\n",
+			mods: map[string]string{"v1.1.0": "module example.com/m\nretract [v1.0.5, v1.1.0]\n"},
+			want: "v1.0.0",
+		},
+		{
+			name:    "every version retracted",
+			list:    "v1.0.0\nv1.1.0\n",
+			mods:    map[string]string{"v1.1.0": "module example.com/m\nretract [v1.0.0, v1.1.0]\n"},
+			wantErr: errAllRetracted,
+		},
+		{
+			name:     "every version retracted on a prerelease row",
+			list:     "v1.0.0\nv1.1.0-rc.1\n",
+			recorded: "v1.1.0-beta.1",
+			mods:     map[string]string{"v1.0.0": "module example.com/m\nretract [v1.0.0, v1.1.0-rc.1]\n"},
+			wantErr:  errAllRetracted,
+		},
+		{
+			name:    "only a prerelease survives on a stable row",
+			list:    "v1.0.0\nv1.1.0-rc.1\n",
+			mods:    map[string]string{"v1.0.0": "module example.com/m\nretract v1.0.0\n"},
+			wantErr: errOnlyPrereleases,
+		},
+		{
+			name:     "a prerelease row reads the retractions of the highest release",
+			list:     "v1.0.0\nv1.1.0-rc.1\n",
+			recorded: "v1.1.0-beta.1",
+			mods: map[string]string{
+				"v1.0.0":      "module example.com/m\nretract v1.1.0-rc.1\n",
+				"v1.1.0-rc.1": "module example.com/m\n",
+			},
+			want: "v1.0.0",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			v, _ := goProxy(t, map[string]string{
-				"/example.com/m/@v/list":       "v1.0.0\nv1.1.0\n",
-				"/example.com/m/@v/v1.1.0.mod": tc.mod,
-			})
-			got, err := v.Latest(t.Context(), &Tool{Source: "go:example.com/m"}, nil)
+			routes := map[string]string{"/example.com/m/@v/list": tc.list}
+			for ver, mod := range tc.mods {
+				routes["/example.com/m/@v/"+ver+".mod"] = mod
+			}
+			v, _ := goProxy(t, routes)
+			got, err := v.Latest(t.Context(), &Tool{Source: "go:example.com/m", Version: tc.recorded}, nil)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Errorf("Latest = %q, %v; want %v", got, err, tc.wantErr)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
