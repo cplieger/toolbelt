@@ -2,6 +2,7 @@ package toolbelt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -331,14 +332,107 @@ func TestLatestTag(t *testing.T) {
 		{name: "go rc is a prerelease", candidates: []string{"go1.28rc1", "go1.27.3"}, want: "go1.27.3"},
 		{name: "prerelease allowed wins", candidates: []string{"v1.3.0-rc.1", "v1.2.0"}, allowPre: true, want: "v1.3.0-rc.1"},
 		{name: "release above a prerelease wins when allowed", candidates: []string{"v1.3.0-rc.1", "v1.3.0"}, allowPre: true, want: "v1.3.0"},
-		{name: "only prereleases takes the highest", candidates: []string{"v2.0.0-beta.1", "v2.0.0-rc.1"}, want: "v2.0.0-rc.1"},
-		{name: "an unparsed tag never beats a prerelease", candidates: []string{"latest", "v2.0.0-rc.1"}, want: "v2.0.0-rc.1"},
+		{name: "only prereleases leave nothing", candidates: []string{"v2.0.0-beta.1", "v2.0.0-rc.1"}, want: ""},
+		{name: "only prereleases when allowed takes the highest", candidates: []string{"v2.0.0-beta.1", "v2.0.0-rc.1"}, allowPre: true, want: "v2.0.0-rc.1"},
+		{name: "an unparsed tag is no release", candidates: []string{"latest", "v2.0.0-rc.1"}, want: ""},
+		{name: "an unparsed tag never beats a prerelease", candidates: []string{"latest", "v2.0.0-rc.1"}, allowPre: true, want: "v2.0.0-rc.1"},
+		{name: "unparsed tags alone compare by name", candidates: []string{"nightly", "stable"}, want: "stable"},
 		{name: "date tags compare", candidates: []string{"2024-12-01", "2025-01-06"}, want: "2025-01-06"},
+		{name: "a date tag beats a later dated prerelease", candidates: []string{"2025-01-06", "2025-02-01-rc1"}, want: "2025-01-06"},
+		{name: "no candidates", want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := latestTag(tc.candidates, "", tc.allowPre); got != tc.want {
 				t.Errorf("latestTag(%v, allowPre=%v) = %q, want %q", tc.candidates, tc.allowPre, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsPrereleaseTag(t *testing.T) {
+	cases := []struct {
+		tag  string
+		want bool
+	}{
+		{"v27.0.0-alpha.0.0.0", true},
+		{"go1.28rc1", true},
+		{"v0.0.0-20261011093844-7a2c2c0b7aa6", true},
+		{"2025-02-01-rc1", true},
+		{"v1.2.3", false},
+		{"2025-01-06", false},
+		{"latest", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			if got := isPrereleaseTag(tc.tag, ""); got != tc.want {
+				t.Errorf("isPrereleaseTag(%q) = %v, want %v", tc.tag, got, tc.want)
+			}
+		})
+	}
+}
+
+// Every list source refuses a row that is not on a prerelease line when it
+// lists only prereleases (or, for Go, only a pseudo-version), and a row
+// recorded at a prerelease follows them.
+func TestLatest_OnlyPrereleasesListed(t *testing.T) {
+	const pseudo = "v0.0.0-20261011093844-7a2c2c0b7aa6"
+	node := &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "nodejs", RepoName: "node"}
+	golang := &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "golang", RepoName: "go"}
+	cases := []struct {
+		name, source, stable, pre, want string
+		aq                              *AquaPackage
+		routes                          map[string]string
+	}{
+		{
+			name: "node index", source: "aqua:nodejs/node", aq: node, stable: "v26.13.0", pre: "v27.0.0-alpha.0", want: "v27.0.0-alpha.0.0.0",
+			routes: map[string]string{"nodejs.org/dist/index.json": `[{"version":"v27.0.0-alpha.0.0.0"}]`},
+		},
+		{
+			name: "go index", source: "aqua:golang/go", aq: golang, stable: "go1.27.3", pre: "go1.28rc0", want: "go1.28rc1",
+			routes: map[string]string{"go.dev/dl/": `[{"version":"go1.28rc1"}]`},
+		},
+		{
+			name: "github tag list", source: "aqua:o/r", aq: &AquaPackage{VersionSource: "github_tag"}, pre: "v3.0.0-beta.1", want: "v3.0.0-rc.1",
+			routes: map[string]string{"api.github.com/repos/o/r/tags": `[{"name":"v3.0.0-rc.1"}]`},
+		},
+		{
+			name: "gitlab releases", source: "release:gitlab/o/r", stable: "v2.0.0", pre: "v2.1.0-rc0", want: "v2.1.0-rc1",
+			routes: map[string]string{"gitlab.com/api/v4/projects/o/r/releases": `[{"tag_name":"v2.1.0-rc1"}]`},
+		},
+		{
+			name: "go module list", source: "go:example.com/m", stable: "v1.2.0", pre: "v1.3.0-beta.1", want: "v1.3.0-rc.1",
+			routes: map[string]string{"proxy.golang.org/example.com/m/@v/list": "v1.3.0-rc.1\n"},
+		},
+		{
+			name: "go module pseudo-version", source: "go:mvdan.cc/unparam", pre: pseudo, want: pseudo,
+			routes: map[string]string{
+				"proxy.golang.org/mvdan.cc/unparam/@v/list": "",
+				"proxy.golang.org/mvdan.cc/unparam/@latest": `{"Version":"` + pseudo + `"}`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, ok := tc.routes[r.Host+r.URL.Path]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprint(w, body)
+		}))
+		t.Run(tc.name+" refuses a stable row", func(t *testing.T) {
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source, Version: tc.stable}, tc.aq)
+			if !errors.Is(err, errOnlyPrereleases) {
+				t.Errorf("Latest(recorded %q) = %q, %v; want errOnlyPrereleases", tc.stable, got, err)
+			}
+		})
+		t.Run(tc.name+" follows a prerelease row", func(t *testing.T) {
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source, Version: tc.pre}, tc.aq)
+			if err != nil || got != tc.want {
+				t.Errorf("Latest(recorded %q) = %q, %v; want %q", tc.pre, got, err, tc.want)
 			}
 		})
 	}
@@ -587,21 +681,6 @@ func TestLatestGoModule_SkipsPrereleases(t *testing.T) {
 				t.Errorf("Latest(recorded %q) = %q, want %q", tc.recorded, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestLatestGoModule_PseudoVersionOnlyModule(t *testing.T) {
-	const pseudo = "v0.0.0-20261011093844-7a2c2c0b7aa6"
-	v, _ := goProxy(t, map[string]string{
-		"/mvdan.cc/unparam/@v/list": "",
-		"/mvdan.cc/unparam/@latest": `{"Version":"` + pseudo + `"}`,
-	})
-	got, err := v.Latest(t.Context(), &Tool{Source: "go:mvdan.cc/unparam"}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != pseudo {
-		t.Errorf("Latest = %q, want %q", got, pseudo)
 	}
 }
 

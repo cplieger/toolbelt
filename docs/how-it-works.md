@@ -40,7 +40,7 @@ A `go:` entry names the package `go install` builds, such as `golang.org/x/tools
 
 uv builds each `pip:` tool on a Python interpreter it downloads into `python/interpreters` under `ToolsDir`, never on a Python found on `PATH`. An entry's `python` field, such as `3.14`, asks for a version, for a package whose wheels do not yet support the newest Python. Without it, uv takes the newest interpreter already in that directory, or downloads the newest.
 
-Where a source lists several versions, the engine takes the highest release and skips prereleases, unless the recorded version is itself a prerelease or the list holds no release. The node and go release indexes, GitHub tag lists, GitLab releases and the Go module proxy are read this way. npm, PyPI, crates.io, apt and GitHub's latest release name one version, and the engine takes it.
+Where a source lists several versions, the engine takes the highest release and skips prereleases, unless the recorded version is itself a prerelease. When a list holds only prereleases, a tool not recorded at a prerelease has no latest version, and the lookup fails saying so. A Go module with no tagged version is such a list, because its latest is a pseudo-version. A date tag such as `2025-01-06` counts as a release. The node and go release indexes, GitHub tag lists, GitLab releases and the Go module proxy are read this way. npm, PyPI, crates.io, apt and GitHub's latest release name one version, and the engine takes it.
 
 ## Dependencies
 

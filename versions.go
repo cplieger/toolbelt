@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -27,6 +28,10 @@ const versionLookupBudget = 45 * time.Second
 
 // versionResponseCap bounds one version-lookup response body.
 const versionResponseCap = 4 << 20
+
+// errOnlyPrereleases is the answer of a version list holding nothing but
+// prereleases for a tool not recorded at one.
+var errOnlyPrereleases = errors.New("only prereleases are published; record a prerelease version to follow them")
 
 // versionResolver finds the latest upstream version for a tool source.
 // Results are cached in memory so Inventory can surface "update
@@ -173,7 +178,10 @@ func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef
 		}
 	}
 	if len(tags) > 0 {
-		return latestTag(tags, "", allowPre), nil
+		if pick := latestTag(tags, "", allowPre); pick != "" {
+			return pick, nil
+		}
+		return "", fmt.Errorf("%s/%s on gitlab: %w", rr.Owner, rr.Repo, errOnlyPrereleases)
 	}
 	if len(rels) == 0 || rels[0].TagName == "" {
 		return "", fmt.Errorf("%s/%s has no releases", rr.Owner, rr.Repo)
@@ -253,7 +261,10 @@ func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no version in %s passes the version filter", feedURL)
 	}
-	return latestTag(candidates, prefix, allowPre), nil
+	if pick := latestTag(candidates, prefix, allowPre); pick != "" {
+		return pick, nil
+	}
+	return "", fmt.Errorf("%s: %w", feedURL, errOnlyPrereleases)
 }
 
 // tagPageCap bounds the GitHub tag pagination walk. golang/go needs
@@ -295,7 +306,10 @@ func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo strin
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no tag of %s/%s passes the version filter", owner, repo)
 	}
-	return latestTag(candidates, prefix, allowPre), nil
+	if pick := latestTag(candidates, prefix, allowPre); pick != "" {
+		return pick, nil
+	}
+	return "", fmt.Errorf("tags of %s/%s: %w", owner, repo, errOnlyPrereleases)
 }
 
 // tagPasses reports whether a tag satisfies the package's version prefix
@@ -307,29 +321,45 @@ func tagPasses(name, prefix, filter string) bool {
 	return evalVersionFilter(filter, name, prefix)
 }
 
-// latestTag picks the highest candidate as maxVersionTag does, counting a
-// prerelease only when allowPre is set or no candidate is a release, so a
-// project that publishes only prereleases still resolves.
+// latestTag picks the highest candidate as maxVersionTag does, leaving out
+// prereleases unless allowPre is set. Tags that parse as no version count
+// only when none does. Empty means no candidate is eligible.
 func latestTag(candidates []string, prefix string, allowPre bool) string {
-	if !allowPre {
-		var releases []string
-		for _, c := range candidates {
-			if ver := parseTagVersion(c, prefix); ver != nil && ver.Prerelease() == "" {
-				releases = append(releases, c)
-			}
+	var versioned []string
+	parsed := false
+	for _, c := range candidates {
+		ver := parseTagVersion(c, prefix)
+		if ver == nil {
+			continue
 		}
-		if len(releases) > 0 {
-			candidates = releases
+		parsed = true
+		if allowPre || !isPrerelease(ver) {
+			versioned = append(versioned, c)
 		}
 	}
-	return maxVersionTag(candidates, prefix)
+	switch {
+	case len(versioned) > 0:
+		return maxVersionTag(versioned, prefix)
+	case parsed || len(candidates) == 0:
+		return ""
+	default:
+		return maxVersionTag(candidates, prefix)
+	}
 }
 
 // isPrereleaseTag reports whether tag parses as a version with a prerelease
 // part (v27.0.0-alpha.0, go1.28rc1, a Go pseudo-version).
 func isPrereleaseTag(tag, prefix string) bool {
 	ver := parseTagVersion(tag, prefix)
-	return ver != nil && ver.Prerelease() != ""
+	return ver != nil && isPrerelease(ver)
+}
+
+// isoDateVersion matches a date tag, which go-version reads as a year with a
+// prerelease part ("2025-01-06" is 2025 with prerelease "01-06").
+var isoDateVersion = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+func isPrerelease(ver *goversion.Version) bool {
+	return ver.Prerelease() != "" && !isoDateVersion.MatchString(ver.Original())
 }
 
 // maxVersionTag picks the highest candidate by go-version comparison
@@ -472,23 +502,13 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 	if err != nil {
 		return "", false, err
 	}
-	listed := strings.Fields(string(body))
+	listed := moduleCandidates(strings.Fields(string(body)))
+	if len(listed) == 0 {
+		return v.moduleLatestQuery(ctx, base, modPath, allowPre)
+	}
 	pick := highestModuleVersion(listed, allowPre)
 	if pick == "" {
-		var doc struct {
-			Version string `json:"Version"`
-		}
-		lerr := v.getJSON(ctx, base+"latest", &doc)
-		if isNotFound(lerr) {
-			return "", false, nil
-		}
-		if lerr != nil {
-			return "", false, lerr
-		}
-		if doc.Version == "" {
-			return "", false, fmt.Errorf("go module %q has no latest version", modPath)
-		}
-		return doc.Version, true, nil
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
 	}
 	retracted, err := v.moduleRetractions(ctx, base, pick)
 	if err != nil {
@@ -503,6 +523,28 @@ func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath strin
 		pick = p
 	}
 	return pick, true, nil
+}
+
+// moduleLatestQuery reads @latest, which for a module with no tagged version
+// is a pseudo-version of its newest commit, so it counts as a prerelease.
+func (v *versionResolver) moduleLatestQuery(ctx context.Context, base, modPath string, allowPre bool) (version string, found bool, err error) {
+	var doc struct {
+		Version string `json:"Version"`
+	}
+	err = v.getJSON(ctx, base+"latest", &doc)
+	if isNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if doc.Version == "" {
+		return "", false, fmt.Errorf("go module %q has no latest version", modPath)
+	}
+	if !allowPre && semver.Prerelease(doc.Version) != "" {
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
+	}
+	return doc.Version, true, nil
 }
 
 // moduleRetractions reads the retract directives of the module's go.mod at
@@ -531,20 +573,14 @@ func (v *versionResolver) moduleRetractions(ctx context.Context, base, version s
 	return out, nil
 }
 
-// highestModuleVersion picks the go command's "latest" from a version list:
-// canonical semver only, +incompatible versions only when nothing else is
-// listed, the highest release, else the highest prerelease. allowPre lets a
-// prerelease above every release win. Empty means the list holds no usable
-// version.
-func highestModuleVersion(listed []string, allowPre bool) string {
-	candidates := moduleCandidates(listed)
+// highestModuleVersion picks the highest of moduleCandidates' versions,
+// leaving out prereleases unless allowPre is set. Empty means none is
+// eligible.
+func highestModuleVersion(candidates []string, allowPre bool) string {
 	if !allowPre {
-		releases := slices.DeleteFunc(slices.Clone(candidates), func(ver string) bool {
+		candidates = slices.DeleteFunc(slices.Clone(candidates), func(ver string) bool {
 			return semver.Prerelease(ver) != ""
 		})
-		if len(releases) > 0 {
-			candidates = releases
-		}
 	}
 	if len(candidates) == 0 {
 		return ""
@@ -552,6 +588,9 @@ func highestModuleVersion(listed []string, allowPre bool) string {
 	return slices.MaxFunc(candidates, semver.Compare)
 }
 
+// moduleCandidates keeps the versions the go command considers for "latest":
+// canonical semver, and +incompatible versions only when nothing else is
+// listed.
 func moduleCandidates(listed []string) []string {
 	var compatible, incompatible []string
 	for _, ver := range listed {
