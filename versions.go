@@ -34,12 +34,12 @@ const versionResponseCap = 4 << 20
 // prereleases for a tool not recorded at one.
 var errOnlyPrereleases = errors.New("only prereleases are published; record a prerelease version to follow them")
 
-// errAllRetracted is the answer of a Go module whose every listed version is
-// retracted; the go command's "latest" finds no version then either.
 // errIncompleteWalk is the answer of a paginated list still full at
 // listPageCap: a later page may hold the highest version.
 var errIncompleteWalk = errors.New("the version list runs past the page cap")
 
+// errAllRetracted is the answer of a Go module whose every listed version is
+// retracted; the go command's "latest" finds no version then either.
 var errAllRetracted = errors.New("every published version is retracted")
 
 // versionResolver finds the latest upstream version for a tool source.

@@ -1471,8 +1471,6 @@ func TestChecksumConfigured_FailsClosed(t *testing.T) {
 	}
 }
 
-// saturateQueue fills the job queue behind a running job, so the next
-// Enqueue is refused.
 func saturateQueue(t *testing.T, e *Engine) {
 	t.Helper()
 	slow, err := e.Add(t.Context(), &AddRequest{
@@ -3072,7 +3070,6 @@ func TestPatch_QueueFullLeavesEveryField(t *testing.T) {
 	})
 }
 
-// assertPatchFields compares every field a PatchRequest can set.
 func assertPatchFields(t *testing.T, got, want Tool) {
 	t.Helper()
 	if got.Version != want.Version || got.Python != want.Python || got.Disabled != want.Disabled ||

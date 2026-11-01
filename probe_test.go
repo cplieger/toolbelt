@@ -440,7 +440,6 @@ func writeVenv(t *testing.T, e *Engine, venv, home string) {
 	}
 }
 
-// newInterpreterHome returns an interpreter bin directory holding python3.
 func newInterpreterHome(t *testing.T) string {
 	t.Helper()
 	home := filepath.Join(t.TempDir(), "cpython-3.15.2", "bin")
