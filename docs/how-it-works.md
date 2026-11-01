@@ -31,10 +31,16 @@ A source names where a tool comes from.
 - `aqua:owner/repo` downloads a binary artifact from an aqua registry definition and checks the upstream checksum the definition declares.
 - `release:github/owner/repo` or `release:gitlab/owner/repo` downloads a forge release asset, chosen from the release's file names.
 - `apt:package` installs a Debian package. It needs a Debian-based image and root.
-- `npm:pkg`, `pip:pkg`, `cargo:crate` and `go:module` install through each language's package tool. `pip:` uses uv.
+- `npm:pkg`, `pip:pkg`, `cargo:crate` and `go:<package path>` install through each language's package tool. `pip:` uses uv.
 - `manual` runs a bash install script you write.
 
 A language source is a tool too. An `npm:` install adds `node` from the catalog, `pip:` adds `uv`, `cargo:` adds `rust`, and `go:` adds the Go toolchain.
+
+A `go:` entry names the package `go install` builds, such as `golang.org/x/tools/gopls`. Its latest version comes from the Go module proxy's version list for the module that contains the package, leaving out retracted versions.
+
+uv builds each `pip:` tool on a Python interpreter it downloads into `python/interpreters` under `ToolsDir`, never on a Python found on `PATH`. An entry's `python` field, such as `3.14`, asks for a version, for a package whose wheels do not yet support the newest Python. Without it, uv takes the newest interpreter already in that directory, or downloads the newest.
+
+Where a source lists several versions, the engine takes the highest release and skips prereleases, unless the recorded version is itself a prerelease or the list holds no release. The node and go release indexes, GitHub tag lists, GitLab releases and the Go module proxy are read this way. npm, PyPI, crates.io, apt and GitHub's latest release name one version, and the engine takes it.
 
 ## Dependencies
 

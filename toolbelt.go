@@ -35,7 +35,7 @@ const (
 	SourceNpm     = "npm"     // npm:package
 	SourcePip     = "pip"     // pip:package (installed via uv)
 	SourceCargo   = "cargo"   // cargo:crate
-	SourceGo      = "go"      // go:module/path
+	SourceGo      = "go"      // go:package/path (what go install builds)
 	SourceApt     = "apt"     // apt:package — Debian package, container layer
 	SourceRelease = "release" // release:<github|gitlab>/owner/repo — forge release asset
 	SourceManual  = "manual"  // user-provided install command

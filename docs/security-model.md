@@ -12,6 +12,8 @@ A `release:` install checks the release's own checksum file when the release pub
 
 The engine checks an install by running it, not by looking for the file. The recorded binaries must exist and the tool must answer when run. With `version_args`, the answer must carry the recorded version. A binary that is cut short, built for the wrong architecture or at the wrong version counts as not installed and is installed again. A recorded binary that cannot be run at all falls back to a presence check, with a warning.
 
+Two kinds of install have nothing to run. A Debian package counts as installed when dpkg reports it. An npm package that ships no binary, such as a shared config, counts as installed when the `package.json` npm installed for it carries the recorded version. A `pip:` tool whose Python interpreter is gone counts as not installed and is installed again, though its launcher file has not changed.
+
 The same check runs as the last step of an install. A binary the system refuses to start fails the install rather than being recorded at its version. Exit status 127 counts as such a refusal, and the loader's own message goes into the recorded error, so it names a missing library. Any other non-zero exit is still an answer, because a tool that does not understand `--version` has still shown it can run. The check runs after the state is recorded and before old versions are pruned, so a failed check leaves the previous version in place.
 
 ## Writing to disk
