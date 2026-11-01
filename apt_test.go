@@ -56,25 +56,32 @@ func TestAptValidName(t *testing.T) {
 
 // TestAptStatusFrom is the dpkg state table; the removed-config-files row is
 // the defect aptStatusFrom exists to catch (see its doc comment), and the
-// want word is apt-mark's hold (dpkg-query(1)).
+// want word is apt-mark's hold whatever the status (dpkg-query(1)).
 func TestAptStatusFrom(t *testing.T) {
 	cases := []struct {
-		state string
-		out   string
-		want  aptStatus
+		state   string
+		out     string
+		want    aptStatus
+		wantErr bool
 	}{
 		{state: "installed", out: "install installed 5.2.37-2+b9\n", want: aptStatus{version: "5.2.37-2+b9", installed: true}},
 		{state: "held", out: "hold installed 1.7.1-6\n", want: aptStatus{version: "1.7.1-6", installed: true, held: true}},
 		{state: "removed-config-files", out: "deinstall config-files 8.4-1+deb13u1\n"},
-		{state: "held but removed", out: "hold config-files 8.4-1+deb13u1\n"},
+		{state: "held but removed", out: "hold config-files 8.4-1+deb13u1\n", want: aptStatus{held: true}},
+		{state: "held, never installed", out: "hold not-installed \n", want: aptStatus{held: true}},
 		{state: "purged", out: "unknown not-installed \n"},
 		{state: "half-configured", out: "install half-configured 1.0\n"},
 		{state: "library-no-binary", out: "install installed 2.41-12+deb13u3\n", want: aptStatus{version: "2.41-12+deb13u3", installed: true}},
-		{state: "empty-output", out: ""},
+		{state: "empty-output", out: "", wantErr: true},
+		{state: "one field", out: "installed\n", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
-			if got := aptStatusFrom(tc.out); got != tc.want {
+			got, err := aptStatusFrom(tc.out)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("aptStatusFrom(%q) error = %v, want error %v", tc.out, err, tc.wantErr)
+			}
+			if got != tc.want {
 				t.Errorf("aptStatusFrom(%q) = %+v, want %+v", tc.out, got, tc.want)
 			}
 		})
@@ -93,12 +100,24 @@ func TestAptStatusFrom_AgreesWithRealDpkg(t *testing.T) {
 	if err != nil {
 		t.Skipf("bash is not a dpkg-managed package here: %v", err)
 	}
-	st := aptStatusFrom(string(out))
-	if !st.installed {
-		t.Fatalf("real dpkg output %q parsed as not installed", out)
+	st, err := aptStatusFrom(string(out))
+	if err != nil || !st.installed {
+		t.Fatalf("real dpkg output %q parsed as not installed (%v)", out, err)
 	}
 	if st.version == "" {
 		t.Errorf("real dpkg output %q parsed to an empty version", out)
+	}
+}
+
+// TestAptQuery_UnknownPackageAgreesWithRealDpkg pins aptUnknownPackage to
+// the real tool's answer for a name it has no record of.
+func TestAptQuery_UnknownPackageAgreesWithRealDpkg(t *testing.T) {
+	if !hasSystemBin("dpkg-query") {
+		t.Skip("dpkg-query is not on this host")
+	}
+	st, err := aptQuery(t.Context(), "toolbelt-no-such-package")
+	if err != nil || st != (aptStatus{}) {
+		t.Errorf("aptQuery(unknown) = %+v, %v; want the zero status and no error", st, err)
 	}
 }
 
@@ -553,20 +572,33 @@ func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
 // TestSyncAptHold covers why a pin needs a dpkg hold: apt can still
 // upgrade a package as a DEPENDENCY of some other install, moving it
 // underneath a pin that reported it frozen. apt-mark runs only when dpkg's
-// record differs from the wanted hold, and the name still goes through the
-// install grammar gate.
+// record differs from the wanted hold, a hold is released even on a package
+// that is not installed (apt-get -y refuses a held one), and only
+// dpkg-query's unknown-package answer reads as absent (dpkg-query(1), EXIT
+// STATUS); any other query failure is the sync's error.
 func TestSyncAptHold(t *testing.T) {
+	const unknown = "echo 'dpkg-query: no packages found matching jq' >&2; exit 1"
 	cases := []struct {
-		name   string
-		dpkg   string
-		hold   bool
-		marked string
+		name    string
+		dpkg    string // dpkg-query's script body; empty leaves it missing
+		hold    bool
+		marked  string
+		wantErr string
 	}{
-		{name: "an unheld package is held", dpkg: "install installed 1.0", hold: true, marked: "hold\n--\njq\n"},
-		{name: "a held package is released", dpkg: "hold installed 1.0", hold: false, marked: "unhold\n--\njq\n"},
-		{name: "a held package stays held without apt-mark", dpkg: "hold installed 1.0", hold: true},
-		{name: "an unheld package stays unheld without apt-mark", dpkg: "install installed 1.0", hold: false},
-		{name: "a package dpkg does not report installed is left alone", dpkg: "hold config-files 1.0", hold: true},
+		{name: "an unheld package is held", dpkg: "echo 'install installed 1.0'", hold: true, marked: "hold\n--\njq\n"},
+		{name: "a held package is released", dpkg: "echo 'hold installed 1.0'", hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package stays held without apt-mark", dpkg: "echo 'hold installed 1.0'", hold: true},
+		{name: "an unheld package stays unheld without apt-mark", dpkg: "echo 'install installed 1.0'", hold: false},
+		{name: "a package that is not installed is never held", dpkg: "echo 'install config-files 1.0'", hold: true},
+		{name: "a held package that is not installed is released", dpkg: "echo 'hold not-installed '", hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package with only its config files left is released", dpkg: "echo 'hold config-files 1.0'", hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package that is not installed is not marked again", dpkg: "echo 'hold not-installed '", hold: true},
+		{name: "a package dpkg does not know needs no release", dpkg: unknown, hold: false},
+		{name: "a package dpkg does not know is not held", dpkg: unknown, hold: true},
+		{name: "a failed query fails the sync", dpkg: "echo 'dpkg-query: error: parsing file /var/lib/dpkg/status' >&2; exit 2", hold: true, wantErr: "parsing file"},
+		{name: "exit 1 without the unknown-package answer fails the sync", dpkg: "exit 1", hold: false, wantErr: "dpkg-query jq"},
+		{name: "unparseable output fails the sync", dpkg: "echo 'installed'", hold: true, wantErr: "dpkg-query jq"},
+		{name: "a dpkg-query that cannot be resolved fails the sync", hold: false, wantErr: "dpkg-query"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -577,13 +609,19 @@ func TestSyncAptHold(t *testing.T) {
 			log := filepath.Join(t.TempDir(), "args")
 			dir := filepath.Dir(stubSystemBin(t, "apt-mark",
 				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n"))
-			if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\necho '"+tc.dpkg+"'\n"), 0o755); err != nil {
-				t.Fatalf("Setup: %v", err)
+			if tc.dpkg != "" {
+				if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\n"+tc.dpkg+"\n"), 0o755); err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
 			}
 
 			in := &installer{output: func(string) {}}
-			if err := in.syncAptHold(t.Context(), "jq", tc.hold); err != nil {
+			err := in.syncAptHold(t.Context(), "jq", tc.hold)
+			switch {
+			case tc.wantErr == "" && err != nil:
 				t.Fatalf("syncAptHold(jq, %v) = %v, want nil", tc.hold, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("syncAptHold(jq, %v) = %v, want an error naming %q", tc.hold, err, tc.wantErr)
 			}
 
 			got, err := os.ReadFile(log)

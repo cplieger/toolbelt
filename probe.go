@@ -242,7 +242,10 @@ func probeApt(pkg string) probeVerdict {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	st := aptInstalled(ctx, pkg)
+	st, err := aptQuery(ctx, pkg)
+	if err != nil {
+		return probeVerdict{OK: false, Mode: probeModePresence, Reason: err.Error()}
+	}
 	if !st.installed {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "dpkg reports " + pkg + " is not installed"}
 	}

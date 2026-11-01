@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -3403,10 +3404,12 @@ func fakeRoot(t *testing.T) {
 
 // aptStub models dpkg for one package with apt-mark, apt-get, dpkg-query and
 // apt-cache stubs that log each call. The files installed and held in its dir
-// are dpkg's record, which dpkg-query prints in the -f format it is given; a call whose first argument has a gate waits until
-// open(that argument). apt-get refuses a held package without
-// --allow-change-held-packages, as apt-get -y does (apt-get(8)); mark-fail
-// and get-fail make apt-mark and apt-get fail.
+// are dpkg's record, which dpkg-query prints in the -f format it is given (a
+// held package that is not installed reads "hold not-installed", one with no
+// record answers as unknown); a call whose first argument has a gate waits
+// until open(that argument). apt-get refuses a held package, as apt-get -y
+// does (apt-get(8)); mark-fail and get-fail make apt-mark and apt-get fail,
+// and failQueriesAfter makes dpkg-query fail.
 type aptStub struct {
 	dir, log string
 }
@@ -3436,9 +3439,13 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 			"[ -e " + d + "get-fail ] && { echo 'E: install failed' >&2; exit 100; }\n" +
 			"touch " + d + "installed\n" +
 			"echo \"apt-get-end $1\" >> " + s.log + "\n",
-		"dpkg-query": "[ -e " + d + "installed ] || { echo 'dpkg-query: no packages found' >&2; exit 1; }\n" +
+		"dpkg-query": "if [ -e " + d + "query-budget ]; then read n < " + d + "query-budget\n" +
+			"[ \"$n\" -gt 0 ] || { echo 'dpkg-query: error: parsing file /var/lib/dpkg/status' >&2; exit 2; }\n" +
+			"echo $((n - 1)) > " + d + "query-budget; fi\n" +
 			"want=install; [ -e " + d + "held ] && want=hold\n" +
-			"case \"$2\" in *Status-Want*) echo \"$want installed 1.7.1-1\";; *) echo 'installed 1.7.1-1';; esac\n",
+			"status=installed; version=1.7.1-1; [ -e " + d + "installed ] || { status=not-installed; version=; }\n" +
+			"[ $status = installed ] || [ $want = hold ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
+			"case \"$2\" in *Status-Want*) echo \"$want $status $version\";; *) echo \"$status $version\";; esac\n",
 		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: 1.7.1-1\\n'\n",
 	}
 	for name, body := range scripts {
@@ -3459,6 +3466,15 @@ func (s *aptStub) set(t *testing.T, names ...string) {
 		if err := os.WriteFile(filepath.Join(s.dir, n), nil, 0o600); err != nil {
 			t.Fatalf("Setup: %v", err)
 		}
+	}
+}
+
+// failQueriesAfter lets n more dpkg-query calls answer, then fails each
+// later one with exit 2, dpkg-query's fatal-error status.
+func (s *aptStub) failQueriesAfter(t *testing.T, n int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.dir, "query-budget"), []byte(strconv.Itoa(n)+"\n"), 0o600); err != nil {
+		t.Fatalf("Setup: %v", err)
 	}
 }
 
@@ -3718,6 +3734,46 @@ func TestAptHold_FollowsThePin(t *testing.T) {
 			t.Errorf("recorded error = %q, want the apt-mark failure", got)
 		}
 		s.clear(t, "mark-fail")
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after the reconcile; calls %q", s.lines(t))
+		}
+		if got := e.store.State().Tools["jq"].LastError; got != "" {
+			t.Errorf("recorded error = %q after the repair, want none", got)
+		}
+	})
+	t.Run("an install releases the hold on a package that is not installed", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, false)
+
+		wantJobState(t, e, install(t, e), JobDone)
+
+		if s.held(t) || !s.ran(t, "apt-get-end") {
+			t.Errorf("held = %v, calls %q; want the hold released and apt-get to install", s.held(t), s.lines(t))
+		}
+	})
+	t.Run("a failed hold query fails the pin and reconcile repairs it", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+		// The fast path's probe answers; the hold sync's query is the one
+		// that fails.
+		s.failQueriesAfter(t, 1)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Pin: &yes}), JobFailed)
+		if got := e.store.State().Tools["jq"].LastError; !strings.Contains(got, "parsing file") {
+			t.Errorf("recorded error = %q, want the dpkg-query failure", got)
+		}
+		if s.ran(t, "mark") {
+			t.Errorf("calls = %q, want no apt-mark over an unread record", s.lines(t))
+		}
+		s.clear(t, "query-budget")
 		wantJobState(t, e, reconcile(t, e), JobDone)
 
 		if !s.held(t) {

@@ -1954,7 +1954,8 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 
 // converged is probeInstalled, and for an apt: row also a dpkg hold equal to
 // its pin, so Reconcile repairs a hold that a failed apt-mark, a recreated
-// container or a hand-run apt-mark left wrong.
+// container or a hand-run apt-mark left wrong. An unreadable dpkg record is
+// not converged, so the install that follows records why.
 func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
 	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")
 	if !ok || !AptAvailable() {
@@ -1962,8 +1963,8 @@ func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	st := aptInstalled(ctx, pkg)
-	return st.installed && st.held == t.Pin
+	st, err := aptQuery(ctx, pkg)
+	return err == nil && st.installed && st.held == t.Pin
 }
 
 // sweepOrphans uninstalls engine-owned footprints whose manifest row is

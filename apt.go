@@ -6,29 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// The apt source installs Debian packages, and it is the one source
-// whose artifacts do NOT live on the persistent volume: apt writes into
-// /usr, which is the container layer, so an apt entry dies with the
-// container and is re-applied by the boot converge. Three consequences
-// shape everything below.
-//
-// Detection cannot execute a binary. A package such as libc6-dev ships
-// none, and after `apt-get remove` a config-files-only package still
-// reports a version, so the dpkg STATUS word is the only honest probe
-// (aptInstalled).
-//
-// Uninstall is a no-op. Removing an entry stops it being reinstalled; it
-// does not remove the package now, because the entry was never a record
-// of something on disk in the first place.
-//
-// Nothing here is reachable on a host that is not Debian-derived or not
-// root, and the engine reports that as a capability rather than
-// discovering it as a failure (AptAvailable).
+// apt writes into /usr, the container layer, so an apt entry dies with the
+// container and the boot converge re-applies it. Hence: detection reads the
+// dpkg status word, never a binary (aptQuery); uninstall drops the entry and
+// leaves the package (installer.uninstall); and a host that is not
+// Debian-derived or not root reports apt as a capability (AptAvailable).
 
 // aptNamePattern is the anchored package-name grammar. It is the first
 // of two gates and it exists to stop anything that is not shaped like a
@@ -66,14 +54,11 @@ func aptValidName(s string) bool {
 	return !strings.HasSuffix(s, "-")
 }
 
-// syncAptHold makes an installed package's dpkg hold equal hold, and is the
-// only caller of apt-mark. apt will not upgrade or remove a held package as
-// another install's side effect, which is what a pin means. A package that
-// is not installed, or already in that state, is left alone.
-//
-// dpkg's own marking, not a preferences file. A pin is per-package state
-// with exactly this meaning, and /etc/apt/preferences.d would put this
-// engine's opinion in a file an operator also edits by hand.
+// syncAptHold makes a package's dpkg hold equal hold, and is the only caller
+// of apt-mark; a pin means apt will not move the package as another
+// install's side effect. A hold is released whatever the package's status,
+// since apt-get -y refuses a held package, but only an installed one is held.
+// dpkg's own marking, not /etc/apt/preferences.d, which operators hand-edit.
 func (in *installer) syncAptHold(ctx context.Context, pkg string, hold bool) error {
 	// The name goes to apt-mark as an argv element, so no shell parses it,
 	// but the grammar gate still runs: a name this engine would refuse to
@@ -83,7 +68,11 @@ func (in *installer) syncAptHold(ctx context.Context, pkg string, hold bool) err
 	}
 	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
 	defer cancel()
-	if st := aptInstalled(ctx, pkg); !st.installed || st.held == hold {
+	st, err := aptQuery(ctx, pkg)
+	if err != nil {
+		return err
+	}
+	if st.held == hold || hold && !st.installed {
 		return nil
 	}
 	action := "unhold"
@@ -134,46 +123,60 @@ func AptAvailable() bool {
 }
 
 // aptStatus is one package's dpkg record. held is the selection apt-mark
-// sets, which dpkg reports as the "hold" want state (dpkg-query(1), Status).
+// sets, which dpkg reports as the "hold" want state (dpkg-query(1), Status),
+// on a package that is not installed too.
 type aptStatus struct {
 	version   string
 	installed bool
 	held      bool
 }
 
-// aptInstalled reads a package's dpkg record; a package dpkg does not know
-// reads as not installed. See aptStatusFrom for why the status word, not
-// just the version, decides.
-func aptInstalled(ctx context.Context, pkg string) aptStatus {
+// aptUnknownPackage is what dpkg-query prints, with exit status 1, for a
+// name it has no record of (dpkg-query(1), EXIT STATUS).
+const aptUnknownPackage = "no packages found matching"
+
+// aptQuery reads a package's dpkg record. A package dpkg has no record of
+// reads as the zero aptStatus; every other failure is an error, so a caller
+// never takes an unread record for an absent one.
+func aptQuery(ctx context.Context, pkg string) (aptStatus, error) {
 	cmd, err := systemCommand(ctx, "dpkg-query", "-W", aptStatusFormat, "--", pkg)
 	if err != nil {
-		return aptStatus{}
+		return aptStatus{}, err
 	}
 	cmd.Env = aptEnv()
 	out, err := cmd.Output()
-	if err != nil {
-		return aptStatus{}
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok &&
+		exitErr.ExitCode() == 1 && strings.Contains(string(exitErr.Stderr), aptUnknownPackage) {
+		return aptStatus{}, nil
 	}
-	return aptStatusFrom(string(out))
+	if err != nil {
+		return aptStatus{}, commandFailed("dpkg-query "+pkg, err, "")
+	}
+	st, err := aptStatusFrom(string(out))
+	if err != nil {
+		return aptStatus{}, fmt.Errorf("dpkg-query %s: %w", pkg, err)
+	}
+	return st, nil
 }
 
 // aptStatusFormat is the dpkg-query format aptStatusFrom parses.
 const aptStatusFormat = "-f=${db:Status-Want} ${db:Status-Status} ${Version}"
 
-// aptStatusFrom reads one aptStatusFormat answer.
-//
-// The status word is the whole point. dpkg keeps a record for a package
-// REMOVED with its configuration files left, and that record still carries
-// a version: on apt 3.0.3, after `apt-get remove nano`, the query reports
-// status `config-files` at 8.4-1+deb13u1 and exits 0 with no binary on
-// disk. A version-only read reports that package installed, and after a
-// container recreate every apt entry as present while nothing is.
-func aptStatusFrom(out string) aptStatus {
+// aptStatusFrom reads one aptStatusFormat answer; a package that is not
+// installed has no version, so its answer can end after the status word.
+// The status word decides: after `apt-get remove nano` (apt 3.0.3) dpkg keeps
+// a config-files record at 8.4-1+deb13u1 and exits 0 with no binary on disk,
+// so a version-only read reports every apt entry present after a recreate.
+func aptStatusFrom(out string) (aptStatus, error) {
 	fields := strings.SplitN(strings.TrimSpace(out), " ", 3)
-	if len(fields) != 3 || fields[1] != aptStatusInstalled {
-		return aptStatus{}
+	if len(fields) < 2 {
+		return aptStatus{}, fmt.Errorf("unreadable dpkg status %q", strings.TrimSpace(out))
 	}
-	return aptStatus{version: strings.TrimSpace(fields[2]), installed: true, held: fields[0] == "hold"}
+	st := aptStatus{held: fields[0] == "hold", installed: fields[1] == aptStatusInstalled}
+	if st.installed && len(fields) == 3 {
+		st.version = strings.TrimSpace(fields[2])
+	}
+	return st, nil
 }
 
 // aptCandidate reports the version apt would install now. It is what an apt
