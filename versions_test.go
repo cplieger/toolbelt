@@ -440,6 +440,10 @@ func TestLatestTag(t *testing.T) {
 		{name: "unparsed tags alone compare by name", candidates: []string{"nightly", "stable"}, want: "stable"},
 		{name: "date tags compare", candidates: []string{"2024-12-01", "2025-01-06"}, want: "2025-01-06"},
 		{name: "a date tag beats a later dated prerelease", candidates: []string{"2025-01-06", "2025-02-01-rc1"}, want: "2025-01-06"},
+		{name: "a v-prefixed date tag is a release", candidates: []string{"v1.2.3", "v2025-01-06"}, want: "v2025-01-06"},
+		{name: "a nightly date is no release", candidates: []string{"v1.2.3", "nightly-2025-01-06"}, want: "v1.2.3"},
+		{name: "a weekly date is no release", candidates: []string{"v26.13.0", "weekly.2025-01-06"}, want: "v26.13.0"},
+		{name: "a snapshot date is no release", candidates: []string{"v1.2.3", "snapshot-2024-12-01"}, want: "v1.2.3"},
 		{name: "no candidates", want: ""},
 	}
 	for _, tc := range cases {
@@ -453,21 +457,27 @@ func TestLatestTag(t *testing.T) {
 
 func TestIsPrereleaseTag(t *testing.T) {
 	cases := []struct {
-		tag  string
-		want bool
+		tag    string
+		prefix string
+		want   bool
 	}{
-		{"v27.0.0-alpha.0.0.0", true},
-		{"go1.28rc1", true},
-		{"v0.0.0-20261011093844-7a2c2c0b7aa6", true},
-		{"2025-02-01-rc1", true},
-		{"v1.2.3", false},
-		{"2025-01-06", false},
-		{"latest", false},
+		{tag: "v27.0.0-alpha.0.0.0", want: true},
+		{tag: "go1.28rc1", want: true},
+		{tag: "v0.0.0-20261011093844-7a2c2c0b7aa6", want: true},
+		{tag: "2025-02-01-rc1", want: true},
+		{tag: "nightly-2025-01-06", want: true},
+		{tag: "weekly.2025-01-06", want: true},
+		{tag: "snapshot-2024-12-01", want: true},
+		{tag: "v1.2.3", want: false},
+		{tag: "2025-01-06", want: false},
+		{tag: "v2025-01-06", want: false},
+		{tag: "release-2025-01-06", prefix: "release-", want: false},
+		{tag: "latest", want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.tag, func(t *testing.T) {
-			if got := isPrereleaseTag(tc.tag, ""); got != tc.want {
-				t.Errorf("isPrereleaseTag(%q) = %v, want %v", tc.tag, got, tc.want)
+			if got := isPrereleaseTag(tc.tag, tc.prefix); got != tc.want {
+				t.Errorf("isPrereleaseTag(%q, %q) = %v, want %v", tc.tag, tc.prefix, got, tc.want)
 			}
 		})
 	}

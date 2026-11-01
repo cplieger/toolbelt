@@ -361,7 +361,7 @@ func latestTag(candidates []string, prefix string, allowPre bool) string {
 			continue
 		}
 		parsed = true
-		if allowPre || !isPrerelease(ver) {
+		if allowPre || !isPrerelease(c, prefix, ver) {
 			versioned = append(versioned, c)
 		}
 	}
@@ -379,15 +379,22 @@ func latestTag(candidates []string, prefix string, allowPre bool) string {
 // part (v27.0.0-alpha.0, go1.28rc1, a Go pseudo-version).
 func isPrereleaseTag(tag, prefix string) bool {
 	ver := parseTagVersion(tag, prefix)
-	return ver != nil && isPrerelease(ver)
+	return ver != nil && isPrerelease(tag, prefix, ver)
 }
 
 // isoDateVersion matches a date tag, which go-version reads as a year with a
 // prerelease part ("2025-01-06" is 2025 with prerelease "01-06").
 var isoDateVersion = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
-func isPrerelease(ver *goversion.Version) bool {
-	return ver.Prerelease() != "" && !isoDateVersion.MatchString(ver.Original())
+// isPrerelease decides from the tag, not ver.Original(): parseTagVersion
+// parses nightly-2025-01-06 from its first digit, and that suffix is a date.
+func isPrerelease(tag, prefix string, ver *goversion.Version) bool {
+	return ver.Prerelease() != "" && !isoDateVersion.MatchString(trimTagPrefix(tag, prefix))
+}
+
+// trimTagPrefix strips the declared version prefix and one leading "v".
+func trimTagPrefix(tag, prefix string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(tag, prefix), "v")
 }
 
 // maxVersionTag picks the highest candidate by go-version comparison
@@ -415,7 +422,7 @@ func maxVersionTag(candidates []string, prefix string) string {
 }
 
 func parseTagVersion(tag, prefix string) *goversion.Version {
-	s := strings.TrimPrefix(strings.TrimPrefix(tag, prefix), "v")
+	s := trimTagPrefix(tag, prefix)
 	if ver, err := goversion.NewVersion(s); err == nil {
 		return ver
 	}
