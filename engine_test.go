@@ -2725,8 +2725,10 @@ func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
 	script := "#!/bin/sh\n" +
 		"echo \"$* UV_MANAGED_PYTHON=$UV_MANAGED_PYTHON UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR\" >> " + argv + "\n" +
 		"home=\"$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin\"\n" +
-		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x\"\n" +
+		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x/bin\"\n" +
+		"touch \"$home/python3\"\n" +
 		"echo \"home = $home\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
+		"ln -sf \"$home/python3\" \"$UV_TOOL_DIR/x/bin/python\"\n" +
 		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
 		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
@@ -2741,10 +2743,7 @@ func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	dead := filepath.Join(t.TempDir(), "cpython-3.14.7", "bin")
-	if err := os.MkdirAll(dead, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dead := newInterpreterHome(t)
 	writeVenv(t, e, "x", dead)
 	if !inventoryRow(t, e, "x").Installed {
 		t.Fatal("inventory before the interpreter died: x not installed")

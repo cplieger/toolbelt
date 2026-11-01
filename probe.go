@@ -93,11 +93,12 @@ type probeVerdict struct {
 // probeCache memoizes exec probes so the read path (Inventory, which a
 // settings UI polls) does not spawn a subprocess per tool per call.
 //
-// Presence, and a pip: venv's interpreter, are re-checked on every probe —
-// each is a cheap local read, and a deleted file must be noticed at once. Only the EXEC verdict is cached,
-// keyed by a fingerprint of the probe target (resolved path, size,
-// mtime), the recorded version, and the declared version args, so any
-// reinstall, relink or version bump invalidates it without a TTL.
+// Presence, and a pip: venv's interpreter, are re-checked on every probe:
+// each is a cheap local read, and a deleted file must be noticed at once.
+// Only the EXEC verdict is cached, keyed by a fingerprint of the probe
+// target (resolved path, size, mtime), the recorded version, and the
+// declared version args, so any reinstall, relink or version bump
+// invalidates it without a TTL.
 type probeCache struct {
 	entries map[string]probeCacheEntry
 	mu      sync.Mutex
@@ -171,10 +172,10 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 		}
 	}
 	if kind == SourcePip {
-		if home, gone := e.pipInterpreterGone(ref); gone {
+		if missing, gone := e.pipInterpreterGone(ref); gone {
 			return probeVerdict{
 				OK: false, Mode: probeModePresence, CannotExec: true,
-				Reason: "venv interpreter " + home + " is missing",
+				Reason: "venv interpreter " + missing + " is missing",
 			}
 		}
 	}
@@ -273,12 +274,14 @@ const pyvenvCap = 64 << 10
 // (https://packaging.python.org/en/latest/specifications/name-normalization/).
 var pipVenvSeparators = regexp.MustCompile(`[-_.]+`)
 
-// pipInterpreterGone reports whether the uv venv behind a pip: ref names an
-// interpreter directory that no longer exists. The interpreter lives outside
-// the venv, so the launcher's fingerprint cannot see it go. A missing or
-// home-less pyvenv.cfg is not evidence; the exec probe decides then.
-func (e *Engine) pipInterpreterGone(ref string) (home string, gone bool) {
-	root, err := os.OpenRoot(pythonToolDir(e.toolsDir))
+// pipInterpreterGone reports whether the uv venv behind a pip: ref has lost
+// its interpreter: the pyvenv.cfg home directory, or the file bin/python
+// resolves to. Both live outside the venv, so the launcher's fingerprint
+// cannot see them go. No pyvenv.cfg, or a venv path leaving the tool dir,
+// is not evidence; the exec probe decides then.
+func (e *Engine) pipInterpreterGone(ref string) (missing string, gone bool) {
+	toolDir := pythonToolDir(e.toolsDir)
+	root, err := os.OpenRoot(toolDir)
 	if err != nil {
 		return "", false
 	}
@@ -295,11 +298,18 @@ func (e *Engine) pipInterpreterGone(ref string) (home string, gone bool) {
 	if err != nil {
 		return "", false
 	}
-	if home = pyvenvHome(string(data)); home == "" {
-		return "", false
+	if home := pyvenvHome(string(data)); home != "" {
+		if _, statErr := os.Stat(home); errors.Is(statErr, fs.ErrNotExist) {
+			return home, true
+		}
 	}
-	_, err = os.Stat(home)
-	return home, errors.Is(err, fs.ErrNotExist)
+	python := filepath.Join(venv, "bin", "python")
+	// The root confines every component but the last, which uv links to an
+	// interpreter outside the tool dir.
+	if _, err = root.Lstat(python); err == nil {
+		_, err = os.Stat(filepath.Join(toolDir, python))
+	}
+	return filepath.Join(toolDir, python), errors.Is(err, fs.ErrNotExist)
 }
 
 // pyvenvHome reads the home key, parsed as CPython's site module does
