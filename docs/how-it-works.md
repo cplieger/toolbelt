@@ -95,7 +95,7 @@ A cancelled job carries `cancel_cause`. It is `shutdown` when `Close` stopped it
 
 ## Debian packages
 
-An `apt:` entry is manifest intent like any other and installs a Debian package. Removing an `apt:` entry stops the engine installing the package and leaves the package in place, because packages are shared and the engine cannot prove nothing else needs one. Pinning an `apt:` entry also holds the package with `apt-mark`, so apt does not move it as another package's dependency. Unpinning releases the hold before the patch's own reinstall starts.
+An `apt:` entry is manifest intent like any other and installs a Debian package. Removing an `apt:` entry stops the engine installing the package and leaves the package in place, because packages are shared and the engine cannot prove nothing else needs one. Pinning an `apt:` entry also holds the package with `apt-mark`, so apt does not move it as another package's dependency, and installing a pinned `apt:` entry holds the package it installs, so a recreated container's reinstall stays held. Unpinning releases the hold before the patch's own reinstall starts. Removing a pinned `apt:` entry leaves its hold with the package.
 
 `Inventory` lists the Debian packages on the host that no entry owns, leaving out the ones apt installed automatically and Debian's required and important packages.
 

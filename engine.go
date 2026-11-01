@@ -665,6 +665,8 @@ type patchOutcome struct {
 // footprint uninstall (template kept), version or python change on an
 // enabled tool → reinstall. Returns nil when no job is needed.
 func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
+	e.pinMu.Lock()
+	defer e.pinMu.Unlock()
 	var (
 		out patchOutcome
 		res *job
@@ -681,27 +683,42 @@ func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
 		res, rerr = e.queue.reserve(kind, names, nil)
 		return rerr
 	})
-	if err == nil {
-		e.applyAptHold(name, &out)
+	if err == nil && out.pinChanged {
+		// Before the publish, so a refused patch never reaches dpkg and the reinstall never meets a stale hold.
+		e.setAptHold(context.Background(), name, out.source, out.nowPinned)
 	}
 	return e.commitJob(res, err)
 }
 
-// applyAptHold holds a pinned apt package with `apt-mark hold` and releases
-// the hold when the pin comes off: apt upgrades a package as another
-// install's dependency, and a hold is the only thing apt respects.
-//
-// Patch calls it between the manifest write and the job's publish, so a
-// refused patch never reaches dpkg and the patch's reinstall never meets a
-// stale hold. A failure warns and leaves the manifest pin in force.
-func (e *Engine) applyAptHold(name string, out *patchOutcome) {
-	pkg, ok := strings.CutPrefix(out.source, SourceApt+":")
-	if !ok || !out.pinChanged || !AptAvailable() {
+// setAptHold holds an apt package with `apt-mark hold`, or releases the
+// hold: apt upgrades a package as another install's dependency, and a hold
+// is the only thing apt respects. Other sources are a no-op. A failure warns
+// and leaves the manifest pin in force. The caller holds pinMu.
+func (e *Engine) setAptHold(ctx context.Context, name, source string, hold bool) {
+	pkg, ok := strings.CutPrefix(source, SourceApt+":")
+	if !ok || !AptAvailable() {
 		return
 	}
-	if err := e.inst.aptSetHold(context.Background(), pkg, out.nowPinned); err != nil {
+	if err := e.inst.aptSetHold(ctx, pkg, hold); err != nil {
 		e.log.Warn("toolbelt: apt hold not applied; the pin holds in the manifest only",
-			"tool", name, "package", pkg, "hold", out.nowPinned, "error", err)
+			"tool", name, "package", pkg, "hold", hold, "error", err)
+	}
+}
+
+// holdIfPinned holds an apt package an install just put on the host when its
+// row is pinned: a recreated container or a pinned Add has no dpkg hold, and
+// Patch holds only on a pin change. The row is read again under pinMu, so a
+// Patch or Remove that landed during the install is not undone.
+func (e *Engine) holdIfPinned(ctx context.Context, name string) {
+	e.pinMu.Lock()
+	defer e.pinMu.Unlock()
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		e.log.Warn("toolbelt: apt hold not applied; the manifest could not be read", "tool", name, "error", err)
+		return
+	}
+	if t, ok := m.Tools[name]; ok && t.Pin {
+		e.setAptHold(ctx, name, t.Source, true)
 	}
 }
 
@@ -1547,6 +1564,10 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 	}
 	if serr := e.commitInstall(name, t, res); serr != nil {
 		return serr
+	}
+	if res.apt {
+		// The install has committed, so a cancelled job still owes its hold.
+		e.holdIfPinned(context.WithoutCancel(ctx), name)
 	}
 	if verr := e.verifyInstalled(name, t, output); verr != nil {
 		return verr

@@ -105,6 +105,10 @@ func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) erro
 // than the version's presence.
 const aptStatusInstalled = "installed"
 
+// geteuid is a variable so tests can drive the apt paths against stub
+// binaries without running as root.
+var geteuid = os.Geteuid
+
 // aptHoldTimeout bounds an apt-mark call. It writes one dpkg selection and
 // touches no network, so this is a wedge guard rather than a work budget.
 const aptHoldTimeout = 30 * time.Second
@@ -120,7 +124,7 @@ const aptHoldTimeout = 30 * time.Second
 // sudo would be inventing a privilege escalation its caller did not ask
 // for.
 func AptAvailable() bool {
-	if os.Geteuid() != 0 {
+	if geteuid() != 0 {
 		return false
 	}
 	return hasSystemBin("apt-get")
