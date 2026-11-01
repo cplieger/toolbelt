@@ -63,15 +63,20 @@ func managedDirs(toolsDir string) []string {
 	}
 }
 
-// writtenTree is what one install wrote under the managed root dir: the
-// entry sub, or every entry beneath dir when sub is ".".
-type writtenTree struct{ dir, sub string }
+// writtenTree is a tree one install can write under the managed root dir:
+// the entry sub, or every entry beneath dir when sub is ".". Every entry of
+// an owned tree is the tool's; a shared root also holds other tools' and the
+// operator's files, so only what the install changed is its own.
+type writtenTree struct {
+	dir, sub string
+	owned    bool
+}
 
 // writtenTrees is every tree an install from source kind can write files
 // into that the engine later runs. apt: is dpkg's.
 func writtenTrees(toolsDir, kind, name string) []writtenTree {
-	bin := writtenTree{binDir(toolsDir), "."}
-	opt := writtenTree{optDir(toolsDir), name}
+	bin := writtenTree{dir: binDir(toolsDir), sub: "."}
+	opt := writtenTree{dir: optDir(toolsDir), sub: name, owned: true}
 	switch kind {
 	case SourceAqua, SourceRelease:
 		return []writtenTree{opt}
@@ -80,12 +85,12 @@ func writtenTrees(toolsDir, kind, name string) []writtenTree {
 	case SourceGo, SourceCargo:
 		return []writtenTree{bin}
 	case SourceNpm:
-		return []writtenTree{{npmModulesDir(toolsDir), "."}, {npmBinDir(toolsDir), "."}}
+		return []writtenTree{{dir: npmModulesDir(toolsDir), sub: "."}, {dir: npmBinDir(toolsDir), sub: "."}}
 	case SourcePip:
 		return []writtenTree{
-			{pythonToolDir(toolsDir), "."},
-			{pythonInterpreterDir(toolsDir), "."},
-			{pythonBinDir(toolsDir), "."},
+			{dir: pythonToolDir(toolsDir), sub: "."},
+			{dir: pythonInterpreterDir(toolsDir), sub: "."},
+			{dir: pythonBinDir(toolsDir), sub: "."},
 		}
 	}
 	return nil

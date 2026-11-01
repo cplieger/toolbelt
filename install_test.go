@@ -1184,9 +1184,9 @@ func TestInstallPip_PassesThePythonRequest(t *testing.T) {
 // leaves nothing it wrote, and the engine later runs, writable by group or
 // other: on a ZFS nfs4acl volume npm, uv, go and tar create every entry 0770
 // whatever the umask. Each fake writes entries with those bits set and a
-// symlink to a file outside the tree, which must keep its mode. A managed
-// root keeps its mode: VerifyRootIntegrity reports it instead. Paths are
-// relative to ToolsDir.
+// symlink to a file outside the tree, which must keep its mode, and so must
+// what others left in a shared root and a managed root (VerifyRootIntegrity
+// reports a root). Paths are relative to ToolsDir.
 func TestInstall_StripsGroupAndOtherWriteFromWhatItWrote(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1196,6 +1196,8 @@ func TestInstall_StripsGroupAndOtherWriteFromWhatItWrote(t *testing.T) {
 		setup  func(t *testing.T, e *Engine, outside string)
 		loose  []string
 		kept   []string // managed roots set 0777 by setup
+		// unowned entries the install does not touch: "dir/" at 0777, a file at 0666
+		unowned []string
 	}{
 		{
 			name: "npm package tree", id: "p",
@@ -1206,7 +1208,8 @@ mkdir -p "$m/p/lib"
 printf '{"name":"p","version":"1.0.0"}' > "$m/p/package.json"
 chmod 777 "$m/p" "$m/p/lib"; chmod 666 "$m/p/package.json"
 ln -s "$OUTSIDE" "$m/p/link"`},
-			loose: []string{"npm/lib/node_modules/p", "npm/lib/node_modules/p/lib", "npm/lib/node_modules/p/package.json"},
+			loose:   []string{"npm/lib/node_modules/p", "npm/lib/node_modules/p/lib", "npm/lib/node_modules/p/package.json"},
+			unowned: []string{"npm/lib/node_modules/other/", "npm/lib/node_modules/other/package.json", "npm/bin/other"},
 		},
 		{
 			name: "uv venv, interpreter and launcher", id: "x",
@@ -1224,14 +1227,32 @@ printf '#!/bin/sh\necho x 1.0.0\n' > "$UV_TOOL_BIN_DIR/x"; chmod 777 "$UV_TOOL_B
 				"python/interpreters/cpython-3.15.2", "python/interpreters/cpython-3.15.2/bin/python3",
 				"python/tools/x", "python/tools/x/pyvenv.cfg", "python/bin/x",
 			},
+			unowned: []string{
+				"python/tools/other/", "python/tools/other/pyvenv.cfg",
+				"python/interpreters/cpython-3.14.0/", "python/interpreters/cpython-3.14.0/python3",
+				"python/bin/other",
+			},
 		},
 		{
-			name: "go binary in the bin dir", id: "g",
+			// go rewrites the earlier build in place, so only its ctime, size and mtime change.
+			name: "go binary rewritten in the bin dir", id: "g",
 			tool:   Tool{Source: "go:example.com/g", Version: "v1.0.0"},
-			script: map[string]string{"go": `printf '#!/bin/sh\necho g 1.0.0\n' > "$GOBIN/g"; chmod 777 "$GOBIN/g"`},
-			setup:  func(t *testing.T, e *Engine, _ string) { chmod(t, e.binDir(), 0o777) },
-			loose:  []string{"bin/g"},
-			kept:   []string{"bin"},
+			script: map[string]string{"go": `printf '#!/bin/sh\necho g 1.0.0\n' > "$GOBIN/g"`},
+			setup: func(t *testing.T, e *Engine, _ string) {
+				chmod(t, e.binDir(), 0o777)
+				writeFile(t, filepath.Join(e.binDir(), "g"), "#!/bin/sh\n")
+				chmod(t, filepath.Join(e.binDir(), "g"), 0o777)
+			},
+			loose:   []string{"bin/g"},
+			kept:    []string{"bin"},
+			unowned: []string{"bin/unowned"},
+		},
+		{
+			name: "cargo binary in the bin dir", id: "c",
+			tool:    Tool{Source: "cargo:c", Version: "1.0.0"},
+			script:  map[string]string{"cargo": `printf '#!/bin/sh\necho c 1.0.0\n' > "$BIN_DIR/c"; chmod 777 "$BIN_DIR/c"`},
+			loose:   []string{"bin/c"},
+			unowned: []string{"bin/unowned"},
 		},
 		{
 			name: "aqua tool's earlier version tree", id: "tool",
@@ -1251,7 +1272,8 @@ printf '#!/bin/sh\necho x 1.0.0\n' > "$UV_TOOL_BIN_DIR/x"; chmod 777 "$UV_TOOL_B
 			tool: Tool{Source: SourceManual, Version: "1", Install: `mkdir -p "$OPT/v1/lib" && chmod 777 "$OPT" "$OPT/v1/lib" &&
 ln -s "$OUTSIDE" "$OPT/v1/link" &&
 printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 777 "$BIN/m"`, Probe: "m"},
-			loose: []string{"opt/m", "opt/m/v1/lib", "bin/m"},
+			loose:   []string{"opt/m", "opt/m/v1/lib", "bin/m"},
+			unowned: []string{"bin/unowned"},
 		},
 	}
 	for _, tc := range cases {
@@ -1260,13 +1282,14 @@ printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 777 "$BIN/m"`, Probe: "m"},
 				Entries: map[string]CatalogEntry{
 					"tool": {Name: "tool", Source: "aqua:o/tool", Aqua: aquaVersionServer(t)},
 				},
-				Backends: map[string]string{SourceNpm: "", SourcePip: "", SourceGo: ""},
+				Backends: map[string]string{SourceNpm: "", SourcePip: "", SourceGo: "", SourceCargo: ""},
 			})
 			captureLogs(e)
 			outside := filepath.Join(t.TempDir(), "outside")
 			writeFile(t, outside, "x")
 			chmod(t, outside, 0o666)
 			t.Setenv("OUTSIDE", outside)
+			t.Setenv("BIN_DIR", e.binDir())
 			fake := t.TempDir()
 			for name, body := range tc.script {
 				if err := os.WriteFile(filepath.Join(fake, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
@@ -1277,6 +1300,7 @@ printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 777 "$BIN/m"`, Probe: "m"},
 			if tc.setup != nil {
 				tc.setup(t, e, outside)
 			}
+			unowned := leaveUnowned(t, e.toolsDir, tc.unowned)
 			if err := e.store.MutateManifest(func(m *Manifest) error {
 				m.Tools[tc.id] = tc.tool
 				return nil
@@ -1291,6 +1315,7 @@ printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 777 "$BIN/m"`, Probe: "m"},
 			if final := waitJob(t, e, job.ID); final.State != JobDone {
 				t.Fatalf("install = %s %q, tail %v", final.State, final.Error, final.OutputTail)
 			}
+			assertModes(t, e.toolsDir, unowned)
 			for _, rel := range tc.loose {
 				fi, err := os.Lstat(filepath.Join(e.toolsDir, rel))
 				if err != nil {
@@ -1383,6 +1408,164 @@ printf '#!/bin/sh\necho m 1\n' > "$BIN/m" && chmod 755 "$BIN/m"`}},
 			}
 			if mode := strings.TrimSpace(string(got)); mode != "700" {
 				t.Errorf("cache dir mode when the build ran = %s, want 700", mode)
+			}
+		})
+	}
+}
+
+// leaveUnowned creates entries another tool or the operator left in a shared
+// root: a path ending in "/" is a directory at 0777, any other a file at 0666.
+// It returns each entry's mode, which an install that does not write the
+// entry must keep.
+func leaveUnowned(t *testing.T, toolsDir string, rels []string) map[string]os.FileMode {
+	t.Helper()
+	modes := map[string]os.FileMode{}
+	for _, rel := range rels {
+		path := filepath.Join(toolsDir, rel)
+		mkdirs(t, filepath.Dir(path))
+		mode := os.FileMode(0o666)
+		if strings.HasSuffix(rel, "/") {
+			mkdirs(t, path)
+			mode = 0o777
+		} else {
+			writeFile(t, path, "unowned\n")
+		}
+		chmod(t, path, mode)
+		modes[strings.TrimSuffix(rel, "/")] = mode
+	}
+	return modes
+}
+
+func assertModes(t *testing.T, toolsDir string, want map[string]os.FileMode) {
+	t.Helper()
+	for rel, mode := range want {
+		fi, err := os.Lstat(filepath.Join(toolsDir, rel))
+		if err != nil {
+			t.Errorf("stat %s: %v", rel, err)
+			continue
+		}
+		if got := fi.Mode().Perm(); got != mode {
+			t.Errorf("unowned %s went from %04o to %04o", rel, mode, got)
+		}
+	}
+}
+
+// TestInstall_StripsWhatAFailedInstallWrote pins that a backend which
+// publishes a file and then fails leaves that file unwritable by group and
+// other, and that the job reports the backend's own failure.
+func TestInstall_StripsWhatAFailedInstallWrote(t *testing.T) {
+	const fail = `; echo "backend broke"; exit 1`
+	cases := []struct {
+		name   string
+		id     string
+		tool   Tool
+		script map[string]string
+		loose  []string
+	}{
+		{name: "npm", id: "p", tool: Tool{Source: "npm:p", Version: "1.0.0"}, script: map[string]string{
+			"npm": `printf '#!/bin/sh\n' > "$NPM_CONFIG_PREFIX/bin/p"; chmod 777 "$NPM_CONFIG_PREFIX/bin/p"` + fail,
+		}, loose: []string{"npm/bin/p"}},
+		{name: "uv", id: "x", tool: Tool{Source: "pip:x", Version: "1.0.0"}, script: map[string]string{
+			"uv": `printf '#!/bin/sh\n' > "$UV_TOOL_BIN_DIR/x"; chmod 777 "$UV_TOOL_BIN_DIR/x"` + fail,
+		}, loose: []string{"python/bin/x"}},
+		{name: "go", id: "g", tool: Tool{Source: "go:example.com/g", Version: "v1.0.0"}, script: map[string]string{
+			"go": `printf '#!/bin/sh\n' > "$GOBIN/g"; chmod 777 "$GOBIN/g"` + fail,
+		}, loose: []string{"bin/g"}},
+		{name: "cargo", id: "c", tool: Tool{Source: "cargo:c", Version: "1.0.0"}, script: map[string]string{
+			"cargo": `printf '#!/bin/sh\n' > "$BIN_DIR/c"; chmod 777 "$BIN_DIR/c"` + fail,
+		}, loose: []string{"bin/c"}},
+		{name: "manual", id: "m", tool: Tool{
+			Source: SourceManual, Version: "1", Probe: "m",
+			Install: `mkdir -p "$OPT/v1" && chmod 777 "$OPT/v1" && printf '#!/bin/sh\n' > "$BIN/m" && chmod 777 "$BIN/m"` + fail,
+		}, loose: []string{"opt/m/v1", "bin/m"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{
+				Backends: map[string]string{SourceNpm: "", SourcePip: "", SourceGo: "", SourceCargo: ""},
+			})
+			captureLogs(e)
+			t.Setenv("BIN_DIR", e.binDir())
+			fake := t.TempDir()
+			for name, body := range tc.script {
+				if err := os.WriteFile(filepath.Join(fake, name), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools[tc.id] = tc.tool
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install(tc.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+			if final.State != JobFailed || !strings.Contains(final.Error, "backend broke") {
+				t.Errorf("install = %s %q, want failed with the backend's output", final.State, final.Error)
+			}
+			for _, rel := range tc.loose {
+				fi, err := os.Lstat(filepath.Join(e.toolsDir, rel))
+				if err != nil {
+					t.Errorf("stat %s: %v", rel, err)
+					continue
+				}
+				if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+					t.Errorf("failed install left %s at mode %04o", rel, perm)
+				}
+			}
+		})
+	}
+}
+
+// TestInstall_StripFailureFailsTheJob pins that a mode the filesystem does
+// not store fails the install, and that after a failed backend the job
+// reports both failures. Not parallel: it swaps enforceMode.
+func TestInstall_StripFailureFailsTheJob(t *testing.T) {
+	orig := enforceMode
+	t.Cleanup(func() { enforceMode = orig })
+	enforceMode = func(_ *os.File, want os.FileMode) (os.FileMode, error) {
+		return want | 0o020, errors.New("mode not stored")
+	}
+	for _, tc := range []struct {
+		name, script string
+		want         []string
+	}{
+		{name: "after a backend that succeeded", script: "", want: []string{"strip group and other write from", "mode not stored"}},
+		{name: "after a backend that failed", script: `; echo "backend broke"; exit 1`, want: []string{"backend broke", "mode not stored"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{Backends: map[string]string{SourceGo: ""}})
+			captureLogs(e)
+			fake := t.TempDir()
+			body := "#!/bin/sh\nprintf '#!/bin/sh\\necho g 1.0.0\\n' > \"$GOBIN/g\"; chmod 777 \"$GOBIN/g\"" + tc.script + "\n"
+			if err := os.WriteFile(filepath.Join(fake, "go"), []byte(body), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["g"] = Tool{Source: "go:example.com/g", Version: "v1.0.0"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install("g")
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+			if final.State != JobFailed {
+				t.Fatalf("install = %s, want failed", final.State)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(final.Error, w) {
+					t.Errorf("job error %q does not contain %q", final.Error, w)
+				}
 			}
 		})
 	}

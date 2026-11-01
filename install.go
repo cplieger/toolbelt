@@ -189,9 +189,13 @@ const downloadAttemptBudget = 10 * time.Minute
 // only because the struct is too wide to copy per install (gocritic hugeParam).
 func (in *installer) install(ctx context.Context, name string, t *Tool, aq *AquaPackage, prev *ToolStatus) (installOutcome, error) {
 	var out installOutcome
-	var err error
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	fallback := derivedProbeName(name, t)
+	trees := writtenTrees(in.toolsDir, kind, name)
+	before, err := snapshotTrees(trees)
+	if err != nil {
+		return installOutcome{}, err
+	}
 	switch kind {
 	case SourceAqua:
 		out.bins, out.checksum, err = in.installAqua(ctx, name, t.Version, aq)
@@ -213,13 +217,8 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 	default:
 		return installOutcome{}, fmt.Errorf("unknown source %q", t.Source)
 	}
-	if err != nil {
-		return installOutcome{}, err
-	}
-	for _, tree := range writtenTrees(in.toolsDir, kind, name) {
-		if err := stripGroupOtherWrite(tree.dir, tree.sub); err != nil {
-			return installOutcome{}, err
-		}
+	if joined := errors.Join(err, stripWritten(trees, before)); joined != nil {
+		return installOutcome{}, joined
 	}
 	return out, nil
 }
