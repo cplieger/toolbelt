@@ -1040,3 +1040,104 @@ func TestCommandFailed_UsesExitErrorStderr(t *testing.T) {
 		t.Errorf("commandFailed(probe, %v, \"\") = %q, want it to wrap *exec.ExitError", err, got)
 	}
 }
+
+// TestPMEnv_PinsUvToTheEngineManagedInterpreters pins which interpreter a
+// pip: venv is built on: uv's discovery takes a PATH python3 or an ambient
+// UV_PYTHON over a download (https://docs.astral.sh/uv/concepts/python-versions/),
+// so an inherited value would decide the interpreter every venv links to.
+func TestPMEnv_PinsUvToTheEngineManagedInterpreters(t *testing.T) {
+	t.Setenv("UV_PYTHON", "/usr/bin/python3")
+	t.Setenv("UV_NO_MANAGED_PYTHON", "1")
+	t.Setenv("UV_PYTHON_PREFERENCE", "system")
+	t.Setenv("UV_MANAGED_PYTHON", "0")
+	t.Setenv("UV_PYTHON_INSTALL_DIR", "/elsewhere")
+	tools := t.TempDir()
+	in := &installer{toolsDir: tools}
+
+	got := map[string][]string{}
+	for _, kv := range in.pmEnv() {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = append(got[k], v)
+	}
+
+	if v := got["UV_MANAGED_PYTHON"]; !slices.Equal(v, []string{"1"}) {
+		t.Errorf("UV_MANAGED_PYTHON = %q, want exactly [\"1\"]", v)
+	}
+	wantDir := filepath.Join(tools, "python", "interpreters")
+	if v := got["UV_PYTHON_INSTALL_DIR"]; !slices.Equal(v, []string{wantDir}) {
+		t.Errorf("UV_PYTHON_INSTALL_DIR = %q, want exactly [%q]", v, wantDir)
+	}
+	for _, k := range []string{"UV_PYTHON", "UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("%s = %q, want the ambient value dropped", k, v)
+		}
+	}
+	if v := got["PATH"]; len(v) != 1 {
+		t.Errorf("PATH = %q, want exactly one entry", v)
+	}
+}
+
+// fakeUV puts a uv on PATH that appends its argv to the returned file and
+// publishes a runnable launcher x into UV_TOOL_BIN_DIR, as `uv tool install`
+// does for a package whose entry point is x.
+func fakeUV(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + argv + "\n" +
+		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
+		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argv
+}
+
+// readArgv returns the argv lines fakeUV recorded, one per uv run.
+func readArgv(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+// TestInstallPip_PassesThePythonRequest pins the uv argv: a Python request
+// becomes `--python <req>` (https://docs.astral.sh/uv/reference/cli/#uv-tool-install),
+// and the interpreter dir uv downloads into exists with the managed mode
+// before uv runs.
+func TestInstallPip_PassesThePythonRequest(t *testing.T) {
+	cases := []struct {
+		name, python, want string
+	}{
+		{name: "with a request", python: "3.14", want: "tool install --reinstall --python 3.14 x==1.0.0"},
+		{name: "without a request", python: "", want: "tool install --reinstall x==1.0.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := fakeUV(t)
+			in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+			if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := in.installPip(t.Context(), "x", &Tool{Source: "pip:x", Version: "1.0.0", Python: tc.python}, nil)
+			if err != nil {
+				t.Fatalf("installPip: %v", err)
+			}
+			if got := readArgv(t, argv); !slices.Equal(got, []string{tc.want}) {
+				t.Errorf("uv argv = %q, want [%q]", got, tc.want)
+			}
+			dir := filepath.Join(in.toolsDir, "python", "interpreters")
+			if got := storedDirMode(t, dir); got != managedDirStoredMode {
+				t.Errorf("mode of %s = %v, want %v", dir, got, managedDirStoredMode)
+			}
+		})
+	}
+}

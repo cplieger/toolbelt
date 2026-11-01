@@ -438,6 +438,7 @@ type AddRequest struct {
 	Install     string   `json:"install,omitempty"`
 	Uninstall   string   `json:"uninstall,omitempty"`
 	Probe       string   `json:"probe,omitempty"`
+	Python      string   `json:"python,omitempty"` // pip: only; see Tool.Python
 	Requires    []string `json:"requires,omitempty"`
 	Pin         bool     `json:"pin,omitempty"`
 	// Disabled adds the entry as a template: recorded, not installed,
@@ -500,9 +501,13 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		Install:     strings.TrimSpace(req.Install),
 		Uninstall:   strings.TrimSpace(req.Uninstall),
 		Probe:       strings.TrimSpace(req.Probe),
+		Python:      strings.TrimSpace(req.Python),
 	}
 	if cat, ok := e.cat().Lookup(name); ok {
 		mergeCatalogDefaults(&t, &cat)
+	}
+	if err := validatePython(t.Source, t.Python); err != nil {
+		return t, err
 	}
 	if t.Disabled {
 		// Template: no source requirement, no network. Hydration
@@ -608,6 +613,9 @@ type PatchRequest struct {
 	Requires    *[]string `json:"requires,omitempty"`
 	Install     *string   `json:"install,omitempty"`
 	Uninstall   *string   `json:"uninstall,omitempty"`
+	// Python sets Tool.Python; "" clears it. A change on an enabled entry
+	// reinstalls it.
+	Python *string `json:"python,omitempty"`
 	// Force permits disabling a tool that enabled entries require,
 	// cascading the disable to those dependents (one level, mirroring
 	// RemoveWithDependents).
@@ -618,9 +626,11 @@ type PatchRequest struct {
 // and rollback).
 type patchOutcome struct {
 	prevVersion     string
+	prevPython      string
 	source          string
 	cascaded        []string
 	versionChanged  bool
+	pythonChanged   bool
 	disabledChanged bool
 	nowDisabled     bool
 	// pinChanged and nowPinned carry a pin transition out to Patch, which
@@ -633,8 +643,8 @@ type patchOutcome struct {
 
 // Patch merges fields into an existing tool and enqueues the follow-up
 // job the transition needs: enable → install (when missing), disable →
-// footprint uninstall (template kept), version change on an enabled
-// tool → reinstall. Returns nil when no job is needed.
+// footprint uninstall (template kept), version or python change on an
+// enabled tool → reinstall. Returns nil when no job is needed.
 func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 	var out patchOutcome
 	err := e.store.MutateManifest(func(m *Manifest) error {
@@ -686,6 +696,11 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	if req.Version != nil && !validVersion(t.Source, *req.Version) {
 		return versionRejected(t.Source, *req.Version)
 	}
+	if req.Python != nil {
+		if err := validatePython(t.Source, *req.Python); err != nil {
+			return err
+		}
+	}
 	var deps []string
 	if req.Disabled != nil && *req.Disabled && !t.Disabled {
 		deps = enabledDependents(m, name, backends)
@@ -718,6 +733,11 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 		t.Version = *req.Version
 		out.versionChanged = true
 	}
+	if req.Python != nil && *req.Python != t.Python {
+		out.prevPython = t.Python
+		t.Python = *req.Python
+		out.pythonChanged = true
+	}
 	if req.Disabled != nil && *req.Disabled != t.Disabled {
 		t.Disabled = *req.Disabled
 		out.disabledChanged = true
@@ -746,6 +766,16 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	return out
 }
 
+// revertReinstall undoes the version and python overlay applyPatch recorded.
+func (out *patchOutcome) revertReinstall(t *Tool) {
+	if out.versionChanged {
+		t.Version = out.prevVersion
+	}
+	if out.pythonChanged {
+		t.Python = out.prevPython
+	}
+}
+
 // patchJob enqueues the job a patch outcome requires, rolling the
 // manifest back when the queue refuses it.
 func (e *Engine) patchJob(name string, out *patchOutcome) (*Job, error) {
@@ -767,11 +797,10 @@ func (e *Engine) patchJob(name string, out *patchOutcome) (*Job, error) {
 			return nil, err
 		}
 		return jv, nil
-	case out.versionChanged && !out.nowDisabled:
+	case (out.versionChanged || out.pythonChanged) && !out.nowDisabled:
 		jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
 		if err != nil {
-			prev := out.prevVersion
-			e.rollbackPatch(name, func(t *Tool) { t.Version = prev })
+			e.rollbackPatch(name, out.revertReinstall)
 			return nil, err
 		}
 		return jv, nil
@@ -1138,8 +1167,9 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // and persisted (source, requires, install/uninstall/probe,
 // description, default version). Purely offline — version resolution
 // for actively-installed tools happens per-tool in installTool. Names
-// the catalog doesn't know stay sparse; they fail their own install
-// with a named error rather than failing the whole job here.
+// the catalog doesn't know stay sparse, as do entries whose version or
+// python the catalog's source refuses; they fail their own install
+// (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
 	return e.store.MutateManifest(func(m *Manifest) error {
 		for name := range m.Tools {
@@ -1152,6 +1182,9 @@ func (e *Engine) hydrateStatic() error {
 				continue
 			}
 			mergeCatalogDefaults(&t, &cat)
+			if validateTool(&t) != nil {
+				continue
+			}
 			m.Tools[name] = t
 		}
 		return nil
@@ -1545,7 +1578,7 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		return err
 	}
 	st := e.store.State().Tools[name]
-	if st.InstalledVersion == t.Version && e.probeInstalled(name, t, &st) {
+	if st.InstalledVersion == t.Version && st.Python == t.Python && e.probeInstalled(name, t, &st) {
 		output(fmt.Sprintf("%s %s already installed", name, t.Version))
 		return nil
 	}
@@ -1587,7 +1620,7 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 		return nil, nil
 	}
 	if t.Source == "" {
-		return nil, fmt.Errorf("no install knowledge exists for %q because it is not in the catalog and no source was given", name)
+		return nil, e.unhydratedError(name, &t)
 	}
 	if t.Version != "" {
 		return &t, nil
@@ -1603,12 +1636,26 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 	return &t, nil
 }
 
+// unhydratedError explains a row hydrateStatic left without a source: the
+// catalog does not know it, or its source refuses the row's version or python.
+func (e *Engine) unhydratedError(name string, t *Tool) error {
+	if cat, ok := e.cat().Lookup(name); ok && cat.Source != "" {
+		merged := *t
+		mergeCatalogDefaults(&merged, &cat)
+		if err := validateTool(&merged); err != nil {
+			return fmt.Errorf("the catalog's source %s refuses this entry: %w", merged.Source, err)
+		}
+	}
+	return fmt.Errorf("no install knowledge exists for %q because it is not in the catalog and no source was given", name)
+}
+
 // commitInstall records what landed. This write is the install's COMMIT
 // POINT, so a failure here fails the job with the PREVIOUS state intact
 // and nothing pruned, and a retry converges.
 func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 	if err := e.store.setToolStatus(name, func(s *ToolStatus) {
 		s.InstalledVersion = t.Version
+		s.Python = t.Python
 		s.Bins = res.bins
 		s.PMBins = res.pmBins
 		s.Checksum = res.checksum

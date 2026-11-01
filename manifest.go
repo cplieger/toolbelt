@@ -51,6 +51,11 @@ type Tool struct {
 	// (manual installs only; other sources derive it). Defaults to the
 	// tool name.
 	Probe string `json:"probe,omitempty"`
+	// Python is the uv interpreter request for a pip: entry, a bare
+	// version such as "3.14", passed as `uv tool install --python`. Empty
+	// builds on the newest engine-managed interpreter (or uv's newest
+	// download). Only a pip: or not-yet-hydrated entry may carry one.
+	Python string `json:"python,omitempty"`
 	// Requires lists other manifest/catalog tool names that must be
 	// installed before (or alongside) this one, e.g. jdtls -> java.
 	// Backend-level needs (npm->node, pip->uv, cargo->rust, go->go)
@@ -92,6 +97,9 @@ type ToolStatus struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// InstalledVersion is the version last installed successfully.
 	InstalledVersion string `json:"installed_version,omitempty"`
+	// Python is the Tool.Python request the installed venv was built
+	// with; a manifest request that differs makes the next install rebuild it.
+	Python string `json:"python,omitempty"`
 	// LastError is the failure message of the most recent install
 	// attempt; cleared on success.
 	LastError string `json:"last_error,omitempty"`
@@ -188,9 +196,11 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 
 // ParseManifest decodes and validates a tools.json document exactly as the
 // engine reads the file: a JSON parse error, a version other than
-// ManifestVersion, an invalid tool name or a version its source's grammar
-// refuses is an error. A consumer that writes tools.json on a user's behalf
-// calls it first, because a document it refuses fails New at the next start.
+// ManifestVersion, an invalid tool name, a version its source's grammar
+// refuses, or a python request that is not a bare version or sits on a
+// non-pip: source is an error. A consumer that writes tools.json on a user's
+// behalf calls it first, because a document it refuses fails New at the next
+// start.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
@@ -202,22 +212,45 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if m.Tools == nil {
 		m.Tools = map[string]Tool{}
 	}
-	// A key and a version both become path components (the key is handed to
-	// os.RemoveAll on uninstall), and a hand edit reaches here without Add's
-	// validation. The whole document is refused rather than the entry dropped,
-	// so the engine reports intent it cannot use instead of rewriting it.
-	for _, name := range slices.Sorted(maps.Keys(m.Tools)) {
-		if !validToolName(name) {
-			return nil, fmt.Errorf("invalid tool name %q", name)
-		}
-		if t := m.Tools[name]; t.Version != "" && !validVersion(t.Source, t.Version) {
-			return nil, fmt.Errorf("%s: %v", name, versionRejected(t.Source, t.Version))
-		}
+	if err := validateManifest(&m); err != nil {
+		return nil, err
 	}
 	return &m, nil
 }
 
+// validateManifest applies ParseManifest's per-row checks. A key and a
+// version both become path components (the key is handed to os.RemoveAll on
+// uninstall), and a hand edit reaches here without Add's validation. The
+// whole document is refused rather than the entry dropped, so the engine
+// reports intent it cannot use instead of rewriting it.
+func validateManifest(m *Manifest) error {
+	for _, name := range slices.Sorted(maps.Keys(m.Tools)) {
+		if !validToolName(name) {
+			return fmt.Errorf("invalid tool name %q", name)
+		}
+		t := m.Tools[name]
+		if err := validateTool(&t); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// validateTool is the check one manifest row must pass, given its current
+// source.
+func validateTool(t *Tool) error {
+	if t.Version != "" && !validVersion(t.Source, t.Version) {
+		return versionRejected(t.Source, t.Version)
+	}
+	return validatePython(t.Source, t.Python)
+}
+
+// writeManifestLocked refuses a document readManifestLocked would refuse:
+// persisting one would fail every later read and New.
 func (s *store) writeManifestLocked(m *Manifest) error {
+	if err := validateManifest(m); err != nil {
+		return err
+	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err

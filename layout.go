@@ -27,6 +27,12 @@ func npmModulesDir(toolsDir string) string {
 func pythonDir(toolsDir string) string    { return filepath.Join(toolsDir, "python") }
 func pythonBinDir(toolsDir string) string { return filepath.Join(pythonDir(toolsDir), "bin") }
 
+// pythonInterpreterDir holds the uv-managed CPython builds every pip: venv
+// links to (UV_PYTHON_INSTALL_DIR).
+func pythonInterpreterDir(toolsDir string) string {
+	return filepath.Join(pythonDir(toolsDir), "interpreters")
+}
+
 // managedDirs is every directory the engine owns, in audit order.
 func managedDirs(toolsDir string) []string {
 	return []string{
@@ -36,5 +42,6 @@ func managedDirs(toolsDir string) []string {
 		npmBinDir(toolsDir),
 		pythonDir(toolsDir),
 		pythonBinDir(toolsDir),
+		pythonInterpreterDir(toolsDir),
 	}
 }

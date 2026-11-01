@@ -2658,3 +2658,241 @@ func TestResolve_HydratesEssentialFromTheCatalog(t *testing.T) {
 		t.Errorf("Remove(gh) after the selection released it = %v, want nil", err)
 	}
 }
+
+// pipEngine is an engine whose catalog implies no backend for pip:, holding
+// the enabled row x at 1.0.0 with the given python request.
+func pipEngine(t *testing.T, python string) *Engine {
+	t.Helper()
+	e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourcePip: ""}})
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["x"] = Tool{Source: "pip:x", Version: "1.0.0", Python: python}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// TestInstallTool_ReinstallsWhenThePythonRequestChanged pins that a venv
+// built on another interpreter request is rebuilt even though the version
+// matches and the launcher runs, and that the rebuilt row then converges.
+func TestInstallTool_ReinstallsWhenThePythonRequestChanged(t *testing.T) {
+	argv := fakeUV(t)
+	e := pipEngine(t, "3.14")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if got, want := readArgv(t, argv), []string{"tool install --reinstall --python 3.14 x==1.0.0"}; !slices.Equal(got, want) {
+		t.Errorf("uv argv = %q, want %q", got, want)
+	}
+	if got := e.store.State().Tools["x"].Python; got != "3.14" {
+		t.Errorf("recorded python = %q, want 3.14", got)
+	}
+
+	job, err = e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if out := strings.Join(final.OutputTail, "\n"); !strings.Contains(out, "x 1.0.0 already installed") {
+		t.Errorf("second install output = %q, want already installed", out)
+	}
+	if got := readArgv(t, argv); len(got) != 1 {
+		t.Errorf("uv ran %d times, want once (argv %q)", len(got), got)
+	}
+}
+
+func TestPatch_PythonRequest(t *testing.T) {
+	t.Run("a change on an enabled row reinstalls with the request", func(t *testing.T) {
+		argv := fakeUV(t)
+		e := pipEngine(t, "")
+		py := "3.13"
+
+		job, err := e.Patch("x", PatchRequest{Python: &py})
+
+		if err != nil || job == nil {
+			t.Fatalf("Patch(python) = %v, %v, want an install job", job, err)
+		}
+		if final := waitJob(t, e, job.ID); final.State != JobDone {
+			t.Errorf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+		}
+		if got, want := readArgv(t, argv), []string{"tool install --reinstall --python 3.13 x==1.0.0"}; !slices.Equal(got, want) {
+			t.Errorf("uv argv = %q, want %q", got, want)
+		}
+	})
+	t.Run("the same value enqueues nothing", func(t *testing.T) {
+		e := pipEngine(t, "3.13")
+		py := "3.13"
+		if job, err := e.Patch("x", PatchRequest{Python: &py}); err != nil || job != nil {
+			t.Errorf("Patch(same python) = %v, %v, want nil, nil", job, err)
+		}
+	})
+	t.Run("a template stores the request without a job", func(t *testing.T) {
+		e := pipEngine(t, "")
+		disabled := true
+		if _, err := e.Patch("x", PatchRequest{Disabled: &disabled}); err != nil {
+			t.Fatal(err)
+		}
+		py := "3.13"
+
+		job, err := e.Patch("x", PatchRequest{Python: &py})
+
+		if err != nil || job != nil {
+			t.Errorf("Patch(python) on a template = %v, %v, want nil, nil", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
+			t.Errorf("stored python = %q, want 3.13", m.Tools["x"].Python)
+		}
+	})
+	t.Run("a path is refused and nothing changes", func(t *testing.T) {
+		e := pipEngine(t, "3.13")
+		py := "/usr/bin/python3"
+
+		job, err := e.Patch("x", PatchRequest{Python: &py})
+
+		if err == nil || job != nil {
+			t.Errorf("Patch(python path) = %v, %v, want an error", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
+			t.Errorf("stored python = %q, want 3.13 unchanged", m.Tools["x"].Python)
+		}
+	})
+	t.Run("a non-pip row is refused", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		py := "3.13"
+		if _, err := e.Patch("m", PatchRequest{Python: &py}); err == nil || !strings.Contains(err.Error(), "only to pip:") {
+			t.Errorf("Patch(python) on a manual row error = %v, want the pip-only refusal", err)
+		}
+	})
+}
+
+func TestAdd_RefusesAPythonRequestOnANonPipSource(t *testing.T) {
+	e := newTestEngine(t, nil)
+
+	_, err := e.Add(t.Context(), &AddRequest{Name: "pyright", Source: "npm:pyright", Version: "1.1.0", Python: "3.14"})
+
+	if err == nil || !strings.Contains(err.Error(), "only to pip:") {
+		t.Errorf("Add error = %v, want the pip-only refusal", err)
+	}
+	if m, _ := e.store.LoadManifest(); len(m.Tools) != 0 {
+		t.Errorf("manifest = %v, want no row", m.Tools)
+	}
+}
+
+// TestInstall_RefusesARowTheHydratedSourceCannotTake: a source-less row's
+// version and python pass ParseManifest on the union grammar alone, so
+// hydration must not persist a source that makes the document unreadable;
+// the row stays source-less and its own install names the refusal.
+func TestInstall_RefusesARowTheHydratedSourceCannotTake(t *testing.T) {
+	cases := []struct {
+		name string
+		row  Tool
+		want string
+	}{
+		{name: "python on an npm source", row: Tool{Python: "3.14"}, want: `x: the catalog's source npm:x refuses this entry: python applies only to pip: sources`},
+		{name: "a Debian epoch on an npm source", row: Tool{Version: "1:2.3"}, want: `x: the catalog's source npm:x refuses this entry: version "1:2.3" is not a release tag`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{
+				Entries:  map[string]CatalogEntry{"x": {Source: "npm:x", Version: "1.0.0"}},
+				Backends: map[string]string{SourceNpm: ""},
+			})
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["x"] = tc.row
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install("x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+
+			if final.State != JobFailed || !strings.Contains(final.Error, tc.want) {
+				t.Errorf("install job = %s %q, want failed containing %q", final.State, final.Error, tc.want)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatalf("manifest unreadable after the job: %v", err)
+			}
+			if got := m.Tools["x"].Source; got != "" {
+				t.Errorf("source = %q, want the row left source-less", got)
+			}
+		})
+	}
+}
+
+// TestMutateManifest_RefusesADocumentItsReaderRefuses: the reader refuses
+// the whole document over one bad row, so a write of one would fail every
+// later read and New.
+func TestMutateManifest_RefusesADocumentItsReaderRefuses(t *testing.T) {
+	e := newTestEngine(t, nil)
+
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["jq"] = Tool{Source: "aqua:jqlang/jq", Version: "../x"}
+		return nil
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "jq:") {
+		t.Errorf("MutateManifest error = %v, want one naming jq", err)
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatalf("manifest unreadable after the refused write: %v", err)
+	}
+	if _, ok := m.Tools["jq"]; ok {
+		t.Error("the refused row was written")
+	}
+}
+
+// TestPatch_PythonQueueFullRollsBack: a python change the queue refuses
+// must not leave a request no job will realise.
+func TestPatch_PythonQueueFullRollsBack(t *testing.T) {
+	e := pipEngine(t, "3.13")
+	busy, err := e.Add(t.Context(), &AddRequest{
+		Name: "busy", Source: SourceManual, Version: "1",
+		Install: `sleep 3 && ` + binStub("busy"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if a := e.queue.Active(); a != nil && a.ID == busy.ID && a.State == JobRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("busy job never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for range jobQueueCap {
+		if _, err := e.Update(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	py := "3.14"
+
+	if _, err := e.Patch("x", PatchRequest{Python: &py}); err == nil {
+		t.Error("Patch(python) on a full queue succeeded, want the queue-full error")
+	}
+	if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
+		t.Errorf("python after the refused patch = %q, want 3.13 restored", m.Tools["x"].Python)
+	}
+}

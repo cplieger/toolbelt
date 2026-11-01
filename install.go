@@ -192,7 +192,7 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 	case SourceNpm:
 		out.pmBins, err = in.installNpm(ctx, ref, t.Version, prev.PMBins)
 	case SourcePip:
-		out.pmBins, err = in.installPip(ctx, ref, t.Version, prev.PMBins)
+		out.pmBins, err = in.installPip(ctx, ref, t, prev.PMBins)
 	case SourceCargo:
 		out.bins, err = in.installCargo(ctx, ref, t.Version, prev.Bins, fallback)
 	case SourceGo:
@@ -833,29 +833,36 @@ func (in *installer) linkBin(name, target string) error {
 
 // --- package-manager backends ---
 
+// pmEnvDropped are ambient uv settings that would pick a pip: venv's
+// interpreter over the managed one pmEnv requests.
+var pmEnvDropped = []string{"UV_PYTHON", "UV_PYTHON_PREFERENCE", "UV_NO_MANAGED_PYTHON"}
+
 // pmEnv builds the environment for package-manager subprocesses: the
 // engine's bin dir leads PATH so freshly installed runtimes resolve.
 func (in *installer) pmEnv() []string {
-	env := os.Environ()
-	pathValue := in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH")
-	out := env[:0]
-	for _, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			continue
-		}
-		out = append(out, e)
+	set := []string{
+		"PATH=" + in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GOBIN=" + in.binDir(),
+		"GOPATH=" + filepath.Join(in.toolsDir, "go"),
+		"NPM_CONFIG_PREFIX=" + in.npmDir(),
+		"UV_TOOL_DIR=" + filepath.Join(in.pythonDir(), "tools"),
+		"UV_TOOL_BIN_DIR=" + pythonBinDir(in.toolsDir),
+		// A tool venv breaks when its interpreter is removed, and uv's
+		// discovery otherwise takes a PATH python3, which a runtime update
+		// replaces in place (https://docs.astral.sh/uv/concepts/tools/#python-versions).
+		"UV_MANAGED_PYTHON=1",
+		"UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(in.toolsDir),
 	}
-	return append(out,
-		"PATH="+pathValue,
-		"GOBIN="+in.binDir(),
-		"GOPATH="+filepath.Join(in.toolsDir, "go"),
-		"NPM_CONFIG_PREFIX="+in.npmDir(),
-		// uv tool install: per-tool venvs + launcher dir on the
-		// persistent tools tree (the managed interpreter lands under
-		// $HOME/.local/share/uv, which is also on the volume).
-		"UV_TOOL_DIR="+filepath.Join(in.pythonDir(), "tools"),
-		"UV_TOOL_BIN_DIR="+pythonBinDir(in.toolsDir),
-	)
+	drop := slices.Clone(pmEnvDropped)
+	for _, kv := range set {
+		k, _, _ := strings.Cut(kv, "=")
+		drop = append(drop, k)
+	}
+	out := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		k, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(drop, k)
+	})
+	return append(out, set...)
 }
 
 // runPM runs a package-manager command, streaming its combined output
@@ -1006,13 +1013,18 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 // launcher). `uv pip install --prefix` was tried first and rejected —
 // its launcher points at the managed interpreter without the prefix's
 // site-packages, so every entry point dies with ModuleNotFoundError.
-func (in *installer) installPip(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir)); err != nil {
+func (in *installer) installPip(ctx context.Context, pkg string, t *Tool, prev []string) ([]string, error) {
+	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir), pythonInterpreterDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
+	args := []string{"tool", "install", "--reinstall"}
+	if t.Python != "" {
+		args = append(args, "--python", t.Python)
+	}
+	args = append(args, pkg+"=="+t.Version)
 	pmBin := pythonBinDir(in.toolsDir)
 	added, err := binDiff(pmBin, func() error {
-		return in.runPM(ctx, "uv", "tool", "install", "--reinstall", pkg+"=="+version)
+		return in.runPM(ctx, "uv", args...)
 	})
 	if err != nil {
 		return nil, err

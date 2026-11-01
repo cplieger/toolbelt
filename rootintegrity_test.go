@@ -124,6 +124,14 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				return []wantFinding{{toolsDir, "group- or other-writable (mode 0775)"}}
 			},
 		},
+		"python interpreters dir is group-writable": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				dir := filepath.Join(toolsDir, "python", "interpreters")
+				mkdirs(t, configDir, dir)
+				chmod(t, dir, 0o775)
+				return []wantFinding{{dir, "group- or other-writable (mode 0775)"}}
+			},
+		},
 		"bin dir is other-writable": {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, filepath.Join(toolsDir, "bin"))
