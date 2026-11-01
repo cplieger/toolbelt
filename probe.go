@@ -599,8 +599,6 @@ func versionAnswered(out, want string) bool {
 	}
 }
 
-// versionContinues reports whether side, the text before (before is true) or
-// after a version match, extends it with a digit or a dot-and-digit.
 func versionContinues(side string, before bool) bool {
 	digitAt := func(i int) bool { return i >= 0 && i < len(side) && side[i] >= '0' && side[i] <= '9' }
 	if before {
