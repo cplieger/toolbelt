@@ -6,7 +6,7 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 
 - Engines of any version may read the catalog [tool-catalog](https://github.com/cplieger/tool-catalog) publishes, from an image or a runtime fetch. A format change may add a field or top-level key. Renaming, removing or redefining one makes older engines misread or refuse the catalog.
 - Only `cmd/toolcatalog` imports the TOML and YAML parsers. Keep them out of the root and `httpapi` packages, even though `go.mod` lists both. An import there adds them to every consumer's build.
-- When the queue refuses a job, the engine call that wrote the manifest for it undoes the write, as `Add`, `Patch` and `Remove` do. Without the undo, the manifest records a state no job will bring about.
+- When the queue refuses a job, the engine call that wrote the manifest for it undoes the whole write, as `Add`, `Patch` and `Remove` do: every field it set and every row it cascaded to, leaving a field another call has changed since. Without the undo, the manifest records a state no job will bring about. A field added to `applyPatch` needs its line in `patchOutcome.revert`.
 - A version source that lists several versions picks through `latestTag`, or `highestModuleVersion` for the Go module proxy, which skip prereleases unless the recorded version is one. A highest-version comparison of its own would offer a prerelease such as `v27.0.0-alpha.0` as every user's update.
 - A new sentinel error that an `httpapi` route returns needs a case in `writeEngineError`, or the route answers 400 `bad_request`. Add it under "Replies and refusals" in `docs/http-api.md` and to the README's API list too.
 

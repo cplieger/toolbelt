@@ -7,6 +7,7 @@
 // A refusal is 409 coded has_dependents, essential, disabled or
 // not_configured. A GitHub API rate limit is 503 coded github_rate_limited
 // with a rate_limit object; a job it failed carries error_code and rate_limit.
+// A job the queue cannot take is 503 coded queue_full or shutting_down.
 //
 // GET /search returns installable hits, and with &unavailable=1 the catalog
 // entries nothing can install (see [SearchResponse]). Every response carries
@@ -450,6 +451,10 @@ func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 		webhttp.WriteError(w, r, http.StatusConflict, "disabled", err.Error())
 	case errors.Is(err, toolbelt.ErrRefreshNotConfigured):
 		webhttp.WriteError(w, r, http.StatusConflict, "not_configured", err.Error())
+	case errors.Is(err, toolbelt.ErrQueueFull):
+		webhttp.WriteError(w, r, http.StatusServiceUnavailable, "queue_full", err.Error())
+	case errors.Is(err, toolbelt.ErrShuttingDown):
+		webhttp.WriteError(w, r, http.StatusServiceUnavailable, "shutting_down", err.Error())
 	default:
 		webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 	}

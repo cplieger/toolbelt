@@ -40,6 +40,12 @@ var (
 	// inspected, or resolves outside the tool tree. *RootIntegrityError
 	// names each one.
 	ErrRootIntegrity = errors.New("managed root failed the integrity check")
+	// ErrQueueFull marks a job refused because the queue already holds its
+	// cap of waiting jobs. Transient: the request may be retried, and a
+	// refused Add or Patch has left the manifest as it was.
+	ErrQueueFull = errors.New("too many queued tool jobs")
+	// ErrShuttingDown marks a job refused because Close has begun.
+	ErrShuttingDown = errors.New("engine shutting down")
 )
 
 // DependentsError is the ErrHasDependents shape that names the enabled
@@ -637,10 +643,11 @@ type PatchRequest struct {
 // patchOutcome records what a Patch mutation changed (for job selection
 // and rollback).
 type patchOutcome struct {
-	prevVersion     string
-	prevPython      string
-	source          string
-	cascaded        []string
+	source   string
+	cascaded []string
+	// before and after are the row around applyPatch, for revert.
+	before          Tool
+	after           Tool
 	versionChanged  bool
 	pythonChanged   bool
 	disabledChanged bool
@@ -665,8 +672,12 @@ func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	jv, err := e.patchJob(name, &out)
+	if err != nil {
+		return nil, err
+	}
 	e.applyAptHold(name, &out)
-	return e.patchJob(name, &out)
+	return jv, nil
 }
 
 // applyAptHold makes a pin REAL for an apt package by asking dpkg to hold
@@ -682,7 +693,8 @@ func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
 // Best-effort on purpose, and it fires only on a transition. The pin is
 // already persisted by the time this runs, so a failure must not undo the
 // user's stated intent — it warns and leaves the manifest-level pin in
-// force, which is strictly what the pin meant before this existed.
+// force, which is strictly what the pin meant before this existed. It runs
+// after patchJob, so a patch the queue refuses never reaches dpkg.
 func (e *Engine) applyAptHold(name string, out *patchOutcome) {
 	pkg, ok := strings.CutPrefix(out.source, SourceApt+":")
 	if !ok || !out.pinChanged || !AptAvailable() {
@@ -708,11 +720,6 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	if req.Version != nil && !validVersion(t.Source, *req.Version) {
 		return versionRejected(t.Source, *req.Version)
 	}
-	if req.Python != nil {
-		if err := validatePython(t.Source, *req.Python); err != nil {
-			return err
-		}
-	}
 	var deps []string
 	if req.Disabled != nil && *req.Disabled && !t.Disabled {
 		deps = enabledDependents(m, name, backends)
@@ -720,7 +727,9 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 			return &DependentsError{Dependents: deps}
 		}
 	}
+	before := t
 	*out = applyPatch(&t, req)
+	out.before, out.after = before, t
 	m.Tools[name] = t
 	// A forced disable cascades to the enabled dependents (one level,
 	// mirroring RemoveWithDependents): a dependent left enabled would
@@ -737,16 +746,15 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 }
 
 // applyPatch overlays the request's set fields onto t, reporting the
-// transitions (for job selection and rollback).
+// transitions for job selection. A field it sets that revert does not
+// restore survives a patch the queue refused.
 func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	var out patchOutcome
 	if req.Version != nil && *req.Version != t.Version {
-		out.prevVersion = t.Version
 		t.Version = *req.Version
 		out.versionChanged = true
 	}
 	if req.Python != nil && *req.Python != t.Python {
-		out.prevPython = t.Python
 		t.Python = *req.Python
 		out.pythonChanged = true
 	}
@@ -781,51 +789,59 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	return out
 }
 
-// revertReinstall undoes the version and python overlay applyPatch recorded.
-func (out *patchOutcome) revertReinstall(t *Tool) {
-	if out.versionChanged {
-		t.Version = out.prevVersion
+// revert undoes applyPatch on t field by field, restoring only a field that
+// still holds the patched value so an edit made since survives.
+func (out *patchOutcome) revert(t *Tool) {
+	b, a := &out.before, &out.after
+	restoreField(&t.Version, b.Version, a.Version)
+	restoreField(&t.Python, b.Python, a.Python)
+	restoreField(&t.Disabled, b.Disabled, a.Disabled)
+	restoreField(&t.Pin, b.Pin, a.Pin)
+	restoreField(&t.Description, b.Description, a.Description)
+	restoreField(&t.Install, b.Install, a.Install)
+	restoreField(&t.Uninstall, b.Uninstall, a.Uninstall)
+	if slices.Equal(t.Requires, a.Requires) {
+		t.Requires = slices.Clone(b.Requires)
 	}
-	if out.pythonChanged {
-		t.Python = out.prevPython
+	if slices.Equal(t.VersionArgs, a.VersionArgs) {
+		t.VersionArgs = slices.Clone(b.VersionArgs)
 	}
 }
 
-// patchJob enqueues the job a patch outcome requires, rolling the
-// manifest back when the queue refuses it.
+func restoreField[T comparable](cur *T, before, after T) {
+	if *cur == after {
+		*cur = before
+	}
+}
+
+// patchJob enqueues the job a patch outcome requires. When the queue
+// refuses it the whole patch is rolled back, cascade included, so the
+// manifest never claims a state no job will realize.
 func (e *Engine) patchJob(name string, out *patchOutcome) (*Job, error) {
+	var (
+		jv  *Job
+		err error
+	)
 	switch {
 	case out.disabledChanged && out.nowDisabled:
-		names := append([]string{name}, out.cascaded...)
-		jv, err := e.queue.Enqueue(JobKindDisable, names)
-		if err != nil {
-			for _, n := range names {
-				e.rollbackPatch(n, func(t *Tool) { t.Disabled = false })
-			}
-			return nil, err
-		}
-		return jv, nil
-	case out.disabledChanged && !out.nowDisabled:
-		jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
-		if err != nil {
-			e.rollbackPatch(name, func(t *Tool) { t.Disabled = true })
-			return nil, err
-		}
-		return jv, nil
-	case (out.versionChanged || out.pythonChanged) && !out.nowDisabled:
-		jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
-		if err != nil {
-			e.rollbackPatch(name, out.revertReinstall)
-			return nil, err
-		}
-		return jv, nil
+		jv, err = e.queue.Enqueue(JobKindDisable, append([]string{name}, out.cascaded...))
+	case out.disabledChanged && !out.nowDisabled,
+		(out.versionChanged || out.pythonChanged) && !out.nowDisabled:
+		jv, err = e.queue.Enqueue(JobKindInstall, []string{name})
 	default:
 		return nil, nil
 	}
+	if err != nil {
+		e.rollbackPatch(name, out.revert)
+		for _, d := range out.cascaded {
+			e.rollbackPatch(d, func(t *Tool) { restoreField(&t.Disabled, false, true) })
+		}
+		return nil, err
+	}
+	return jv, nil
 }
 
-// rollbackPatch reverts one field after a rejected enqueue so the
-// manifest never claims a state no job will realize.
+// rollbackPatch applies undo to one row after a rejected enqueue.
 func (e *Engine) rollbackPatch(name string, undo func(*Tool)) {
 	if err := e.store.MutateManifest(func(m *Manifest) error {
 		if t, ok := m.Tools[name]; ok {

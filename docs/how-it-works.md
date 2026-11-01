@@ -75,6 +75,8 @@ Disabling an essential tool still works. It uninstalls the files and keeps the e
 - `Jobs() (active *Job, recent []*Job)` and `CancelJob(id) bool` show the queue and cancel a job.
 - `RefreshCatalog() (*Job, error)` starts a catalog refresh, and returns `ErrRefreshNotConfigured` when `Config.Refresh` is unset. `CatalogInfo() CatalogInfo` describes the live catalog. [The catalog](catalog.md) has both.
 
+A call that starts a job returns `ErrQueueFull` when 8 jobs already wait, and `ErrShuttingDown` once `Close` has begun. A reconcile is never refused for a full queue, because one queued reconcile covers every later request. An `Add` or `Patch` whose job is refused leaves the manifest as it was, every field and every cascaded dependent included.
+
 `*DependentsError` carries the names behind `ErrHasDependents` for `errors.As`, `*RootIntegrityError` carries every path behind `ErrRootIntegrity`, and `*GitHubRateLimitError` carries the detail behind `ErrGitHubRateLimited`. The result types `Inventory`, `ToolInfo`, `SystemTool` and `Job` are also what the REST handler sends.
 
 The other types are `Tool` and `Manifest` for the manifest, `ToolStatus` and `State` for the install state, and `Catalog` and `CatalogEntry`, checked with `VerifyCatalog`, for the catalog. `SearchCounts` and `AptState` shape a search. `CancelCause` is `CancelShutdown`, `CancelCaller` or its zero value `CancelUnknown`.

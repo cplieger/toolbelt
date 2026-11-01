@@ -176,7 +176,7 @@ func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool)
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.stopped {
-		return nil, errors.New("engine shutting down")
+		return nil, ErrShuttingDown
 	}
 	if kind == JobKindReconcile {
 		for _, j := range q.pending {
@@ -185,7 +185,7 @@ func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool)
 			}
 		}
 	} else if len(q.pending) >= jobQueueCap {
-		return nil, errors.New("too many queued tool jobs")
+		return nil, ErrQueueFull
 	}
 	q.nextID++
 	j := &job{

@@ -1469,38 +1469,45 @@ func TestChecksumConfigured_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestAdd_QueueFullRollsBackManifest: an add rejected by a full queue
-// must not leave a phantom manifest row.
-func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
-	e := newTestEngine(t, nil)
+// saturateQueue fills the job queue behind a running job, so the next
+// Enqueue is refused.
+func saturateQueue(t *testing.T, e *Engine) {
+	t.Helper()
 	slow, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
-		Install: `sleep 3 && ` + binStub("slow"),
+		Install: "exec sleep 30",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait until the worker picks the slow job up (drains it from
-	// pending) so the cap-filling below is deterministic.
+	// The worker must drain the slow job from pending before the cap is
+	// counted, or one Update below lands in its slot.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if a := e.queue.Active(); a != nil && a.ID == slow.ID && a.State == JobRunning {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("slow job never started")
+			t.Fatal("Setup: slow job never started")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	for range jobQueueCap {
 		if _, err := e.Update(); err != nil {
-			t.Fatal(err) // filling to cap must succeed
+			t.Fatalf("Setup: filling the queue to its cap: %v", err)
 		}
 	}
+}
+
+// TestAdd_QueueFullRollsBackManifest: an add rejected by a full queue
+// must not leave a phantom manifest row.
+func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
+	e := newTestEngine(t, nil)
+	saturateQueue(t, e)
 	if _, err := e.Add(t.Context(), &AddRequest{
 		Name: "phantom", Source: SourceManual, Version: "1", Install: "true",
-	}); err == nil {
-		t.Error("expected queue-full error")
+	}); !errors.Is(err, ErrQueueFull) {
+		t.Errorf("Add on a full queue = %v, want ErrQueueFull", err)
 	}
 	m, _ := e.store.LoadManifest()
 	if _, exists := m.Tools["phantom"]; exists {
@@ -2921,40 +2928,199 @@ func TestMutateManifest_RefusesADocumentItsReaderRefuses(t *testing.T) {
 	}
 }
 
-// TestPatch_PythonQueueFullRollsBack: a python change the queue refuses
-// must not leave a request no job will realise.
-func TestPatch_PythonQueueFullRollsBack(t *testing.T) {
-	e := pipEngine(t, "3.13")
-	busy, err := e.Add(t.Context(), &AddRequest{
-		Name: "busy", Source: SourceManual, Version: "1",
-		Install: `sleep 3 && ` + binStub("busy"),
+// TestPatch_QueueFullRollsBackEveryField: a patch whose job the queue
+// refuses is refused whole, so the manifest never records a request no job
+// will realise (a disabled row at a new version, an enabled one whose old
+// install stays on disk).
+func TestPatch_QueueFullRollsBackEveryField(t *testing.T) {
+	str := func(s string) *string { return &s }
+	yes, no := true, false
+	pipRow := Tool{Source: "pip:x", Version: "1.0.0", Python: "3.13"}
+	manualRow := Tool{
+		Source: SourceManual, Version: "1", Description: "d", Install: "true",
+		Uninstall: "true", VersionArgs: []string{"-V"},
+	}
+	disabledRow := manualRow
+	disabledRow.Disabled = true
+	cases := []struct {
+		name string
+		row  Tool
+		req  PatchRequest
+	}{
+		{name: "python on an enabled row", row: pipRow, req: PatchRequest{Python: str("3.14")}},
+		{name: "disable with a python change", row: pipRow, req: PatchRequest{Disabled: &yes, Python: str("3.14")}},
+		{name: "disable with a version change", row: manualRow, req: PatchRequest{Disabled: &yes, Version: str("2")}},
+		{name: "enable with a version change", row: disabledRow, req: PatchRequest{Disabled: &no, Version: str("2")}},
+		{name: "every field in one request", row: manualRow, req: PatchRequest{
+			Version: str("2"), Pin: &yes, Description: str("e"), Requires: &[]string{"slow"},
+			Install: str("exit 0"), Uninstall: str("exit 0"), VersionArgs: &[]string{"--version"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := pipEngine(t, "3.13")
+			saturateQueue(t, e)
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["x"] = tc.row
+				return nil
+			}); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			if _, err := e.Patch("x", &tc.req); !errors.Is(err, ErrQueueFull) {
+				t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPatchFields(t, m.Tools["x"], tc.row)
+		})
+	}
+	t.Run("a forced disable re-enables the dependents it cascaded to", func(t *testing.T) {
+		e := pipEngine(t, "3.13")
+		saturateQueue(t, e)
+		dependent := manualRow
+		dependent.Requires = []string{"x"}
+		if err := e.store.MutateManifest(func(m *Manifest) error {
+			m.Tools["app"] = dependent
+			return nil
+		}); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if _, err := e.Patch("x", &PatchRequest{Disabled: &yes, Force: true, Version: str("2.0.0")}); !errors.Is(err, ErrQueueFull) {
+			t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
+		}
+		m, err := e.store.LoadManifest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPatchFields(t, m.Tools["x"], pipRow)
+		assertPatchFields(t, m.Tools["app"], dependent)
 	})
+}
+
+// assertPatchFields compares every field a PatchRequest can set.
+func assertPatchFields(t *testing.T, got, want Tool) {
+	t.Helper()
+	if got.Version != want.Version || got.Python != want.Python || got.Disabled != want.Disabled ||
+		got.Pin != want.Pin || got.Description != want.Description || got.Install != want.Install ||
+		got.Uninstall != want.Uninstall {
+		t.Errorf("row = {version %q python %q disabled %v pin %v description %q install %q uninstall %q}, "+
+			"want {version %q python %q disabled %v pin %v description %q install %q uninstall %q}",
+			got.Version, got.Python, got.Disabled, got.Pin, got.Description, got.Install, got.Uninstall,
+			want.Version, want.Python, want.Disabled, want.Pin, want.Description, want.Install, want.Uninstall)
+	}
+	if !slices.Equal(got.Requires, want.Requires) {
+		t.Errorf("requires = %q, want %q", got.Requires, want.Requires)
+	}
+	if !slices.Equal(got.VersionArgs, want.VersionArgs) {
+		t.Errorf("version_args = %q, want %q", got.VersionArgs, want.VersionArgs)
+	}
+}
+
+// TestRollbackPatch_KeepsAConcurrentEdit: the rollback restores only the
+// fields that still hold the patched value, so an edit that landed between
+// the patch and the refused enqueue survives it.
+func TestRollbackPatch_KeepsAConcurrentEdit(t *testing.T) {
+	e := newTestEngine(t, nil)
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["m"] = Tool{Source: SourceManual, Version: "1", Description: "d", Install: "true"}
+		return nil
+	}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	v, d := "2", "patched"
+	var out patchOutcome
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		return patchManifest(m, "m", &PatchRequest{Version: &v, Description: &d}, &out, e.backends())
+	}); err != nil {
+		t.Fatalf("Setup: patch: %v", err)
+	}
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		row := m.Tools["m"]
+		row.Description = "concurrent"
+		m.Tools["m"] = row
+		return nil
+	}); err != nil {
+		t.Fatalf("Setup: concurrent edit: %v", err)
+	}
+
+	e.rollbackPatch("m", out.revert)
+
+	m, err := e.store.LoadManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if a := e.queue.Active(); a != nil && a.ID == busy.ID && a.State == JobRunning {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("busy job never started")
-		}
-		time.Sleep(10 * time.Millisecond)
+	if got := m.Tools["m"]; got.Version != "1" || got.Description != "concurrent" {
+		t.Errorf("after rollback version %q description %q, want 1 restored and concurrent kept",
+			got.Version, got.Description)
 	}
-	for range jobQueueCap {
-		if _, err := e.Update(); err != nil {
-			t.Fatal(err)
-		}
-	}
-	py := "3.14"
+}
 
-	if _, err := e.Patch("x", &PatchRequest{Python: &py}); err == nil {
-		t.Error("Patch(python) on a full queue succeeded, want the queue-full error")
+// TestPatch_AptHoldFollowsTheAcceptedPatch: the dpkg hold is applied only
+// once the patch's job is queued, so a refused patch leaves apt's state
+// as it found it.
+func TestPatch_AptHoldFollowsTheAcceptedPatch(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("AptAvailable requires euid 0")
 	}
-	if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
-		t.Errorf("python after the refused patch = %q, want 3.13 restored", m.Tools["x"].Python)
+	// The stubs go ahead of the real trusted dirs rather than replacing
+	// them: the queue's jobs still resolve bash there, and the set must be
+	// in place before the engine's worker starts reading it.
+	stubApt := func(t *testing.T) (log string) {
+		t.Helper()
+		dir := t.TempDir()
+		log = filepath.Join(dir, "apt-mark.log")
+		for name, script := range map[string]string{
+			"apt-mark": "#!/bin/sh\necho \"$@\" >> " + log + "\n",
+			"apt-get":  "#!/bin/sh\n",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+		}
+		prev := systemBinDirs
+		systemBinDirs = append([]string{dir}, prev...)
+		t.Cleanup(func() { systemBinDirs = prev })
+		return log
 	}
+	aptRow := func(t *testing.T, e *Engine) {
+		t.Helper()
+		if err := e.store.MutateManifest(func(m *Manifest) error {
+			m.Tools["jq"] = Tool{Source: "apt:jq", Version: "1.6-1"}
+			return nil
+		}); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+	yes, v := true, "1.7.1-1"
+	t.Run("a refused patch runs no apt-mark", func(t *testing.T) {
+		log := stubApt(t)
+		e := newTestEngine(t, nil)
+		saturateQueue(t, e)
+		aptRow(t, e)
+
+		if _, err := e.Patch("jq", &PatchRequest{Pin: &yes, Version: &v}); !errors.Is(err, ErrQueueFull) {
+			t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
+		}
+		if got, err := os.ReadFile(log); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("apt-mark ran %q for a refused patch, want no call", got)
+		}
+	})
+	t.Run("an accepted pin holds the package", func(t *testing.T) {
+		log := stubApt(t)
+		e := newTestEngine(t, nil)
+		aptRow(t, e)
+
+		if _, err := e.Patch("jq", &PatchRequest{Pin: &yes}); err != nil {
+			t.Fatalf("Patch(pin) = %v", err)
+		}
+		if got, err := os.ReadFile(log); err != nil || string(got) != "hold -- jq\n" {
+			t.Errorf("apt-mark ran %q (%v), want hold -- jq", got, err)
+		}
+	})
 }
 
 // TestPatch_VersionArgs: version_args is probe input only, so a patch stores

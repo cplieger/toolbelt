@@ -47,6 +47,8 @@ A change returns `202 {"job": ...}`, with a null job when nothing needed doing. 
 - `disabled` marks an install sent to a template.
 - `not_configured` marks a catalog refresh on an engine without `Config.Refresh`.
 
+A job the queue cannot take gets a `503` reply: `queue_full` when 8 jobs already wait, which a client may retry once one finishes, and `shutting_down` once the engine is closing. A refused `POST {prefix}` or `PATCH` changes nothing.
+
 A request that a GitHub rate limit stops before any job starts gets a `503` reply with the code `github_rate_limited`. That happens, for example, when `POST {prefix}` looks up the latest version. A job that fails for the same reason carries `error_code: github_rate_limited`. Both carry a `rate_limit` object:
 
 ```json

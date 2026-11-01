@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -372,6 +373,63 @@ func TestCatalogRefreshRoute(t *testing.T) {
 		}
 		if jr.Job.Kind != toolbelt.JobKindCatalogRefresh {
 			t.Errorf("job kind = %q", jr.Job.Kind)
+		}
+	})
+}
+
+// TestQueueRefusals: a job the queue cannot take is a transient server
+// condition (RFC 9110 15.6.4), so it is a coded 503 rather than a 400 that
+// tells the client its request was malformed.
+func TestQueueRefusals(t *testing.T) {
+	post := func(t *testing.T, h http.Handler) (int, string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/tools/update", http.NoBody))
+		var body struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode %q: %v", rec.Body.String(), err)
+		}
+		return rec.Code, body.Code
+	}
+	t.Run("a full queue is 503 queue_full", func(t *testing.T) {
+		e, h := newHandler(t)
+		slow, err := e.Add(t.Context(), &toolbelt.AddRequest{
+			Name: "slow", Source: toolbelt.SourceManual, Version: "1", Install: "exec sleep 30",
+		})
+		if err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for active, _ := e.Jobs(); active == nil || active.ID != slow.ID || active.State != toolbelt.JobRunning; active, _ = e.Jobs() {
+			if time.Now().After(deadline) {
+				t.Fatal("Setup: slow job never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		for range 100 {
+			if _, err = e.Update(); err != nil {
+				break
+			}
+		}
+		if !errors.Is(err, toolbelt.ErrQueueFull) {
+			t.Fatalf("Setup: Update on a full queue = %v, want ErrQueueFull", err)
+		}
+
+		if code, errCode := post(t, h); code != http.StatusServiceUnavailable || errCode != "queue_full" {
+			t.Errorf("POST update on a full queue = %d %q, want 503 queue_full", code, errCode)
+		}
+	})
+	t.Run("a closed engine is 503 shutting_down", func(t *testing.T) {
+		e, h := newHandler(t)
+		e.Close()
+		if _, err := e.Update(); !errors.Is(err, toolbelt.ErrShuttingDown) {
+			t.Errorf("Update after Close = %v, want ErrShuttingDown", err)
+		}
+
+		if code, errCode := post(t, h); code != http.StatusServiceUnavailable || errCode != "shutting_down" {
+			t.Errorf("POST update after Close = %d %q, want 503 shutting_down", code, errCode)
 		}
 	})
 }
