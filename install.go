@@ -873,11 +873,11 @@ func (in *installer) pmEnv() []string {
 // installed. exec resolves a bare name against this process's PATH, not
 // cmd.Env's, so bin/ is tried explicitly first.
 func (in *installer) runPM(ctx context.Context, name string, args ...string) error {
-	path := name
+	prog := name
 	if managed, err := exec.LookPath(filepath.Join(in.binDir(), name)); err == nil {
-		path = managed
+		prog = managed
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := exec.CommandContext(ctx, prog, args...)
 	cmd.Env = in.pmEnv()
 	return in.streamCmd(cmd, name)
 }
