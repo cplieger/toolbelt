@@ -1208,3 +1208,30 @@ func TestInstallPip_PassesThePythonRequest(t *testing.T) {
 		})
 	}
 }
+
+// TestInstallNpm_CreatesTheModuleTreeFirst pins that npm/lib/node_modules
+// exists with the managed mode before npm runs: npm would otherwise create it
+// under the caller's umask, and VerifyRootIntegrity judges that tree.
+func TestInstallNpm_CreatesTheModuleTreeFirst(t *testing.T) {
+	dir := t.TempDir()
+	seen := filepath.Join(dir, "seen")
+	script := "#!/bin/sh\n" +
+		"if [ -d \"$NPM_CONFIG_PREFIX/lib/node_modules\" ]; then echo present > " + seen + "; else echo absent > " + seen + "; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "npm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+
+	if _, err := in.installNpm(t.Context(), "x", "1.0.0", nil); err != nil {
+		t.Fatalf("installNpm: %v", err)
+	}
+	if got := readArgv(t, seen); !slices.Equal(got, []string{"present"}) {
+		t.Errorf("node_modules when npm ran = %q, want [present]", got)
+	}
+	for _, d := range []string{npmLibDir(in.toolsDir), npmModulesDir(in.toolsDir)} {
+		if got := storedDirMode(t, d); got != managedDirStoredMode {
+			t.Errorf("mode of %s = %v, want %v", d, got, managedDirStoredMode)
+		}
+	}
+}
