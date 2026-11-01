@@ -174,7 +174,7 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 		args = defaultVersionArgs
 	}
 	want := s.InstalledVersion
-	fingerprint, err := probeFingerprint(target, want, args)
+	fingerprint, err := probeFingerprint(target, want, t.VersionArgs)
 	if err != nil {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "probe target unusable: " + err.Error()}
 	}
@@ -397,12 +397,12 @@ func derivedProbeName(name string, t *Tool) string {
 
 // probeFingerprint identifies what is about to be probed, so a cached
 // verdict is only reused for the exact same binary, recorded version and
-// probe shape. Assembled with keyenc rather than concatenated: the
-// resolved path and the wanted version can both contain a separator, so
-// a raw join lets one tool's fingerprint collide with another's; the
-// arg list nests for the same reason (["--version"] vs ["--","version"]
-// must not share a joined form).
-func probeFingerprint(target, want string, args []string) (string, error) {
+// probe shape. declaredArgs is the definition's list before defaulting:
+// declaring the default ["--version"] runs the same argv but grades the
+// version, so it must not reuse an undeclared verdict. Assembled with
+// keyenc because the path, version and args can each hold a separator
+// (["--version"] vs ["--","version"] must not share a joined form).
+func probeFingerprint(target, want string, declaredArgs []string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		return "", err
@@ -416,7 +416,7 @@ func probeFingerprint(target, want string, args []string) (string, error) {
 		strconv.FormatInt(fi.Size(), 10),
 		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
 		want,
-		keyenc.Join(args...),
+		keyenc.Join(declaredArgs...),
 	), nil
 }
 

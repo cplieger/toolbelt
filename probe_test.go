@@ -378,6 +378,47 @@ func TestProbeInstalled_CachesExecPerBinary(t *testing.T) {
 	}
 }
 
+// TestProbeInstalled_DeclaringVersionArgsReprobes pins that declaring a
+// version shape equal to the default (--version) re-grades the binary: the
+// same argv runs, but only a declared shape checks the version, so a cached
+// verdict from one shape must not answer for the other, in either order.
+func TestProbeInstalled_DeclaringVersionArgsReprobes(t *testing.T) {
+	undeclared := probeVerdict{OK: true, Mode: probeModeExec}
+	declared := probeVerdict{OK: false, Mode: probeModeVersion}
+	cases := []struct {
+		name  string
+		steps [][]string
+		want  []probeVerdict
+	}{
+		{
+			name:  "declaring after an undeclared probe",
+			steps: [][]string{nil, {"--version"}},
+			want:  []probeVerdict{undeclared, declared},
+		},
+		{
+			name:  "undeclaring after a declared probe",
+			steps: [][]string{{"--version"}, nil},
+			want:  []probeVerdict{declared, undeclared},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			captureLogs(e)
+			writeStub(t, e, "tool", "echo tool 9.9.9")
+			status := ToolStatus{InstalledVersion: "1.2.3", Bins: []string{"tool"}}
+			for i, args := range tc.steps {
+				tool := Tool{Source: SourceManual, VersionArgs: args}
+				v := e.probeTool("tool", &tool, &status)
+				if v.OK != tc.want[i].OK || v.Mode != tc.want[i].Mode {
+					t.Errorf("probe %d with version_args %q = %+v, want OK=%v mode %q",
+						i, args, v, tc.want[i].OK, tc.want[i].Mode)
+				}
+			}
+		})
+	}
+}
+
 // TestProbeBin_PicksOneTarget pins which bin the probe executes: the
 // declared probe name, else the derived one, else the first recorded bin —
 // never one subprocess per recorded name.
