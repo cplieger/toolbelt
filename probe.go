@@ -171,14 +171,11 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	}
 	var interpreter string
 	if kind == SourcePip {
-		identity, missing := e.pipInterpreter(ref)
-		if missing != "" {
-			return probeVerdict{
-				OK: false, Mode: probeModePresence, CannotExec: true,
-				Reason: "venv interpreter " + missing + " is missing",
-			}
+		var failed probeVerdict
+		var ok bool
+		if interpreter, failed, ok = e.probePipInterpreter(ref); !ok {
+			return failed
 		}
-		interpreter = identity
 	}
 	target := filepath.Join(e.binDir(), probeBin(name, t, bins))
 	args := t.VersionArgs
@@ -200,6 +197,26 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	e.probes.store(name, fingerprint, v)
 	e.logVerdict(name, v)
 	return v
+}
+
+// probePipInterpreter checks a pip: venv's interpreter before its launcher
+// runs. ok is false with the failed verdict when the interpreter is missing
+// or unmanaged; otherwise identity is pipInterpreter's.
+func (e *Engine) probePipInterpreter(ref string) (identity string, failed probeVerdict, ok bool) {
+	identity, missing, foreign := pipInterpreter(e.toolsDir, ref)
+	switch {
+	case missing != "":
+		return "", probeVerdict{
+			OK: false, Mode: probeModePresence, CannotExec: true,
+			Reason: "venv interpreter " + missing + " is missing",
+		}, false
+	case foreign != "":
+		return "", probeVerdict{
+			OK: false, Mode: probeModePresence,
+			Reason: "venv interpreter " + foreign + " is outside " + pythonInterpreterDir(e.toolsDir),
+		}, false
+	}
+	return identity, probeVerdict{}, true
 }
 
 // probeApt asks dpkg, because an apt package may ship no executable at
@@ -278,34 +295,41 @@ const pyvenvCap = 64 << 10
 // (https://packaging.python.org/en/latest/specifications/name-normalization/).
 var pipVenvSeparators = regexp.MustCompile(`[-_.]+`)
 
+// pipVenvName is the venv dir uv names after a pip: ref: the normalized
+// package name, extras dropped.
+func pipVenvName(ref string) string {
+	name, _, _ := strings.Cut(ref, "[")
+	return strings.ToLower(pipVenvSeparators.ReplaceAllString(name, "-"))
+}
+
 // pipInterpreter inspects the interpreter of the uv venv behind a pip: ref:
 // the pyvenv.cfg home directory and the file bin/python resolves to. Both
 // live outside the venv, so the launcher's fingerprint cannot see them
-// change. missing names the first one gone; otherwise identity is the
-// resolved interpreter's path, mode, size and mtime. Both are empty when
+// change. missing names the first one gone; else foreign is the resolved
+// interpreter when it lies outside pythonInterpreterDir, a tree the engine
+// does not manage and so cannot keep alive; otherwise identity is the
+// resolved interpreter's path, mode, size and mtime. All are empty when
 // there is no pyvenv.cfg or a venv path leaves the tool dir.
-func (e *Engine) pipInterpreter(ref string) (identity, missing string) {
-	toolDir := pythonToolDir(e.toolsDir)
+func pipInterpreter(toolsDir, ref string) (identity, missing, foreign string) {
+	toolDir := pythonToolDir(toolsDir)
 	root, err := os.OpenRoot(toolDir)
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer func() { _ = root.Close() }()
-	// uv names the venv after the normalized package name, extras dropped.
-	name, _, _ := strings.Cut(ref, "[")
-	venv := strings.ToLower(pipVenvSeparators.ReplaceAllString(name, "-"))
+	venv := pipVenvName(ref)
 	f, err := root.Open(filepath.Join(venv, "pyvenv.cfg"))
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, pyvenvCap))
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
 	if home := pyvenvHome(string(data)); home != "" {
 		if _, statErr := os.Stat(home); errors.Is(statErr, fs.ErrNotExist) {
-			return "", home
+			return "", home, ""
 		}
 	}
 	python := filepath.Join(venv, "bin", "python")
@@ -314,27 +338,40 @@ func (e *Engine) pipInterpreter(ref string) (identity, missing string) {
 	// interpreter outside the tool dir.
 	if _, err = root.Lstat(python); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", full
+			return "", full, ""
 		}
-		return "", ""
+		return "", "", ""
 	}
 	resolved, err := filepath.EvalSymlinks(full)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return "", full
+			return "", full, ""
 		}
-		return "", ""
+		return "", "", ""
 	}
 	fi, err := os.Stat(resolved)
 	if err != nil {
-		return "", ""
+		return "", "", ""
+	}
+	if !underDir(resolved, pythonInterpreterDir(toolsDir)) {
+		return "", "", resolved
 	}
 	return keyenc.Join(
 		resolved,
 		fi.Mode().String(),
 		strconv.FormatInt(fi.Size(), 10),
 		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
-	), ""
+	), "", ""
+}
+
+// underDir reports whether the resolved path lies below dir, compared with
+// dir's links resolved too.
+func underDir(resolved, dir string) bool {
+	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolvedDir
+	}
+	rel, err := filepath.Rel(dir, resolved)
+	return err == nil && rel != "." && filepath.IsLocal(rel)
 }
 
 // pyvenvHome reads the home key, parsed as CPython's site module does

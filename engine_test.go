@@ -2790,27 +2790,111 @@ func TestInstallTool_ReinstallsWhenThePythonRequestChanged(t *testing.T) {
 	}
 }
 
-// TestInstall_RebuildsAVenvWhoseInterpreterIsGone pins the recovery path:
-// after an inventory read cached the launcher as working, its venv's
-// interpreter is deleted; an explicit install must then rebuild the venv
-// through uv on the engine-managed interpreters instead of reporting
-// "already installed".
-func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
+// venvUV puts a uv on PATH that appends its argv and interpreter env to the
+// returned file. `tool uninstall` drops the x venv and launcher; `tool
+// install` builds the venv on a managed interpreter unless a venv with a
+// resolvable bin/python exists, which it keeps as uv keeps a venv whose
+// receipt pins a Python request.
+func venvUV(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	argv := filepath.Join(dir, "argv")
 	script := "#!/bin/sh\n" +
 		"echo \"$* UV_MANAGED_PYTHON=$UV_MANAGED_PYTHON UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR\" >> " + argv + "\n" +
+		"if [ \"$2\" = uninstall ]; then rm -rf \"$UV_TOOL_DIR/x\" \"$UV_TOOL_BIN_DIR/x\"; exit 0; fi\n" +
+		"if [ ! -e \"$UV_TOOL_DIR/x/bin/python\" ]; then\n" +
 		"home=\"$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin\"\n" +
 		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x/bin\"\n" +
 		"touch \"$home/python3\"\n" +
 		"echo \"home = $home\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
 		"ln -sf \"$home/python3\" \"$UV_TOOL_DIR/x/bin/python\"\n" +
+		"fi\n" +
 		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
 		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argv
+}
+
+// TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter pins the migration of a
+// venv built before the engine managed interpreters: it reads as not
+// installed, and an install uninstalls it so uv rebuilds it on a managed
+// interpreter. A venv already on one is reinstalled in place.
+func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
+	cases := []struct {
+		name      string
+		recorded  string
+		home      func(e *Engine) string
+		installed bool
+		uninstall bool
+	}{
+		{
+			name: "unmanaged interpreter", recorded: "1.0.0",
+			home:      func(*Engine) string { return newInterpreterHome(t, t.TempDir()) },
+			installed: false, uninstall: true,
+		},
+		{
+			name: "managed interpreter with an outdated version", recorded: "0.9.0",
+			home:      func(e *Engine) string { return newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)) },
+			installed: true, uninstall: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := venvUV(t)
+			e := pipEngine(t, "")
+			writeStub(t, e, "x", "echo x 1.0.0")
+			if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+				s.InstalledVersion = tc.recorded
+				s.PMBins = []string{"x"}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			writeVenv(t, e, "x", tc.home(e))
+			if got := inventoryRow(t, e, "x").Installed; got != tc.installed {
+				t.Errorf("inventory before the install: installed = %v, want %v", got, tc.installed)
+			}
+
+			job, err := e.Install("x")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if final := waitJob(t, e, job.ID); final.State != JobDone {
+				t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+			}
+			interpreters := pythonInterpreterDir(e.toolsDir)
+			env := " UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters
+			want := []string{"tool install --reinstall x==1.0.0" + env}
+			if tc.uninstall {
+				want = append([]string{"tool uninstall x" + env}, want...)
+			}
+			if got := readArgv(t, argv); !slices.Equal(got, want) {
+				t.Errorf("uv runs = %q, want %q", got, want)
+			}
+			if !inventoryRow(t, e, "x").Installed {
+				t.Error("inventory after the install: x not installed")
+			}
+			cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(cfg), "home = "+interpreters+string(os.PathSeparator)) {
+				t.Errorf("pyvenv.cfg = %q, want home under %s", cfg, interpreters)
+			}
+		})
+	}
+}
+
+// TestInstall_RebuildsAVenvWhoseInterpreterIsGone pins the recovery path:
+// after an inventory read cached the launcher as working, its venv's
+// interpreter is deleted; an explicit install must then rebuild the venv
+// through uv on the engine-managed interpreters instead of reporting
+// "already installed".
+func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
+	argv := venvUV(t)
 	e := pipEngine(t, "")
 	writeStub(t, e, "x", "echo x 1.0.0")
 	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
@@ -2819,7 +2903,7 @@ func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	dead := newInterpreterHome(t)
+	dead := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
 	writeVenv(t, e, "x", dead)
 	if !inventoryRow(t, e, "x").Installed {
 		t.Fatal("inventory before the interpreter died: x not installed")

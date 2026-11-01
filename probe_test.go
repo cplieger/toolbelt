@@ -440,9 +440,9 @@ func writeVenv(t *testing.T, e *Engine, venv, home string) {
 	}
 }
 
-func newInterpreterHome(t *testing.T) string {
+func newInterpreterHome(t *testing.T, dir string) string {
 	t.Helper()
-	home := filepath.Join(t.TempDir(), "cpython-3.15.2", "bin")
+	home := filepath.Join(dir, "cpython-3.15.2", "bin")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +470,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			name: "live interpreter",
 			ref:  "x",
 			setup: func(t *testing.T, e *Engine) {
-				writeVenv(t, e, "x", newInterpreterHome(t))
+				writeVenv(t, e, "x", newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)))
 			},
 			want: true,
 		},
@@ -478,7 +478,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			name: "interpreter executable gone while home remains",
 			ref:  "x",
 			setup: func(t *testing.T, e *Engine) {
-				home := newInterpreterHome(t)
+				home := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
 				writeVenv(t, e, "x", home)
 				if err := os.Remove(filepath.Join(home, "python3")); err != nil {
 					t.Fatal(err)
@@ -490,7 +490,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			name: "venv without its python link",
 			ref:  "x",
 			setup: func(t *testing.T, e *Engine) {
-				home := newInterpreterHome(t)
+				home := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
 				writeVenv(t, e, "x", home)
 				if err := os.Remove(filepath.Join(e.toolsDir, "python", "tools", "x", "bin", "python")); err != nil {
 					t.Fatal(err)
@@ -502,7 +502,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			name: "python link resolving through a link chain",
 			ref:  "x",
 			setup: func(t *testing.T, e *Engine) {
-				home := newInterpreterHome(t)
+				home := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
 				minor := filepath.Join(filepath.Dir(filepath.Dir(home)), "cpython-3.15")
 				if err := os.Symlink(filepath.Dir(home), minor); err != nil {
 					t.Fatal(err)
@@ -544,6 +544,41 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			want: false, wantCannotExec: true, wantReason: "gone",
 		},
 		{
+			name: "interpreter outside the managed dir",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				writeVenv(t, e, "x", newInterpreterHome(t, t.TempDir()))
+			},
+			want: false, wantReason: "is outside",
+		},
+		{
+			name: "interpreter in a sibling dir sharing the managed dir's name prefix",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				writeVenv(t, e, "x", newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)+"-old"))
+			},
+			want: false, wantReason: "is outside",
+		},
+		{
+			name: "managed dir reached through a link",
+			ref:  "x",
+			setup: func(t *testing.T, e *Engine) {
+				managed := pythonInterpreterDir(e.toolsDir)
+				if err := os.RemoveAll(managed); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(managed), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				target := t.TempDir()
+				if err := os.Symlink(target, managed); err != nil {
+					t.Fatal(err)
+				}
+				writeVenv(t, e, "x", newInterpreterHome(t, target))
+			},
+			want: true,
+		},
+		{
 			name:  "no venv falls back to the exec probe",
 			ref:   "x",
 			setup: func(*testing.T, *Engine) {},
@@ -554,7 +589,7 @@ func TestProbeInstalled_PipVenvInterpreter(t *testing.T) {
 			ref:  "x",
 			setup: func(t *testing.T, e *Engine) {
 				writeVenv(t, e, "x", "")
-				python := filepath.Join(newInterpreterHome(t), "python3")
+				python := filepath.Join(newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)), "python3")
 				if err := os.Symlink(python, filepath.Join(e.toolsDir, "python", "tools", "x", "bin", "python")); err != nil {
 					t.Fatal(err)
 				}
@@ -633,7 +668,7 @@ func TestProbeInstalled_CachedVerdictDoesNotOutliveTheInterpreter(t *testing.T) 
 			e := newTestEngine(t, nil)
 			captureLogs(e)
 			writeStub(t, e, "x", "echo x 1.0.0")
-			home := newInterpreterHome(t)
+			home := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
 			writeVenv(t, e, "x", home)
 			tool := Tool{Source: "pip:x", VersionArgs: []string{"--version"}}
 			status := ToolStatus{InstalledVersion: "1.0.0", PMBins: []string{"x"}}
@@ -695,7 +730,7 @@ func TestProbeInstalled_CachedVerdictFollowsTheInterpreter(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newTestEngine(t, nil)
 			captureLogs(e)
-			home := newInterpreterHome(t)
+			home := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
 			python := filepath.Join(home, "python3")
 			if err := os.WriteFile(python, []byte("#!/bin/sh\necho x 1.0.0\n"), 0o755); err != nil {
 				t.Fatal(err)
