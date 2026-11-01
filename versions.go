@@ -3,22 +3,30 @@ package toolbelt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cplieger/httpx/v5"
 	goversion "github.com/hashicorp/go-version"
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 )
 
-// versionLookupBudget bounds one latest-version resolution end to end,
-// retries included (httpx retries transient failures and honors 429
-// Retry-After inside this window).
+// versionLookupBudget bounds one upstream request of a latest-version
+// resolution, retries included (httpx retries transient failures and honors
+// 429 Retry-After inside this window).
 const versionLookupBudget = 45 * time.Second
+
+// versionResponseCap bounds one version-lookup response body.
+const versionResponseCap = 4 << 20
 
 // versionResolver finds the latest upstream version for a tool source.
 // Results are cached in memory so Inventory can surface "update
@@ -353,29 +361,167 @@ func (v *versionResolver) latestCrate(ctx context.Context, name string) (string,
 	return "", fmt.Errorf("crate %q has no versions", name)
 }
 
-func (v *versionResolver) latestGoModule(ctx context.Context, modPath string) (string, error) {
-	// The module proxy requires case-escaped paths; x/mod validates the
-	// path shape as a side effect.
+// latestGoModule resolves a go: package path to the latest version of the
+// module that owns it, as the go command does: the longest path prefix the
+// proxy knows as a module, read from its version list.
+func (v *versionResolver) latestGoModule(ctx context.Context, pkgPath string) (string, error) {
+	if err := module.CheckImportPath(pkgPath); err != nil {
+		return "", fmt.Errorf("invalid go package path %q: %w", pkgPath, err)
+	}
+	for _, mod := range goModulePrefixes(pkgPath) {
+		ver, found, err := v.latestModuleVersion(ctx, mod)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return ver, nil
+		}
+	}
+	return "", fmt.Errorf("no module on the Go module proxy provides package %q", pkgPath)
+}
+
+// goModulePrefixes lists the module paths that could own pkgPath, longest
+// first, so a nested module wins over its parent.
+func goModulePrefixes(pkgPath string) []string {
+	var out []string
+	for p := pkgPath; p != "." && p != "/"; p = path.Dir(p) {
+		if module.CheckPath(p) == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// latestModuleVersion reads one module's latest version from the proxy;
+// found is false when the proxy has no such module. The list is read rather
+// than @latest because @latest is the go command's fallback for an empty
+// list and can lag it (https://go.dev/ref/mod#goproxy-protocol).
+func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath string) (version string, found bool, err error) {
 	esc, err := module.EscapePath(modPath)
 	if err != nil {
-		return "", fmt.Errorf("invalid module path %q: %w", modPath, err)
+		return "", false, fmt.Errorf("invalid module path %q: %w", modPath, err)
 	}
-	var doc struct {
-		Version string `json:"Version"`
+	base := "https://proxy.golang.org/" + esc + "/@"
+	body, err := v.getBytes(ctx, base+"v/list")
+	if isNotFound(err) {
+		return "", false, nil
 	}
-	if err := v.getJSON(ctx, "https://proxy.golang.org/"+esc+"/@latest", &doc); err != nil {
-		return "", err
+	if err != nil {
+		return "", false, err
 	}
-	if doc.Version == "" {
-		return "", fmt.Errorf("go module %q has no latest version", modPath)
+	listed := strings.Fields(string(body))
+	pick := highestModuleVersion(listed)
+	if pick == "" {
+		var doc struct {
+			Version string `json:"Version"`
+		}
+		lerr := v.getJSON(ctx, base+"latest", &doc)
+		if isNotFound(lerr) {
+			return "", false, nil
+		}
+		if lerr != nil {
+			return "", false, lerr
+		}
+		if doc.Version == "" {
+			return "", false, fmt.Errorf("go module %q has no latest version", modPath)
+		}
+		return doc.Version, true, nil
 	}
-	return doc.Version, nil
+	retracted, err := v.moduleRetractions(ctx, base, pick)
+	if err != nil {
+		return "", false, err
+	}
+	kept := slices.DeleteFunc(slices.Clone(listed), func(ver string) bool {
+		return slices.ContainsFunc(retracted, func(r modfile.VersionInterval) bool {
+			return semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0
+		})
+	})
+	if p := highestModuleVersion(kept); p != "" {
+		pick = p
+	}
+	return pick, true, nil
+}
+
+// moduleRetractions reads the retract directives of the module's go.mod at
+// version, which the go command applies to every listed version
+// (https://go.dev/ref/mod#go-mod-file-retract).
+func (v *versionResolver) moduleRetractions(ctx context.Context, base, version string) ([]modfile.VersionInterval, error) {
+	escVer, err := module.EscapeVersion(version)
+	if err != nil {
+		return nil, fmt.Errorf("invalid module version %q: %w", version, err)
+	}
+	body, err := v.getBytes(ctx, base+"v/"+escVer+".mod")
+	if isNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	f, err := modfile.ParseLax("go.mod", body, nil)
+	if err != nil {
+		return nil, fmt.Errorf("go.mod at %s: %w", version, err)
+	}
+	out := make([]modfile.VersionInterval, 0, len(f.Retract))
+	for _, r := range f.Retract {
+		out = append(out, r.VersionInterval)
+	}
+	return out, nil
+}
+
+// highestModuleVersion picks the go command's "latest" from a version list:
+// canonical semver only, +incompatible versions only when nothing else is
+// listed, the highest release, else the highest prerelease. Empty means the
+// list holds no usable version.
+func highestModuleVersion(listed []string) string {
+	var compatible, incompatible []string
+	for _, ver := range listed {
+		switch canon := semver.Canonical(ver); ver {
+		case canon:
+			compatible = append(compatible, ver)
+		case canon + "+incompatible":
+			incompatible = append(incompatible, ver)
+		}
+	}
+	candidates := compatible
+	if len(candidates) == 0 {
+		candidates = incompatible
+	}
+	best, bestPre := "", ""
+	for _, ver := range candidates {
+		if semver.Prerelease(ver) != "" {
+			if bestPre == "" || semver.Compare(ver, bestPre) > 0 {
+				bestPre = ver
+			}
+		} else if best == "" || semver.Compare(ver, best) > 0 {
+			best = ver
+		}
+	}
+	if best == "" {
+		return bestPre
+	}
+	return best
+}
+
+// isNotFound reports whether err is the proxy saying it has no such module
+// or version: 404 or 410, per https://go.dev/ref/mod#goproxy-protocol.
+func isNotFound(err error) bool {
+	se, ok := errors.AsType[*httpx.StatusError](err)
+	return ok && (se.Code == http.StatusNotFound || se.Code == http.StatusGone)
 }
 
 func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
 	defer cancel()
-	return fetchJSON(ctx, v.client, rawURL, 4<<20, out)
+	return fetchJSON(ctx, v.client, rawURL, versionResponseCap, out)
+}
+
+func (v *versionResolver) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
+	defer cancel()
+	return httpx.GetBytes(ctx, v.client, rawURL,
+		httpx.WithMaxAttempts(3),
+		httpx.WithMaxBodyBytes(versionResponseCap),
+	)
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, rawURL string, maxBytes int64, out any) error {

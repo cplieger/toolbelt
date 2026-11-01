@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -310,4 +311,181 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 // httptest servers, so the index has nothing to contribute.
 func newTestVersionResolver(client *http.Client) *versionResolver {
 	return newVersionResolver(client, nil)
+}
+
+// goProxy fakes proxy.golang.org: routes maps a request path to its body,
+// every other path answers 404 as the proxy does for a path no module owns
+// (https://go.dev/ref/mod#goproxy-protocol). It records the paths asked.
+func goProxy(t *testing.T, routes map[string]string) (*versionResolver, *[]string) {
+	t.Helper()
+	var asked []string
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		if r.Host != "proxy.golang.org" {
+			t.Errorf("request to host %s, want proxy.golang.org", r.Host)
+		}
+		body, ok := routes[r.URL.Path]
+		if !ok {
+			http.Error(w, "not found: module: no matching versions for query \"latest\"", http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, body)
+	}))
+	return newTestVersionResolver(srv.Client()), &asked
+}
+
+func TestLatestGoModule_ResolvesTheOwningModule(t *testing.T) {
+	cases := []struct {
+		name, pkg, want string
+		routes          map[string]string
+	}{
+		{
+			name: "command inside its module",
+			pkg:  "github.com/rhysd/actionlint/cmd/actionlint",
+			routes: map[string]string{
+				"/github.com/rhysd/actionlint/@v/list":        "v1.7.11\nv1.7.12\n",
+				"/github.com/rhysd/actionlint/@v/v1.7.12.mod": "module github.com/rhysd/actionlint\n",
+			},
+			want: "v1.7.12",
+		},
+		{
+			name: "deep package of golang.org/x/tools",
+			pkg:  "golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment",
+			routes: map[string]string{
+				"/golang.org/x/tools/@v/list":        "v0.44.0\nv0.45.1\nv0.45.0\n",
+				"/golang.org/x/tools/@v/v0.45.1.mod": "module golang.org/x/tools\n",
+			},
+			want: "v0.45.1",
+		},
+		{
+			name: "nested module wins over its parent",
+			pkg:  "golang.org/x/tools/gopls",
+			routes: map[string]string{
+				"/golang.org/x/tools/gopls/@v/list":        "v0.21.0\n",
+				"/golang.org/x/tools/gopls/@v/v0.21.0.mod": "module golang.org/x/tools/gopls\n",
+				"/golang.org/x/tools/@v/list":              "v0.45.1\n",
+			},
+			want: "v0.21.0",
+		},
+		{
+			name: "upper-case path is case-escaped",
+			pkg:  "github.com/BurntSushi/toml/cmd/tomlv",
+			routes: map[string]string{
+				"/github.com/!burnt!sushi/toml/@v/list":       "v1.5.0\nv1.6.0\n",
+				"/github.com/!burnt!sushi/toml/@v/v1.6.0.mod": "module github.com/BurntSushi/toml\n",
+			},
+			want: "v1.6.0",
+		},
+		{
+			name: "incompatible versions lose to a compatible one",
+			pkg:  "example.com/m",
+			routes: map[string]string{
+				"/example.com/m/@v/list":       "v1.4.0\nv2.0.0+incompatible\n",
+				"/example.com/m/@v/v1.4.0.mod": "module example.com/m\n",
+			},
+			want: "v1.4.0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := goProxy(t, tc.routes)
+			got, err := v.Latest(t.Context(), "go:"+tc.pkg, nil)
+			if err != nil {
+				t.Fatalf("Latest(go:%s) = %v", tc.pkg, err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest(go:%s) = %q, want %q", tc.pkg, got, tc.want)
+			}
+		})
+	}
+}
+
+// The proxy's @latest is the go command's fallback for an empty list, and it
+// can lag @v/list (gremlins answered v0.5.1 on @latest with v0.6.0 listed).
+func TestLatestGoModule_ListBeatsALaggingLatest(t *testing.T) {
+	v, _ := goProxy(t, map[string]string{
+		"/github.com/go-gremlins/gremlins/@v/list":       "v0.5.1\nv0.6.0\n",
+		"/github.com/go-gremlins/gremlins/@latest":       `{"Version":"v0.5.1"}`,
+		"/github.com/go-gremlins/gremlins/@v/v0.6.0.mod": "module github.com/go-gremlins/gremlins\n",
+	})
+	got, err := v.Latest(t.Context(), "go:github.com/go-gremlins/gremlins/cmd/gremlins", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "v0.6.0" {
+		t.Errorf("Latest = %q, want v0.6.0", got)
+	}
+}
+
+func TestLatestGoModule_PseudoVersionOnlyModule(t *testing.T) {
+	const pseudo = "v0.0.0-20261011093844-7a2c2c0b7aa6"
+	v, _ := goProxy(t, map[string]string{
+		"/mvdan.cc/unparam/@v/list": "",
+		"/mvdan.cc/unparam/@latest": `{"Version":"` + pseudo + `"}`,
+	})
+	got, err := v.Latest(t.Context(), "go:mvdan.cc/unparam", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != pseudo {
+		t.Errorf("Latest = %q, want %q", got, pseudo)
+	}
+}
+
+// The go command leaves retracted versions out of "latest"
+// (https://go.dev/ref/mod#go-mod-file-retract); the retractions are read from
+// the latest version's go.mod.
+func TestLatestGoModule_SkipsRetractedVersions(t *testing.T) {
+	cases := []struct {
+		name, mod, want string
+	}{
+		{name: "single version retracted", mod: "module example.com/m\nretract v1.1.0\n", want: "v1.0.0"},
+		{name: "range retracted", mod: "module example.com/m\nretract [v1.0.5, v1.1.0]\n", want: "v1.0.0"},
+		{name: "everything retracted keeps the highest", mod: "module example.com/m\nretract [v1.0.0, v1.1.0]\n", want: "v1.1.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := goProxy(t, map[string]string{
+				"/example.com/m/@v/list":       "v1.0.0\nv1.1.0\n",
+				"/example.com/m/@v/v1.1.0.mod": tc.mod,
+			})
+			got, err := v.Latest(t.Context(), "go:example.com/m", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Only "no such module" (404 or 410) moves the walk to a shorter prefix; any
+// other answer is an outage, and a shorter prefix would name the wrong module.
+func TestLatestGoModule_OtherErrorStopsTheWalk(t *testing.T) {
+	var asked []string
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	v := newTestVersionResolver(srv.Client())
+	_, err := v.Latest(t.Context(), "go:example.com/m/cmd/x", nil)
+	if err == nil {
+		t.Fatal("Latest succeeded, want the 403 as an error")
+	}
+	if len(asked) != 1 || asked[0] != "/example.com/m/cmd/x/@v/list" {
+		t.Errorf("asked %q, want only /example.com/m/cmd/x/@v/list", asked)
+	}
+}
+
+func TestLatestGoModule_NoModuleOwnsThePath(t *testing.T) {
+	v, asked := goProxy(t, map[string]string{})
+	_, err := v.Latest(t.Context(), "go:example.com/a/b", nil)
+	if err == nil || !strings.Contains(err.Error(), "example.com/a/b") {
+		t.Fatalf("Latest = %v, want an error naming example.com/a/b", err)
+	}
+	want := []string{"/example.com/a/b/@v/list", "/example.com/a/@v/list", "/example.com/@v/list"}
+	if !slices.Equal(*asked, want) {
+		t.Errorf("asked %q, want %q", *asked, want)
+	}
 }
