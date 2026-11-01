@@ -131,8 +131,9 @@ type aptStatus struct {
 	held      bool
 }
 
-// aptUnknownPackage is what dpkg-query prints, with exit status 1, for a
-// name it has no record of (dpkg-query(1), EXIT STATUS).
+// aptUnknownPackage is dpkg-query's untranslated message for a name it has no
+// record of. dpkg-query(1) documents only the exit status, 1, which other
+// failures share, and translates the text, so aptEnv pins the C locale.
 const aptUnknownPackage = "no packages found matching"
 
 // aptQuery reads a package's dpkg record. A package dpkg has no record of
@@ -328,10 +329,15 @@ func aptArchivesLockBusy(output string) bool {
 // maintainer script asks debconf a question would otherwise block on a
 // prompt no operator can see, and the job would hang until its context
 // expired rather than failing. Nothing here reads a terminal.
+//
+// LC_ALL=C because the engine matches apt and dpkg messages, which both
+// translate; os/exec keeps the last value of a repeated key, so it overrides
+// an inherited LC_ALL, and gettext ignores LANGUAGE under the C locale.
 func aptEnv() []string {
 	return systemPATHFirst(append(os.Environ(),
 		"DEBIAN_FRONTEND=noninteractive",
 		"DEBCONF_NONINTERACTIVE_SEEN=true",
+		"LC_ALL=C",
 	))
 }
 

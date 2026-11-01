@@ -121,6 +121,23 @@ func TestAptQuery_UnknownPackageAgreesWithRealDpkg(t *testing.T) {
 	}
 }
 
+// TestAptQuery_ReadsTheUnknownAnswerUnderATranslatedLocale: dpkg translates
+// its unknown-package message (de: "Kein Paket gefunden, das auf %s passt"),
+// so the server's locale must not reach the query whose text is matched.
+func TestAptQuery_ReadsTheUnknownAnswerUnderATranslatedLocale(t *testing.T) {
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	stubSystemBin(t, "dpkg-query", "#!/bin/sh\n"+
+		"if [ \"$LC_ALL\" = C ]; then echo \"dpkg-query: no packages found matching $4\" >&2\n"+
+		"else echo \"dpkg-query: Kein Paket gefunden, das auf $4 passt\" >&2; fi\nexit 1\n")
+
+	st, err := aptQuery(t.Context(), "jq")
+	if err != nil || st != (aptStatus{}) {
+		t.Errorf("aptQuery(unknown) under a German locale = %+v, %v; want the zero status and no error", st, err)
+	}
+}
+
 // TestAptCandidateFrom covers aptCandidateFrom's "(none)" rejection (see
 // its doc comment).
 func TestAptCandidateFrom(t *testing.T) {
