@@ -848,8 +848,8 @@ func (in *installer) pmEnv() []string {
 		"UV_TOOL_DIR=" + pythonToolDir(in.toolsDir),
 		"UV_TOOL_BIN_DIR=" + pythonBinDir(in.toolsDir),
 		// A tool venv breaks when its interpreter is removed, and uv's
-		// discovery otherwise takes a PATH python3, which a runtime update
-		// replaces in place (https://docs.astral.sh/uv/concepts/tools/#python-versions).
+		// discovery otherwise takes a PATH python3, which the engine does not
+		// manage (https://docs.astral.sh/uv/concepts/tools/#python-versions).
 		"UV_MANAGED_PYTHON=1",
 		"UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(in.toolsDir),
 	}
