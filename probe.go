@@ -406,7 +406,6 @@ func pyvenvHome(cfg string) string {
 	return ""
 }
 
-// declaresBin reports whether a package.json "bin" value names anything.
 func declaresBin(bin any) bool {
 	switch b := bin.(type) {
 	case string:

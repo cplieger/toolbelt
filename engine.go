@@ -643,8 +643,6 @@ type PatchRequest struct {
 	Force bool `json:"force,omitempty"`
 }
 
-// patchOutcome records what a Patch mutation changed, for job selection
-// and the apt hold.
 type patchOutcome struct {
 	source          string
 	cascaded        []string
@@ -802,7 +800,6 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	return out
 }
 
-// job names the job kind and tools the patch needs, or "" for none.
 func (out *patchOutcome) job(name string) (kind string, names []string) {
 	switch {
 	case out.disabledChanged && out.nowDisabled:

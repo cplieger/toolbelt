@@ -110,7 +110,6 @@ func (v *versionResolver) Latest(ctx context.Context, t *Tool, aq *AquaPackage) 
 	return latest, nil
 }
 
-// recordedPrerelease reports whether the tool is on a prerelease line.
 func recordedPrerelease(t *Tool, aq *AquaPackage) bool {
 	prefix := ""
 	if aq != nil {
@@ -402,7 +401,6 @@ func isPrerelease(tag, prefix string, ver *goversion.Version) bool {
 	return ver.Prerelease() != "" && !isoDateVersion.MatchString(trimTagPrefix(tag, prefix))
 }
 
-// trimTagPrefix strips the declared version prefix and one leading "v".
 func trimTagPrefix(tag, prefix string) string {
 	return strings.TrimPrefix(strings.TrimPrefix(tag, prefix), "v")
 }

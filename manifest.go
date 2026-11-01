@@ -236,8 +236,6 @@ func validateManifest(m *Manifest) error {
 	return nil
 }
 
-// validateTool is the check one manifest row must pass, given its current
-// source.
 func validateTool(t *Tool) error {
 	if t.Version != "" && !validVersion(t.Source, t.Version) {
 		return versionRejected(t.Source, t.Version)
