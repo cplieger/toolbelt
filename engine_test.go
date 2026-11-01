@@ -1619,8 +1619,6 @@ func saturateQueue(t *testing.T, e *Engine) {
 	}
 }
 
-// TestAdd_QueueFullLeavesNoRow: an add rejected by a full queue
-// must not leave a phantom manifest row.
 func TestAdd_QueueFullLeavesNoRow(t *testing.T) {
 	e := newTestEngine(t, nil)
 	saturateQueue(t, e)

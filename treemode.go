@@ -11,18 +11,15 @@ import (
 	"github.com/cplieger/atomicfile/v4"
 )
 
-// groupOtherWrite is the group and other write bits.
 const groupOtherWrite os.FileMode = 0o022
 
-// stripGroupOtherWrite clears the group and other write bits from every
-// directory and regular file in dir's sub tree, never dir itself: a managed
-// root is certified when the engine creates it and otherwise judged by
-// VerifyRootIntegrity. npm, uv, go and tar create entries through the umask,
-// and on a ZFS nfs4acl volume an inherited group ACE stores them 0770, so a
-// group member could change what the engine runs as its own user.
-//
-// Symlinks are skipped, and each entry is changed through a descriptor
-// opened inside an os.Root, so a swapped name cannot reach outside dir.
+// stripGroupOtherWrite clears group and other write from every directory and
+// regular file under dir/sub, never dir itself, which VerifyRootIntegrity
+// judges. npm, uv, go and tar create entries through the umask, and on a ZFS
+// nfs4acl volume an inherited group ACE stores them 0770, so a group member
+// could change what the engine runs. Symlinks are skipped, and each entry is
+// changed through a descriptor opened inside an os.Root, so a swapped name
+// cannot reach outside dir.
 func stripGroupOtherWrite(dir, sub string) error {
 	root, err := os.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {

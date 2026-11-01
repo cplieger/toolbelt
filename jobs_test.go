@@ -239,8 +239,6 @@ func TestJobQueue_ReservationHoldsItsPlaceUnseen(t *testing.T) {
 	})
 }
 
-// TestJobQueue_PublishAfterCloseIsCancelled: a reservation outliving Close
-// still settles, as a job cancelled by shutdown a waiter can collect.
 func TestJobQueue_PublishAfterCloseIsCancelled(t *testing.T) {
 	q := newLineQueue(t, func(*job, func(string)) error { return nil })
 	res, err := q.reserve(JobKindInstall, []string{"tool"}, nil)
