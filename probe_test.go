@@ -91,6 +91,16 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			wantReason: `reported "tool 9.9.9"`,
 		},
 		{
+			name: "declared version shape, tool reports a prerelease of the recorded version",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeStub(t, e, "tool", "echo tool v1.2.3-rc.1")
+				return Tool{Source: SourceManual, VersionArgs: []string{"--version"}},
+					ToolStatus{InstalledVersion: "v1.2.3", Bins: []string{"tool"}}
+			},
+			want: false, wantMode: probeModeVersion, wantWarning: "probe failed",
+			wantReason: `reported "tool v1.2.3-rc.1"`,
+		},
+		{
 			name: "declared version shape but nothing recorded to compare",
 			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
 				writeStub(t, e, "tool", "echo whatever")
@@ -890,7 +900,9 @@ func TestProbeBin_PicksOneTarget(t *testing.T) {
 
 // TestVersionAnswered pins the version-answer comparison: upstream
 // banners disagree about the v prefix and case, and another version fails,
-// including one the recorded version is a substring of.
+// including one the recorded version is a substring of or a prerelease of
+// (SemVer 2.0.0 section 9 hyphen labels, PEP 440 pre-release and
+// developmental spellings, a Debian tilde, Go's go1.Nrc1).
 func TestVersionAnswered(t *testing.T) {
 	cases := []struct {
 		out  string
@@ -911,6 +923,26 @@ func TestVersionAnswered(t *testing.T) {
 		{out: "v1.2.3", want: "1.2", ok: false},
 		{out: "go version go1.26.50 linux/amd64", want: "go1.26.5", ok: false},
 		{out: "tool 11.2.3, built against 1.2.3", want: "1.2.3", ok: true},
+		{out: "tool v1.2.3-rc.1", want: "v1.2.3", ok: false},
+		{out: "tool 1.2.3-beta.2", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3-alpha", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3-RC1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3rc1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3a1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3b1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3c1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3.dev1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3_pre1", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3preview2", want: "1.2.3", ok: false},
+		{out: "tool 1.2.3~rc1", want: "1.2.3", ok: false},
+		{out: "go version go1.27rc1 linux/amd64", want: "go1.27", ok: false},
+		{out: "tool 1.2.3-rc.1, built against 1.2.3", want: "1.2.3", ok: true},
+		{out: "tool 1.2.3-rc.1", want: "1.2.3-rc.1", ok: true},
+		{out: "tool 1.2.3.post1", want: "1.2.3", ok: true},
+		{out: "tool 1.2.3-amd64", want: "1.2.3", ok: true},
+		{out: "tool 1.2.3-arm64", want: "1.2.3", ok: true},
+		{out: "tool 1.2.3-darwin", want: "1.2.3", ok: true},
+		{out: "tool 1.2.3 (built by alice)", want: "1.2.3", ok: true},
 		{out: "9.9.9", want: "1.2.3", ok: false},
 		{out: "", want: "1.2.3", ok: false},
 		{out: "anything", want: "", ok: true},

@@ -578,7 +578,8 @@ func probeFingerprint(target, want string, declaredArgs []string) (string, error
 // version. Upstream banners are inconsistent about the v prefix and case
 // ("jq-1.8.1", "go version go1.26.5", "v24.18.0"), so the version, any
 // leading v trimmed, is found case-insensitively; an occurrence that
-// continues a longer version (1.2.3 inside 11.2.3 or 1.2.30) does not count.
+// continues a longer version (1.2.3 inside 11.2.3 or 1.2.30) or carries a
+// prerelease label (1.2.3-rc.1, 1.2.3rc1) does not count.
 func versionAnswered(out, want string) bool {
 	needle := strings.ToLower(strings.TrimPrefix(want, "v"))
 	if needle == "" {
@@ -592,7 +593,8 @@ func versionAnswered(out, want string) bool {
 		}
 		start := from + i
 		end := start + len(needle)
-		if !versionContinues(hay[:start], true) && !versionContinues(hay[end:], false) {
+		if !versionContinues(hay[:start], true) && !versionContinues(hay[end:], false) &&
+			!prereleaseFollows(hay[end:]) {
 			return true
 		}
 		from = start + 1
@@ -606,6 +608,32 @@ func versionContinues(side string, before bool) bool {
 		return digitAt(n-1) || n >= 2 && side[n-1] == '.' && digitAt(n-2)
 	}
 	return digitAt(0) || len(side) >= 2 && side[0] == '.' && digitAt(1)
+}
+
+// prereleaseLabels are PEP 440's pre-release and developmental spellings
+// (https://packaging.python.org/en/latest/specifications/version-specifiers/#pre-releases),
+// which cover SemVer's conventional alpha, beta and rc. A free-form SemVer
+// label is not one: git describe's "-dirty" and a "-amd64" platform tail
+// are build annotations of the recorded release.
+var prereleaseLabels = []string{"alpha", "beta", "preview", "pre", "rc", "dev", "a", "b", "c"}
+
+// prereleaseFollows reports whether the text right after a version match
+// (lowercased) opens a prerelease: a Debian "~" (sorts before the release,
+// Debian Policy 5.6.12), or a label after at most one of PEP 440's "-",
+// "." or "_" separators that is not the head of a longer word.
+func prereleaseFollows(rest string) bool {
+	if strings.HasPrefix(rest, "~") {
+		return true
+	}
+	if rest != "" && strings.IndexByte("-._", rest[0]) >= 0 {
+		rest = rest[1:]
+	}
+	for _, label := range prereleaseLabels {
+		if after, ok := strings.CutPrefix(rest, label); ok && (after == "" || after[0] < 'a' || after[0] > 'z') {
+			return true
+		}
+	}
+	return false
 }
 
 // firstLine is the reportable head of a probe answer (bounded, so a
