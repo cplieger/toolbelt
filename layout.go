@@ -16,9 +16,26 @@ func optDir(toolsDir string) string { return filepath.Join(toolsDir, "opt") }
 func npmDir(toolsDir string) string    { return filepath.Join(toolsDir, "npm") }
 func npmBinDir(toolsDir string) string { return filepath.Join(npmDir(toolsDir), "bin") }
 
+func npmLibDir(toolsDir string) string { return filepath.Join(npmDir(toolsDir), "lib") }
+
+// npmModulesDir is where npm's global install under the prefix puts each
+// package (https://docs.npmjs.com/cli/v11/configuring-npm/folders).
+func npmModulesDir(toolsDir string) string {
+	return filepath.Join(npmLibDir(toolsDir), "node_modules")
+}
+
 // pythonDir is uv's tool root; pythonBinDir is the launcher dir under it.
 func pythonDir(toolsDir string) string    { return filepath.Join(toolsDir, "python") }
 func pythonBinDir(toolsDir string) string { return filepath.Join(pythonDir(toolsDir), "bin") }
+
+// pythonToolDir holds one uv venv per pip: tool (UV_TOOL_DIR).
+func pythonToolDir(toolsDir string) string { return filepath.Join(pythonDir(toolsDir), "tools") }
+
+// pythonInterpreterDir holds the uv-managed CPython builds every pip: venv
+// links to (UV_PYTHON_INSTALL_DIR).
+func pythonInterpreterDir(toolsDir string) string {
+	return filepath.Join(pythonDir(toolsDir), "interpreters")
+}
 
 // managedDirs is every directory the engine owns, in audit order.
 func managedDirs(toolsDir string) []string {
@@ -27,7 +44,11 @@ func managedDirs(toolsDir string) []string {
 		optDir(toolsDir),
 		npmDir(toolsDir),
 		npmBinDir(toolsDir),
+		npmLibDir(toolsDir),
+		npmModulesDir(toolsDir),
 		pythonDir(toolsDir),
 		pythonBinDir(toolsDir),
+		pythonToolDir(toolsDir),
+		pythonInterpreterDir(toolsDir),
 	}
 }

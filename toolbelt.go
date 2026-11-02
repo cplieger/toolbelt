@@ -35,7 +35,7 @@ const (
 	SourceNpm     = "npm"     // npm:package
 	SourcePip     = "pip"     // pip:package (installed via uv)
 	SourceCargo   = "cargo"   // cargo:crate
-	SourceGo      = "go"      // go:module/path
+	SourceGo      = "go"      // go:package/path (what go install builds)
 	SourceApt     = "apt"     // apt:package — Debian package, container layer
 	SourceRelease = "release" // release:<github|gitlab>/owner/repo — forge release asset
 	SourceManual  = "manual"  // user-provided install command
@@ -50,7 +50,8 @@ const ManifestVersion = 2
 type Config struct {
 	// OnJobChanged, when non-nil, receives every job state transition
 	// (queued, running, done, failed, cancelled). Views carry no output
-	// tail; stream output via OnJobOutput or poll Jobs().
+	// tail; stream output via OnJobOutput or poll Jobs(). It runs under the
+	// job queue's lock, so it must not block or call the Engine.
 	OnJobChanged func(*Job)
 	// OnJobOutput, when non-nil, receives coalesced batches of a running
 	// job's output lines (~150 ms cadence).
@@ -103,9 +104,10 @@ type Config struct {
 	// VerifyRootIntegrity makes New REFUSE to construct an Engine over
 	// managed roots it cannot safely execute from (see rootintegrity.go).
 	// Off by default; turn it on when the tool tree lives on an
-	// operator-controlled volume and the process runs privileged. A
-	// failure returns ErrRootIntegrity as a *RootIntegrityError
-	// (errors.As), logged at Error before New returns.
+	// operator-controlled volume and the process runs privileged. New
+	// checks before it writes anything and again after it creates
+	// ConfigDir and bin/. A failure returns ErrRootIntegrity as a
+	// *RootIntegrityError (errors.As), logged at Error before New returns.
 	VerifyRootIntegrity bool
 }
 
@@ -206,10 +208,9 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 // (seeding when absent; another schema version is an error), refuses a
 // ConfigDir that fails a probe write, and launches the job worker.
 //
-// With Config.VerifyRootIntegrity set, the managed roots are inspected
-// FIRST — before any file is written or directory created — and an
-// unfit root refuses construction with ErrRootIntegrity. New is the
-// seam because Inventory and EnsureInstalled probe synchronously too.
+// With Config.VerifyRootIntegrity set (that field says when it checks),
+// an unfit managed root refuses construction with ErrRootIntegrity. New
+// is the seam because Inventory and EnsureInstalled probe synchronously too.
 func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
@@ -218,9 +219,9 @@ func New(cfg *Config) (*Engine, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	// Before newStore: st.initFiles() writes tools.json and CREATES
-	// ConfigDir, so a check placed after it would be judging a directory
-	// this library just made. Before the bin/ creation further down, which
+	// Before newStore: initFiles writes tools.json and CREATES ConfigDir, so
+	// an unfit root that already exists (a symlinked ConfigDir) is refused
+	// before anything is written through it. Before the bin/ creation, which
 	// resolves every ancestor component by name (only the leaf mkdir refuses
 	// a symlink). And before newJobQueue, whose worker goroutine an error
 	// returned afterwards would leak (the caller gets a nil Engine and can
@@ -245,6 +246,14 @@ func New(cfg *Config) (*Engine, error) {
 	// in every flow that goes through New.
 	if err := ensureManagedDir(binDir(cfg.ToolsDir)); err != nil {
 		return nil, err
+	}
+	// Again, now that ConfigDir, ToolsDir and bin/ exist: the first check
+	// skipped any root that was absent, and New created those through
+	// whatever mode the filesystem stores. Still before newJobQueue.
+	if cfg.VerifyRootIntegrity {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+			return nil, fmt.Errorf("toolbelt: %w", err)
+		}
 	}
 	client := newEngineClient(cfg.GitHubToken)
 	e := &Engine{

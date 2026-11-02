@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -372,6 +373,63 @@ func TestCatalogRefreshRoute(t *testing.T) {
 		}
 		if jr.Job.Kind != toolbelt.JobKindCatalogRefresh {
 			t.Errorf("job kind = %q", jr.Job.Kind)
+		}
+	})
+}
+
+// TestQueueRefusals: a job the queue cannot take is a transient server
+// condition (RFC 9110 15.6.4), so it is a coded 503 rather than a 400 that
+// tells the client its request was malformed.
+func TestQueueRefusals(t *testing.T) {
+	post := func(t *testing.T, h http.Handler) (int, string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/tools/update", http.NoBody))
+		var body struct {
+			Code string `json:"code"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode %q: %v", rec.Body.String(), err)
+		}
+		return rec.Code, body.Code
+	}
+	t.Run("a full queue is 503 queue_full", func(t *testing.T) {
+		e, h := newHandler(t)
+		slow, err := e.Add(t.Context(), &toolbelt.AddRequest{
+			Name: "slow", Source: toolbelt.SourceManual, Version: "1", Install: "exec sleep 30",
+		})
+		if err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for active, _ := e.Jobs(); active == nil || active.ID != slow.ID || active.State != toolbelt.JobRunning; active, _ = e.Jobs() {
+			if time.Now().After(deadline) {
+				t.Fatal("Setup: slow job never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		for range 100 {
+			if _, err = e.Update(); err != nil {
+				break
+			}
+		}
+		if !errors.Is(err, toolbelt.ErrQueueFull) {
+			t.Fatalf("Setup: Update on a full queue = %v, want ErrQueueFull", err)
+		}
+
+		if code, errCode := post(t, h); code != http.StatusServiceUnavailable || errCode != "queue_full" {
+			t.Errorf("POST update on a full queue = %d %q, want 503 queue_full", code, errCode)
+		}
+	})
+	t.Run("a closed engine is 503 shutting_down", func(t *testing.T) {
+		e, h := newHandler(t)
+		e.Close()
+		if _, err := e.Update(); !errors.Is(err, toolbelt.ErrShuttingDown) {
+			t.Errorf("Update after Close = %v, want ErrShuttingDown", err)
+		}
+
+		if code, errCode := post(t, h); code != http.StatusServiceUnavailable || errCode != "shutting_down" {
+			t.Errorf("POST update after Close = %d %q, want 503 shutting_down", code, errCode)
 		}
 	})
 }
@@ -1098,5 +1156,45 @@ func TestAddRoute_RateLimitIsCoded(t *testing.T) {
 	want := fmt.Sprintf(`{"reset_at":%d,"limit":60,"authenticated":false}`, reset.UnixMilli())
 	if rl := string(got["rate_limit"]); rl != want {
 		t.Errorf("POST /api/tools rate_limit = %s, want %s", rl, want)
+	}
+}
+
+func TestPatchRoute_VersionArgs(t *testing.T) {
+	dir := t.TempDir()
+	e, err := toolbelt.New(&toolbelt.Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(e.Close)
+	if _, err := e.Add(t.Context(), &toolbelt.AddRequest{Name: "m", Source: "manual", Version: "1", Disabled: true}); err != nil {
+		t.Fatalf("Setup: add m: %v", err)
+	}
+	h := Handler(e, "/api/tools")
+
+	rec, _ := serve(t, h, http.MethodPatch, "/api/tools/m", `{"version_args":["version"]}`)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("PATCH version_args = %d, want 202 (body %s)", rec.Code, rec.Body.String())
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "tools.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Tools map[string]struct {
+			VersionArgs []string `json:"version_args"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Tools["m"].VersionArgs; !slices.Equal(got, []string{"version"}) {
+		t.Errorf("tools.json version_args = %q, want [version]", got)
+	}
+
+	rec, _ = serve(t, h, http.MethodPatch, "/api/tools/m", `{"version_args":["a\u0000b"]}`)
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "NUL") {
+		t.Errorf("PATCH NUL version_args = %d %s, want 400 naming the NUL", rec.Code, rec.Body.String())
 	}
 }

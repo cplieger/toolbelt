@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -53,30 +54,62 @@ func TestAptValidName(t *testing.T) {
 	}
 }
 
-// TestAptStatusFrom is the five-state dpkg table; the middle row is the
-// defect aptStatusFrom exists to catch (see its doc comment).
+// TestAptStatusFrom is the dpkg state table; the removed-config-files row is
+// the defect aptStatusFrom exists to catch (see its doc comment), and the
+// want word is apt-mark's hold whatever the status (dpkg-query(1)).
 func TestAptStatusFrom(t *testing.T) {
 	cases := []struct {
-		state    string
-		out      string
-		wantVer  string
-		wantInst bool
+		state   string
+		out     string
+		want    aptStatus
+		wantErr bool
 	}{
-		{state: "installed", out: "installed 5.2.37-2+b9\n", wantVer: "5.2.37-2+b9", wantInst: true},
-		{state: "removed-config-files", out: "config-files 8.4-1+deb13u1\n", wantInst: false},
-		{state: "purged", out: "not-installed \n", wantInst: false},
-		{state: "half-configured", out: "half-configured 1.0\n", wantInst: false},
-		{state: "library-no-binary", out: "installed 2.41-12+deb13u3\n", wantVer: "2.41-12+deb13u3", wantInst: true},
-		{state: "empty-output", out: "", wantInst: false},
+		{state: "installed", out: "amd64\tinstall\tinstalled\t5.2.37-2+b9\n", want: aptStatus{version: "5.2.37-2+b9", installed: true}},
+		{state: "held", out: "amd64\thold\tinstalled\t1.7.1-6\n", want: aptStatus{version: "1.7.1-6", installed: true, held: true}},
+		{state: "removed-config-files", out: "amd64\tdeinstall\tconfig-files\t8.4-1+deb13u1\n"},
+		{state: "held but removed", out: "amd64\thold\tconfig-files\t8.4-1+deb13u1\n", want: aptStatus{held: true}},
+		{state: "held, never installed", out: "\thold\tnot-installed\t\n", want: aptStatus{held: true}},
+		{state: "purged", out: "\tunknown\tnot-installed\t\n"},
+		{state: "half-configured", out: "amd64\tinstall\thalf-configured\t1.0\n"},
+		{state: "library-no-binary", out: "amd64\tinstall\tinstalled\t2.41-12+deb13u3\n", want: aptStatus{version: "2.41-12+deb13u3", installed: true}},
+		{state: "architecture-independent", out: "all\tinstall\tinstalled\t2026f-0+deb13u1\n", want: aptStatus{version: "2026f-0+deb13u1", installed: true}},
+		{state: "only the native architecture", out: "amd64\thold\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true, held: true}},
+		{state: "only a foreign architecture", out: "i386\tinstall\tinstalled\t1.0\n"},
+		{state: "only an unrecorded architecture", out: "\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
+		{state: "native among several", out: "i386\thold\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
+		{state: "no native among several", out: "i386\tinstall\tinstalled\t1.0\narmhf\tinstall\tinstalled\t1.0\n"},
+		{state: "empty-output", out: "", wantErr: true},
+		{state: "one field", out: "installed\n", wantErr: true},
+		{state: "space-separated", out: "install installed 1.0\n", wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
-			gotVer, gotInst := aptStatusFrom(tc.out)
-			if gotInst != tc.wantInst {
-				t.Errorf("aptStatusFrom(%q) installed = %v, want %v", tc.out, gotInst, tc.wantInst)
+			got, err := aptStatusFrom(tc.out, func() (string, error) { return "amd64", nil })
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("aptStatusFrom(%q) error = %v, want error %v", tc.out, err, tc.wantErr)
 			}
-			if gotVer != tc.wantVer {
-				t.Errorf("aptStatusFrom(%q) version = %q, want %q", tc.out, gotVer, tc.wantVer)
+			if got != tc.want {
+				t.Errorf("aptStatusFrom(%q) = %+v, want %+v", tc.out, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("an architecture-independent record does not ask for the native architecture", func(t *testing.T) {
+		for _, out := range []string{"all\tinstall\tinstalled\t1.0\n", "\tinstall\tinstalled\t1.0\n"} {
+			st, err := aptStatusFrom(out, func() (string, error) { return "", errors.New("asked") })
+			if err != nil || !st.installed {
+				t.Errorf("aptStatusFrom(%q) = %+v, %v; want it read without the native architecture", out, st, err)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, out string }{
+		{name: "a sole native record", out: "amd64\tinstall\tinstalled\t1.0\n"},
+		{name: "several records", out: "i386\tinstall\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n"},
+	} {
+		t.Run("an unreadable native architecture fails "+tc.name, func(t *testing.T) {
+			_, err := aptStatusFrom(tc.out, func() (string, error) { return "", errors.New("no dpkg") })
+			if err == nil || !strings.Contains(err.Error(), "no dpkg") {
+				t.Errorf("aptStatusFrom(%q, failing arch) error = %v, want the arch failure", tc.out, err)
 			}
 		})
 	}
@@ -90,16 +123,77 @@ func TestAptStatusFrom_AgreesWithRealDpkg(t *testing.T) {
 	if _, err := exec.LookPath("dpkg-query"); err != nil {
 		t.Skip("dpkg-query is not on this host")
 	}
-	out, err := exec.Command("dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", "bash").Output()
+	out, err := exec.Command("dpkg-query", "-W", aptStatusFormat, "--", "bash").Output()
 	if err != nil {
 		t.Skipf("bash is not a dpkg-managed package here: %v", err)
 	}
-	version, installed := aptStatusFrom(string(out))
-	if !installed {
-		t.Fatalf("real dpkg output %q parsed as not installed", out)
+	st, err := aptStatusFrom(string(out), func() (string, error) { return dpkgNativeArch(t.Context()) })
+	if err != nil || !st.installed {
+		t.Fatalf("real dpkg output %q parsed as not installed (%v)", out, err)
 	}
-	if version == "" {
+	if st.version == "" {
 		t.Errorf("real dpkg output %q parsed to an empty version", out)
+	}
+}
+
+// TestAptQuery_UnknownPackageAgreesWithRealDpkg pins aptUnknownPackage to
+// the real tool's answer for a name it has no record of.
+func TestAptQuery_UnknownPackageAgreesWithRealDpkg(t *testing.T) {
+	if !hasSystemBin("dpkg-query") {
+		t.Skip("dpkg-query is not on this host")
+	}
+	st, err := aptQuery(t.Context(), "toolbelt-no-such-package")
+	if err != nil || st != (aptStatus{}) {
+		t.Errorf("aptQuery(unknown) = %+v, %v; want the zero status and no error", st, err)
+	}
+}
+
+// TestAptQuery_ReadsTheUnknownAnswerUnderATranslatedLocale: dpkg translates
+// its unknown-package message (de: "Kein Paket gefunden, das auf %s passt"),
+// so the server's locale must not reach the query whose text is matched.
+func TestAptQuery_ReadsTheUnknownAnswerUnderATranslatedLocale(t *testing.T) {
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	stubSystemBin(t, "dpkg-query", "#!/bin/sh\n"+
+		"if [ \"$LC_ALL\" = C ]; then echo \"dpkg-query: no packages found matching $4\" >&2\n"+
+		"else echo \"dpkg-query: Kein Paket gefunden, das auf $4 passt\" >&2; fi\nexit 1\n")
+
+	st, err := aptQuery(t.Context(), "jq")
+	if err != nil || st != (aptStatus{}) {
+		t.Errorf("aptQuery(unknown) under a German locale = %+v, %v; want the zero status and no error", st, err)
+	}
+}
+
+// TestAptQuery_ReadsTheNativeRecordOfAMultiArchPackage: dpkg-query -W on a bare
+// name prints one record per installed architecture of a Multi-Arch: same
+// package (dpkg-query(1), --show), and apt-get and apt-mark act on the native
+// one for a bare name. The stub answers each format as dpkg does: records
+// separated only by what the format prints.
+func TestAptQuery_ReadsTheNativeRecordOfAMultiArchPackage(t *testing.T) {
+	cases := []struct {
+		native string
+		want   aptStatus
+	}{
+		{native: "amd64", want: aptStatus{version: "2.41-12", installed: true}},
+		{native: "i386", want: aptStatus{version: "2.41-12", installed: true, held: true}},
+		{native: "arm64", want: aptStatus{}},
+	}
+	for _, tc := range cases {
+		t.Run("native "+tc.native, func(t *testing.T) {
+			dir := filepath.Dir(stubSystemBin(t, "dpkg-query", "#!/bin/sh\ncase \"$2\" in\n"+
+				"*Architecture*) printf 'amd64\\tinstall\\tinstalled\\t2.41-12\\ni386\\thold\\tinstalled\\t2.41-12\\n';;\n"+
+				"*) printf 'install installed 2.41-12hold installed 2.41-12';;\nesac\n"))
+			dpkg := "#!/bin/sh\n[ \"$1\" = --print-architecture ] && echo " + tc.native + "\n"
+			if err := os.WriteFile(filepath.Join(dir, "dpkg"), []byte(dpkg), 0o755); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			st, err := aptQuery(t.Context(), "libc6")
+			if err != nil || st != tc.want {
+				t.Errorf("aptQuery(libc6) on %s = %+v, %v; want %+v", tc.native, st, err, tc.want)
+			}
+		})
 	}
 }
 
@@ -551,51 +645,87 @@ func TestSearchApt_FillsTheCandidateForTheCappedSet(t *testing.T) {
 	}
 }
 
-// TestAptSetHold covers why a pin needs a dpkg hold: apt can still
+// TestSyncAptHold covers why a pin needs a dpkg hold: apt can still
 // upgrade a package as a DEPENDENCY of some other install, moving it
-// underneath a pin that reported it frozen. The name still goes
-// through the install grammar gate.
-func TestAptSetHold(t *testing.T) {
-	t.Run("hold and unhold are distinct actions", func(t *testing.T) {
-		for _, tc := range []struct {
-			hold bool
-			want string
-		}{{true, "hold"}, {false, "unhold"}} {
-			// The stub is reached by pointing the RESOLVER at it, not by
-			// replacing PATH: apt-mark is pinned to the trusted system
-			// directories now, so a PATH fake is unreachable — and in the
-			// negative case below that failure mode is silent, because a
-			// sentinel the stub can never write reads exactly like a gate that
-			// refused. Redirects only: the child's PATH is the trusted set
-			// first, which under the stub is this directory alone, so a script
-			// calling `touch` or `printf` would fail for want of the binary and
+// underneath a pin that reported it frozen. apt-mark runs only when dpkg's
+// record differs from the wanted hold, a hold is released even on a package
+// that is not installed (apt-get -y refuses a held one), and only
+// dpkg-query's unknown-package answer reads as absent (dpkg-query(1), EXIT
+// STATUS); any other query failure is the sync's error.
+func TestSyncAptHold(t *testing.T) {
+	const unknown = "echo 'dpkg-query: no packages found matching jq' >&2; exit 1"
+	record := func(want, status, version string) string {
+		return "printf 'amd64\\t" + want + "\\t" + status + "\\t" + version + "\\n'"
+	}
+	cases := []struct {
+		name    string
+		dpkg    string // dpkg-query's script body; empty leaves it missing
+		hold    bool
+		marked  string
+		wantErr string
+	}{
+		{name: "an unheld package is held", dpkg: record("install", "installed", "1.0"), hold: true, marked: "hold\n--\njq\n"},
+		{name: "a held package is released", dpkg: record("hold", "installed", "1.0"), hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package stays held without apt-mark", dpkg: record("hold", "installed", "1.0"), hold: true},
+		{name: "an unheld package stays unheld without apt-mark", dpkg: record("install", "installed", "1.0"), hold: false},
+		{name: "a package that is not installed is never held", dpkg: record("install", "config-files", "1.0"), hold: true},
+		{name: "a held package that is not installed is released", dpkg: record("hold", "not-installed", ""), hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package with only its config files left is released", dpkg: record("hold", "config-files", "1.0"), hold: false, marked: "unhold\n--\njq\n"},
+		{name: "a held package that is not installed is not marked again", dpkg: record("hold", "not-installed", ""), hold: true},
+		{name: "a package dpkg does not know needs no release", dpkg: unknown, hold: false},
+		{name: "a package dpkg does not know is not held", dpkg: unknown, hold: true},
+		{name: "a failed query fails the sync", dpkg: "echo 'dpkg-query: error: parsing file /var/lib/dpkg/status' >&2; exit 2", hold: true, wantErr: "parsing file"},
+		{name: "exit 1 without the unknown-package answer fails the sync", dpkg: "exit 1", hold: false, wantErr: "dpkg-query jq"},
+		{name: "unparseable output fails the sync", dpkg: "echo 'installed'", hold: true, wantErr: "dpkg-query jq"},
+		{name: "a dpkg-query that cannot be resolved fails the sync", hold: false, wantErr: "dpkg-query"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Redirects and builtins only: the child's PATH is the trusted
+			// set first, which under the stub is this directory alone, so a
+			// script calling `touch` would fail for want of the binary and
 			// its FAILURE would be mistaken for the behaviour under test.
-			// Measured: that is what made the grammar-gate case vacuous.
 			log := filepath.Join(t.TempDir(), "args")
-			stubSystemBin(t, "apt-mark",
-				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n")
+			dir := filepath.Dir(stubSystemBin(t, "apt-mark",
+				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n"))
+			if tc.dpkg != "" {
+				if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\n"+tc.dpkg+"\n"), 0o755); err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "dpkg"), []byte("#!/bin/sh\necho amd64\n"), 0o755); err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+			}
 
 			in := &installer{output: func(string) {}}
-			if err := in.aptSetHold(t.Context(), "jq", tc.hold); err != nil {
-				t.Fatalf("aptSetHold(jq, %v) = %v, want nil", tc.hold, err)
+			err := in.syncAptHold(t.Context(), "jq", tc.hold)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("syncAptHold(jq, %v) = %v, want nil", tc.hold, err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("syncAptHold(jq, %v) = %v, want an error naming %q", tc.hold, err, tc.wantErr)
 			}
+
 			got, err := os.ReadFile(log)
-			if err != nil {
-				t.Fatalf("Setup: read args: %v", err)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("read args: %v", err)
 			}
 			// The -- guard travels too: a package name is untrusted input and
 			// apt-mark would otherwise read a leading dash as a flag.
-			if want := tc.want + "\n--\njq\n"; string(got) != want {
-				t.Errorf("aptSetHold(jq, %v) ran apt-mark %q, want %q", tc.hold, got, want)
+			if string(got) != tc.marked {
+				t.Errorf("syncAptHold(jq, %v) over dpkg %q ran apt-mark %q, want %q", tc.hold, tc.dpkg, got, tc.marked)
 			}
-		}
-	})
+		})
+	}
 
 	// The gate runs BEFORE the subprocess: a refused name must not reach
 	// apt-mark at all, so the check cannot be "apt-mark rejected it".
 	t.Run("an invalid package name is refused without running apt-mark", func(t *testing.T) {
 		sentinel := filepath.Join(t.TempDir(), "ran")
-		stubSystemBin(t, "apt-mark", "#!/bin/sh\n: > "+sentinel+"\n")
+		dir := filepath.Dir(stubSystemBin(t, "apt-mark", "#!/bin/sh\n: > "+sentinel+"\n"))
+		if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\nprintf 'amd64\\tinstall\\tinstalled\\t1.0\\n'\n"), 0o755); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
 
 		in := &installer{output: func(string) {}}
 		// Grammar-invalid only. A dotted name like "jq." is grammar-LEGAL by
@@ -604,8 +734,8 @@ func TestAptSetHold(t *testing.T) {
 		// holding a name no package matches fails harmlessly at apt-mark rather
 		// than installing something the caller never asked for.
 		for _, bad := range []string{"pkg-", "jq;rm -rf /", "-jq", "", "JQ", "jq amd64"} {
-			if err := in.aptSetHold(t.Context(), bad, true); err == nil {
-				t.Errorf("aptSetHold(%q) = nil, want a refusal", bad)
+			if err := in.syncAptHold(t.Context(), bad, true); err == nil {
+				t.Errorf("syncAptHold(%q) = nil, want a refusal", bad)
 			}
 		}
 		if _, err := os.Stat(sentinel); err == nil {

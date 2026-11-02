@@ -1040,3 +1040,198 @@ func TestCommandFailed_UsesExitErrorStderr(t *testing.T) {
 		t.Errorf("commandFailed(probe, %v, \"\") = %q, want it to wrap *exec.ExitError", err, got)
 	}
 }
+
+// TestPMEnv_PinsUvToTheEngineManagedInterpreters pins which interpreter a
+// pip: venv is built on: uv's discovery takes a PATH python3 or an ambient
+// UV_PYTHON over a download (https://docs.astral.sh/uv/concepts/python-versions/),
+// so an inherited value would decide the interpreter every venv links to.
+func TestPMEnv_PinsUvToTheEngineManagedInterpreters(t *testing.T) {
+	t.Setenv("UV_PYTHON", "/usr/bin/python3")
+	t.Setenv("UV_NO_MANAGED_PYTHON", "1")
+	t.Setenv("UV_PYTHON_PREFERENCE", "system")
+	t.Setenv("UV_MANAGED_PYTHON", "0")
+	t.Setenv("UV_PYTHON_INSTALL_DIR", "/elsewhere")
+	tools := t.TempDir()
+	in := &installer{toolsDir: tools}
+
+	got := map[string][]string{}
+	for _, kv := range in.pmEnv() {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = append(got[k], v)
+	}
+
+	if v := got["UV_MANAGED_PYTHON"]; !slices.Equal(v, []string{"1"}) {
+		t.Errorf("UV_MANAGED_PYTHON = %q, want exactly [\"1\"]", v)
+	}
+	wantDir := filepath.Join(tools, "python", "interpreters")
+	if v := got["UV_PYTHON_INSTALL_DIR"]; !slices.Equal(v, []string{wantDir}) {
+		t.Errorf("UV_PYTHON_INSTALL_DIR = %q, want exactly [%q]", v, wantDir)
+	}
+	for _, k := range []string{"UV_PYTHON", "UV_NO_MANAGED_PYTHON", "UV_PYTHON_PREFERENCE"} {
+		if v, ok := got[k]; ok {
+			t.Errorf("%s = %q, want the ambient value dropped", k, v)
+		}
+	}
+	if v := got["PATH"]; len(v) != 1 {
+		t.Errorf("PATH = %q, want exactly one entry", v)
+	}
+}
+
+// TestPMEnv_KeepsTheAmbientCacheSettings pins that a build uses the cache
+// locations the server's environment chooses: of the variables that place a
+// package manager's cache, pmEnv sets only GOPATH, under ToolsDir.
+func TestPMEnv_KeepsTheAmbientCacheSettings(t *testing.T) {
+	ambient := map[string]string{
+		"GOMODCACHE":       "/srv/cache/go-mod",
+		"GOCACHE":          "/srv/cache/go-build",
+		"NPM_CONFIG_CACHE": "/srv/cache/npm",
+		"UV_CACHE_DIR":     "/srv/cache/uv",
+		"CARGO_HOME":       "/srv/cargo",
+	}
+	for k, v := range ambient {
+		t.Setenv(k, v)
+	}
+	t.Setenv("GOPATH", "/srv/gopath")
+	tools := t.TempDir()
+	in := &installer{toolsDir: tools}
+
+	got := map[string][]string{}
+	for _, kv := range in.pmEnv() {
+		k, v, _ := strings.Cut(kv, "=")
+		got[k] = append(got[k], v)
+	}
+
+	for k, v := range ambient {
+		if !slices.Equal(got[k], []string{v}) {
+			t.Errorf("%s = %q, want the ambient [%q]", k, got[k], v)
+		}
+	}
+	if want := filepath.Join(tools, "go"); !slices.Equal(got["GOPATH"], []string{want}) {
+		t.Errorf("GOPATH = %q, want exactly [%q]", got["GOPATH"], want)
+	}
+}
+
+// TestRunPM_PrefersTheManagedBackendOverTheServerPATH pins which npm, uv,
+// cargo or go a backend install runs: the one the engine installed in bin/,
+// and a same-name executable on the server's PATH only when bin/ has none.
+func TestRunPM_PrefersTheManagedBackendOverTheServerPATH(t *testing.T) {
+	ambient := t.TempDir()
+	log := filepath.Join(t.TempDir(), "ran")
+	stub := func(dir, who string) {
+		script := "#!/bin/sh\necho " + who + " >> " + log + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stub(ambient, "ambient")
+	t.Setenv("PATH", ambient+string(os.PathListSeparator)+os.Getenv("PATH"))
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+
+	if err := in.runPM(t.Context(), "uv", "--version"); err != nil {
+		t.Fatalf("runPM with no managed uv: %v", err)
+	}
+	if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	stub(in.binDir(), "managed")
+	if err := in.runPM(t.Context(), "uv", "--version"); err != nil {
+		t.Fatalf("runPM with a managed uv: %v", err)
+	}
+
+	if got := readArgv(t, log); !slices.Equal(got, []string{"ambient", "managed"}) {
+		t.Errorf("runPM ran %q, want [ambient managed]: the PATH uv only while bin/ has none", got)
+	}
+}
+
+// fakeUV puts a uv on PATH that appends its argv to the returned file and
+// publishes a runnable launcher x into UV_TOOL_BIN_DIR, as `uv tool install`
+// does for a package whose entry point is x.
+func fakeUV(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + argv + "\n" +
+		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
+		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argv
+}
+
+func readArgv(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+}
+
+// TestInstallPip_PassesThePythonRequest pins the uv argv: a Python request
+// becomes `--python <req>` (https://docs.astral.sh/uv/reference/cli/#uv-tool-install),
+// no request becomes `--python 3`, and the interpreter and venv dirs uv
+// writes into exist with the managed mode before uv runs.
+func TestInstallPip_PassesThePythonRequest(t *testing.T) {
+	cases := []struct {
+		name, python, want string
+	}{
+		{name: "with a request", python: "3.14", want: "tool install --reinstall --python 3.14 x==1.0.0"},
+		{name: "without a request", python: "", want: "tool install --reinstall --python 3 x==1.0.0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := fakeUV(t)
+			in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+			if err := os.MkdirAll(in.binDir(), managedDirMode); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := in.installPip(t.Context(), "x", &Tool{Source: "pip:x", Version: "1.0.0", Python: tc.python}, nil)
+			if err != nil {
+				t.Fatalf("installPip: %v", err)
+			}
+			if got := readArgv(t, argv); !slices.Equal(got, []string{tc.want}) {
+				t.Errorf("uv argv = %q, want [%q]", got, tc.want)
+			}
+			for _, sub := range []string{"interpreters", "tools"} {
+				dir := filepath.Join(in.toolsDir, "python", sub)
+				if got := storedDirMode(t, dir); got != managedDirStoredMode {
+					t.Errorf("mode of %s = %v, want %v", dir, got, managedDirStoredMode)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallNpm_CreatesTheModuleTreeFirst pins that npm/lib/node_modules
+// exists with the managed mode before npm runs: npm would otherwise create it
+// under the caller's umask, and VerifyRootIntegrity judges that tree.
+func TestInstallNpm_CreatesTheModuleTreeFirst(t *testing.T) {
+	dir := t.TempDir()
+	seen := filepath.Join(dir, "seen")
+	script := "#!/bin/sh\n" +
+		"if [ -d \"$NPM_CONFIG_PREFIX/lib/node_modules\" ]; then echo present > " + seen + "; else echo absent > " + seen + "; fi\n"
+	if err := os.WriteFile(filepath.Join(dir, "npm"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+
+	if _, err := in.installNpm(t.Context(), "x", "1.0.0", nil); err != nil {
+		t.Fatalf("installNpm: %v", err)
+	}
+	if got := readArgv(t, seen); !slices.Equal(got, []string{"present"}) {
+		t.Errorf("node_modules when npm ran = %q, want [present]", got)
+	}
+	for _, d := range []string{npmLibDir(in.toolsDir), npmModulesDir(in.toolsDir)} {
+		if got := storedDirMode(t, d); got != managedDirStoredMode {
+			t.Errorf("mode of %s = %v, want %v", d, got, managedDirStoredMode)
+		}
+	}
+}

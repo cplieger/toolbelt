@@ -12,16 +12,12 @@ import (
 )
 
 // CatalogEntry is one tool in the compiled catalog: the mise-registry
-// name/description joined with the preferred install source and, for
-// aqua sources, the embedded aqua package definition. Overlay entries
-// (curated) may add requires/manual install commands and the lsp
-// marker.
-// Its slice fields (Aliases, Requires, VersionArgs) and its Aqua pointer ALIAS
-// the catalog they were read from. A Catalog is swapped whole behind an
-// atomic.Pointer and never edited in place, so every reader shares one copy and
-// none of them may write to it: mutating a returned entry's slice corrupts the
-// catalog for every other caller. Copy what you intend to change — see
-// mergeCatalogDefaults, which clones before hydrating a mutable manifest row.
+// name/description joined with the preferred install source and, for aqua
+// sources, the embedded aqua package definition. Overlay entries (curated) may
+// add requires/manual install commands and the lsp marker.
+// Its slice fields (Aliases, Requires, VersionArgs) and its Aqua pointer alias
+// the shared catalog, which is never edited in place: writing through them
+// corrupts it for every other caller, so copy what you intend to change.
 type CatalogEntry struct {
 	Aqua *AquaPackage `json:"aqua,omitempty"`
 	// Release carries the registry's install hints for a release-backed

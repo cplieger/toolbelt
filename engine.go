@@ -40,6 +40,12 @@ var (
 	// inspected, or resolves outside the tool tree. *RootIntegrityError
 	// names each one.
 	ErrRootIntegrity = errors.New("managed root failed the integrity check")
+	// ErrQueueFull marks a job refused because the queue already holds its
+	// cap of waiting jobs. Transient: the request may be retried, and a
+	// refused Add, Patch or Remove has not written the manifest.
+	ErrQueueFull = errors.New("too many queued tool jobs")
+	// ErrShuttingDown marks a job refused because Close has begun.
+	ErrShuttingDown = errors.New("engine shutting down")
 )
 
 // DependentsError is the ErrHasDependents shape that names the enabled
@@ -158,7 +164,7 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, 
 	if v.Installed {
 		v.Checksum = s.Checksum
 	}
-	if latest := e.versions.Cached(t.Source); latest != "" && latest != t.Version {
+	if latest := e.versions.Cached(t, e.aquaDef(t.Source)); latest != "" && latest != t.Version {
 		v.Latest = latest
 	}
 	return v
@@ -438,7 +444,10 @@ type AddRequest struct {
 	Install     string   `json:"install,omitempty"`
 	Uninstall   string   `json:"uninstall,omitempty"`
 	Probe       string   `json:"probe,omitempty"`
+	Python      string   `json:"python,omitempty"` // pip: only; see Tool.Python
 	Requires    []string `json:"requires,omitempty"`
+	// VersionArgs sets Tool.VersionArgs; empty takes the catalog's.
+	VersionArgs []string `json:"version_args,omitempty"`
 	Pin         bool     `json:"pin,omitempty"`
 	// Disabled adds the entry as a template: recorded, not installed,
 	// no job enqueued (Add then returns a nil Job).
@@ -457,32 +466,35 @@ func (e *Engine) Add(ctx context.Context, req *AddRequest) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
+	var res *job
 	err = e.store.MutateManifest(func(m *Manifest) error {
 		if _, exists := m.Tools[name]; exists {
 			return fmt.Errorf("tool %q already exists", name)
 		}
 		m.Tools[name] = t
-		return nil
+		if t.Disabled {
+			return nil
+		}
+		var rerr error
+		res, rerr = e.queue.reserve(JobKindInstall, []string{name}, nil)
+		return rerr
 	})
+	return e.commitJob(res, err)
+}
+
+// commitJob ends the transaction Add, Patch and remove share: the job is
+// reserved inside the manifest mutation, so a refusal aborts the write and
+// no rollback can clobber a concurrent edit, and it is published only after
+// the write, so the worker never runs it against the old manifest.
+func (e *Engine) commitJob(res *job, err error) (*Job, error) {
 	if err != nil {
+		e.queue.release(res)
 		return nil, err
 	}
-	if t.Disabled {
+	if res == nil {
 		return nil, nil
 	}
-	jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
-	if err != nil {
-		// Queue full: undo the manifest row so a rejected add doesn't
-		// leave phantom intent with no install job.
-		if rollback := e.store.MutateManifest(func(m *Manifest) error {
-			delete(m.Tools, name)
-			return nil
-		}); rollback != nil {
-			e.log.Error("toolbelt: add rollback failed", "error", rollback)
-		}
-		return nil, err
-	}
-	return jv, nil
+	return e.queue.publish(res), nil
 }
 
 // resolveNewTool merges the request with catalog knowledge and, for
@@ -500,9 +512,19 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		Install:     strings.TrimSpace(req.Install),
 		Uninstall:   strings.TrimSpace(req.Uninstall),
 		Probe:       strings.TrimSpace(req.Probe),
+		Python:      strings.TrimSpace(req.Python),
+	}
+	if len(req.VersionArgs) > 0 {
+		t.VersionArgs = req.VersionArgs
 	}
 	if cat, ok := e.cat().Lookup(name); ok {
 		mergeCatalogDefaults(&t, &cat)
+	}
+	if err := validatePython(t.Source, t.Python); err != nil {
+		return t, err
+	}
+	if err := validateVersionArgs(t.VersionArgs); err != nil {
+		return t, err
 	}
 	if t.Disabled {
 		// Template: no source requirement, no network. Hydration
@@ -519,7 +541,7 @@ func (e *Engine) resolveNewTool(ctx context.Context, name string, req *AddReques
 		return t, err
 	}
 	if t.Version == "" {
-		latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+		latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
 		if err != nil {
 			return t, fmt.Errorf("resolve latest version: %w", err)
 		}
@@ -566,18 +588,13 @@ func mergeCatalogDefaults(t *Tool, cat *CatalogEntry) {
 	if t.Description == "" {
 		t.Description = cat.Description
 	}
-	// Clone the two slice fields. Everything else hydrated here is a string,
-	// but these cross from the catalog — held in an atomic.Pointer and swapped
-	// whole on refresh, so every reader shares one copy — into a manifest row,
-	// which IS mutated (Add, Patch, remove). Sharing the backing array would
-	// make a future append or sort on a row rewrite what every other reader of
-	// the live catalog sees. Today's writers all REPLACE the slice rather than
-	// writing through it, so this closes the next edit rather than a live bug.
+	// The slices share the catalog's backing arrays (CatalogEntry's doc):
+	// a merged row is only read, then marshalled into tools.json.
 	if t.Requires == nil {
-		t.Requires = slices.Clone(cat.Requires)
+		t.Requires = cat.Requires
 	}
 	if t.VersionArgs == nil {
-		t.VersionArgs = slices.Clone(cat.VersionArgs)
+		t.VersionArgs = cat.VersionArgs
 	}
 	if t.Install == "" {
 		t.Install = cat.Install
@@ -608,68 +625,79 @@ type PatchRequest struct {
 	Requires    *[]string `json:"requires,omitempty"`
 	Install     *string   `json:"install,omitempty"`
 	Uninstall   *string   `json:"uninstall,omitempty"`
+	// Python sets Tool.Python; "" clears it. A change on an enabled entry
+	// reinstalls it.
+	Python *string `json:"python,omitempty"`
+	// VersionArgs sets Tool.VersionArgs, taking effect at the next probe with
+	// no job. An empty list clears them, so the probe only requires an answer
+	// to --version (a source-less template takes the catalog's when hydrated).
+	VersionArgs *[]string `json:"version_args,omitempty"`
 	// Force permits disabling a tool that enabled entries require,
 	// cascading the disable to those dependents (one level, mirroring
 	// RemoveWithDependents).
 	Force bool `json:"force,omitempty"`
 }
 
-// patchOutcome records what a Patch mutation changed (for job selection
-// and rollback).
 type patchOutcome struct {
-	prevVersion     string
 	source          string
 	cascaded        []string
 	versionChanged  bool
+	pythonChanged   bool
 	disabledChanged bool
 	nowDisabled     bool
-	// pinChanged and nowPinned carry a pin transition out to Patch, which
-	// is where the dpkg-level hold is applied. The mutation itself cannot
-	// do it: patchManifest runs inside the manifest lock and holding a
-	// package is a subprocess.
-	pinChanged bool
-	nowPinned  bool
+	pinChanged      bool
 }
 
 // Patch merges fields into an existing tool and enqueues the follow-up
 // job the transition needs: enable → install (when missing), disable →
-// footprint uninstall (template kept), version change on an enabled
-// tool → reinstall. Returns nil when no job is needed.
-func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
-	var out patchOutcome
+// footprint uninstall (template kept), version or python change on an
+// enabled tool → reinstall, pin change on an enabled apt: tool where apt is
+// available → install, which applies the dpkg hold. Returns nil when no job
+// is needed.
+func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
+	var (
+		out patchOutcome
+		res *job
+	)
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return patchManifest(m, name, &req, &out, e.backends())
+		if err := patchManifest(m, name, req, &out, e.backends()); err != nil {
+			return err
+		}
+		kind, names := out.job(name)
+		if kind == "" {
+			return nil
+		}
+		var rerr error
+		res, rerr = e.queue.reserve(kind, names, nil)
+		return rerr
 	})
-	if err != nil {
-		return nil, err
-	}
-	e.applyAptHold(name, &out)
-	return e.patchJob(name, &out)
+	return e.commitJob(res, err)
 }
 
-// applyAptHold makes a pin REAL for an apt package by asking dpkg to hold
-// it, and releases the hold when the pin comes off.
-//
-// Without it a pin is bookkeeping only. Manifest-level pinning already
-// stops this engine bumping the row (updateOne skips a pinned tool), but
-// apt upgrades a package as a DEPENDENCY of some other install, so a
-// pinned package could move underneath a pin that reported it frozen and
-// nothing would record the change. `apt-mark hold` is the only mechanism
-// apt itself respects.
-//
-// Best-effort on purpose, and it fires only on a transition. The pin is
-// already persisted by the time this runs, so a failure must not undo the
-// user's stated intent — it warns and leaves the manifest-level pin in
-// force, which is strictly what the pin meant before this existed.
-func (e *Engine) applyAptHold(name string, out *patchOutcome) {
-	pkg, ok := strings.CutPrefix(out.source, SourceApt+":")
-	if !ok || !out.pinChanged || !AptAvailable() {
-		return
+// holdToPin makes an apt: row's dpkg hold equal its manifest pin, the hold
+// the engine wants: apt upgrades a package as another install's dependency,
+// and a hold is the only thing apt respects. It is the last step of every
+// job that installs an apt: row, whatever the install did. It reads the row
+// now rather than the job's copy, so a Remove during the job adds no hold,
+// and a Patch during it is settled by the job that Patch queued behind this
+// one. Other sources, a removed row and a host without apt are a no-op.
+func (e *Engine) holdToPin(ctx context.Context, name string) error {
+	if !AptAvailable() {
+		return nil
 	}
-	if err := e.inst.aptSetHold(context.Background(), pkg, out.nowPinned); err != nil {
-		e.log.Warn("toolbelt: apt hold not applied; the pin holds in the manifest only",
-			"tool", name, "package", pkg, "hold", out.nowPinned, "error", err)
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		return fmt.Errorf("apt hold: %w", err)
 	}
+	t, ok := m.Tools[name]
+	pkg, isApt := strings.CutPrefix(t.Source, SourceApt+":")
+	if !ok || !isApt {
+		return nil
+	}
+	if err := e.inst.syncAptHold(ctx, pkg, t.Pin); err != nil {
+		return fmt.Errorf("apt hold: %w", err)
+	}
+	return nil
 }
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
@@ -710,13 +738,16 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 }
 
 // applyPatch overlays the request's set fields onto t, reporting the
-// transitions (for job selection and rollback).
+// transitions for job selection.
 func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	var out patchOutcome
 	if req.Version != nil && *req.Version != t.Version {
-		out.prevVersion = t.Version
 		t.Version = *req.Version
 		out.versionChanged = true
+	}
+	if req.Python != nil && *req.Python != t.Python {
+		t.Python = *req.Python
+		out.pythonChanged = true
 	}
 	if req.Disabled != nil && *req.Disabled != t.Disabled {
 		t.Disabled = *req.Disabled
@@ -727,9 +758,6 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 		out.pinChanged = *req.Pin != t.Pin
 		t.Pin = *req.Pin
 	}
-	out.nowPinned = t.Pin
-	// Carried so Patch can tell an apt row from any other kind without
-	// re-reading the manifest outside its lock.
 	out.source = t.Source
 	if req.Description != nil {
 		t.Description = *req.Description
@@ -743,54 +771,22 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 	if req.Uninstall != nil {
 		t.Uninstall = *req.Uninstall
 	}
+	if req.VersionArgs != nil {
+		t.VersionArgs = *req.VersionArgs
+	}
 	return out
 }
 
-// patchJob enqueues the job a patch outcome requires, rolling the
-// manifest back when the queue refuses it.
-func (e *Engine) patchJob(name string, out *patchOutcome) (*Job, error) {
+func (out *patchOutcome) job(name string) (kind string, names []string) {
 	switch {
 	case out.disabledChanged && out.nowDisabled:
-		names := append([]string{name}, out.cascaded...)
-		jv, err := e.queue.Enqueue(JobKindDisable, names)
-		if err != nil {
-			for _, n := range names {
-				e.rollbackPatch(n, func(t *Tool) { t.Disabled = false })
-			}
-			return nil, err
-		}
-		return jv, nil
-	case out.disabledChanged && !out.nowDisabled:
-		jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
-		if err != nil {
-			e.rollbackPatch(name, func(t *Tool) { t.Disabled = true })
-			return nil, err
-		}
-		return jv, nil
-	case out.versionChanged && !out.nowDisabled:
-		jv, err := e.queue.Enqueue(JobKindInstall, []string{name})
-		if err != nil {
-			prev := out.prevVersion
-			e.rollbackPatch(name, func(t *Tool) { t.Version = prev })
-			return nil, err
-		}
-		return jv, nil
+		return JobKindDisable, append([]string{name}, out.cascaded...)
+	case out.disabledChanged && !out.nowDisabled,
+		(out.versionChanged || out.pythonChanged) && !out.nowDisabled,
+		out.pinChanged && sourceKind(out.source) == SourceApt && !out.nowDisabled && AptAvailable():
+		return JobKindInstall, []string{name}
 	default:
-		return nil, nil
-	}
-}
-
-// rollbackPatch reverts one field after a rejected enqueue so the
-// manifest never claims a state no job will realize.
-func (e *Engine) rollbackPatch(name string, undo func(*Tool)) {
-	if err := e.store.MutateManifest(func(m *Manifest) error {
-		if t, ok := m.Tools[name]; ok {
-			undo(&t)
-			m.Tools[name] = t
-		}
-		return nil
-	}); err != nil {
-		e.log.Error("toolbelt: patch rollback failed", "tool", name, "error", err)
+		return "", nil
 	}
 }
 
@@ -899,25 +895,22 @@ func (e *Engine) RemoveWithDependents(name string) (*Job, []string, error) {
 // between the two exported methods, and it is unexported precisely so no
 // caller has to read a bare boolean at a call site.
 func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
-	var dependents []string
+	var (
+		dependents []string
+		res        *job
+	)
 	removed := map[string]Tool{}
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		return removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge())
+		if err := removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge()); err != nil {
+			return err
+		}
+		names := slices.Sorted(maps.Keys(removed))
+		var rerr error
+		res, rerr = e.queue.reserve(JobKindUninstall, names, removed)
+		return rerr
 	})
-	if err != nil {
-		return nil, dependents, err
-	}
-	names := make([]string, 0, len(removed))
-	for n := range removed {
-		names = append(names, n)
-	}
-	slices.Sort(names)
-	jv, err := e.queue.EnqueueRemoval(names, removed)
-	if err != nil {
-		e.rollbackRemoval(removed)
-		return nil, dependents, err
-	}
-	return jv, dependents, nil
+	jv, err := e.commitJob(res, err)
+	return jv, dependents, err
 }
 
 // removeKnowledge is the CATALOG-derived input a removal needs: what
@@ -990,28 +983,10 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	return nil
 }
 
-// rollbackRemoval restores manifest rows after a rejected uninstall job
-// so intent and on-disk reality don't diverge (the tool is still
-// installed on disk).
-func (e *Engine) rollbackRemoval(removed map[string]Tool) {
-	rollback := e.store.MutateManifest(func(m *Manifest) error {
-		for n := range removed {
-			if _, exists := m.Tools[n]; !exists {
-				m.Tools[n] = removed[n]
-			}
-		}
-		return nil
-	})
-	if rollback != nil {
-		e.log.Error("toolbelt: remove rollback failed", "error", rollback)
-	}
-}
-
-// Reconcile enqueues the convergence job: install missing enabled entries,
-// uninstall the engine-owned footprint of disabled ones and of orphaned
-// state rows. ReconcileFull also enqueues an update pass over unpinned
-// entries. A queued reconcile is returned rather than duplicated and a full
-// queue never refuses one, so err means a manifest read failure or shutdown.
+// Reconcile enqueues the convergence job (see ReconcileMissing and
+// ReconcileFull). A queued reconcile is returned rather than duplicated and a
+// full queue never refuses one, so err means a manifest read failure or
+// shutdown.
 //
 // enqueued is false, with a nil job and a nil error, when the manifest is
 // empty and no state row exists; a readiness gate branches on enqueued first.
@@ -1073,7 +1048,7 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 func (e *Engine) ensureJob(ctx context.Context, name string, t *Tool, inManifest bool) (*Job, error) {
 	if inManifest && t.Disabled {
 		f := false
-		jv, err := e.Patch(name, PatchRequest{Disabled: &f})
+		jv, err := e.Patch(name, &PatchRequest{Disabled: &f})
 		if err != nil {
 			return nil, err
 		}
@@ -1138,8 +1113,9 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // and persisted (source, requires, install/uninstall/probe,
 // description, default version). Purely offline — version resolution
 // for actively-installed tools happens per-tool in installTool. Names
-// the catalog doesn't know stay sparse; they fail their own install
-// with a named error rather than failing the whole job here.
+// the catalog doesn't know stay sparse, as do entries whose version or
+// python the catalog's source refuses; they fail their own install
+// (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
 	return e.store.MutateManifest(func(m *Manifest) error {
 		for name := range m.Tools {
@@ -1152,6 +1128,9 @@ func (e *Engine) hydrateStatic() error {
 				continue
 			}
 			mergeCatalogDefaults(&t, &cat)
+			if validateTool(&t) != nil {
+				continue
+			}
 			m.Tools[name] = t
 		}
 		return nil
@@ -1528,24 +1507,25 @@ func depsOf(name string, t *Tool, backends map[string]string) []string {
 	return deps
 }
 
-// installTool installs one tool when not already at its manifest
-// version, recording status either way. A sparse entry resolves its
-// version to latest here (and persists it); an entry the catalog
-// couldn't hydrate fails with a named error.
+// installTool installs one tool when not already at its manifest version,
+// recording status either way; a sparse entry resolves and persists latest.
 //
 // The status write is the install's COMMIT POINT: superseded versions are
-// pruned only after the new tree and its state record are both durable,
-// so a crash (or a full disk) can never leave a pruned previous version
-// next to a state file that was never written. verifyInstalled sits
-// between the two, so a binary that cannot run fails the install with
-// the predecessor still on disk.
-func (e *Engine) installTool(ctx context.Context, name string, output func(string)) error {
+// pruned only after the new tree and its state record are both durable, so a
+// crash or a full disk never leaves a pruned predecessor beside an unwritten
+// state file. verifyInstalled sits between the two, so an install the probe
+// does not read as installed fails with the predecessor still on disk.
+func (e *Engine) installTool(ctx context.Context, name string, output func(string)) (err error) {
 	t, err := e.resolveInstallTarget(ctx, name, output)
 	if err != nil || t == nil {
 		return err
 	}
+	if sourceKind(t.Source) == SourceApt {
+		// WithoutCancel: installApt lifts the hold, so a cancelled job still owes it.
+		defer func() { err = e.settleAptHold(context.WithoutCancel(ctx), name, err, output) }()
+	}
 	st := e.store.State().Tools[name]
-	if st.InstalledVersion == t.Version && e.probeInstalled(name, t, &st) {
+	if st.InstalledVersion == t.Version && st.Python == t.Python && e.probeInstalled(name, t, &st) {
 		output(fmt.Sprintf("%s %s already installed", name, t.Version))
 		return nil
 	}
@@ -1565,6 +1545,28 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 	}
 	e.pruneSuperseded(name, t)
 	return nil
+}
+
+// settleAptHold runs holdToPin after an apt: install and joins its failure
+// to the install's, recording the result on the row. A job that ends with
+// both done clears the row's error, which the already-installed path would
+// otherwise keep from the hold failure this job repaired.
+func (e *Engine) settleAptHold(ctx context.Context, name string, installErr error, output func(string)) error {
+	herr := e.holdToPin(ctx, name)
+	if herr == nil {
+		if installErr == nil && e.store.State().Tools[name].LastError != "" {
+			if serr := e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = "" }); serr != nil {
+				return fmt.Errorf("record install state for %s: %w", name, serr)
+			}
+		}
+		return installErr
+	}
+	output(fmt.Sprintf("ERROR %s: %v", name, herr))
+	err := errors.Join(installErr, herr)
+	if serr := e.recordFailure(name, err); serr != nil {
+		e.log.Error("toolbelt: apt hold failure not recorded", "tool", name, "error", serr)
+	}
+	return err
 }
 
 // resolveInstallTarget prepares the entry installTool is about to act on:
@@ -1587,12 +1589,12 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 		return nil, nil
 	}
 	if t.Source == "" {
-		return nil, fmt.Errorf("no install knowledge exists for %q because it is not in the catalog and no source was given", name)
+		return nil, e.unhydratedError(name, &t)
 	}
 	if t.Version != "" {
 		return &t, nil
 	}
-	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+	latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
 	if err != nil {
 		return nil, fmt.Errorf("resolve latest version: %w", err)
 	}
@@ -1603,12 +1605,26 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 	return &t, nil
 }
 
+// unhydratedError explains a row hydrateStatic left without a source: the
+// catalog does not know it, or its source refuses the row's version or python.
+func (e *Engine) unhydratedError(name string, t *Tool) error {
+	if cat, ok := e.cat().Lookup(name); ok && cat.Source != "" {
+		merged := *t
+		mergeCatalogDefaults(&merged, &cat)
+		if err := validateTool(&merged); err != nil {
+			return fmt.Errorf("the catalog's source %s refuses this entry: %w", merged.Source, err)
+		}
+	}
+	return fmt.Errorf("no install knowledge exists for %q because it is not in the catalog and no source was given", name)
+}
+
 // commitInstall records what landed. This write is the install's COMMIT
 // POINT, so a failure here fails the job with the PREVIOUS state intact
 // and nothing pruned, and a retry converges.
 func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 	if err := e.store.setToolStatus(name, func(s *ToolStatus) {
 		s.InstalledVersion = t.Version
+		s.Python = t.Python
 		s.Bins = res.bins
 		s.PMBins = res.pmBins
 		s.Checksum = res.checksum
@@ -1628,28 +1644,19 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 	return nil
 }
 
-// verifyInstalled probes what the install just published and refuses to
-// let a binary the OS will not run stand as a completed install. It runs
-// AFTER the status write (durability unchanged) and BEFORE pruning, so a
-// failed verification leaves the retained predecessor as the fallback.
-//
-// Only CannotExec fails the install; a version-banner mismatch is
-// reported and tolerated as a knowledge gap rather than evidence the
-// tool is broken. The probe verdict is cached by binary fingerprint, so
-// the inventory read that follows reuses it instead of re-spawning.
+// verifyInstalled fails the install unless the inventory's probe reads what
+// it published as installed, so a done job never leaves a row Reconcile
+// would install again. It runs after the status write and before pruning,
+// so a failed check keeps the predecessor on disk.
 func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
 	st := e.store.State().Tools[name]
-	v := e.probeTool(name, t, &st)
-	switch {
-	case v.CannotExec:
-		err := fmt.Errorf("installed %s but it cannot run: %s", t.Version, v.Reason)
+	if v := e.probeTool(name, t, &st); !v.OK {
+		err := fmt.Errorf("installed %s but its install check failed: %s", t.Version, v.Reason)
 		output(fmt.Sprintf("ERROR %s: %v", name, err))
 		if serr := e.recordFailure(name, err); serr != nil {
 			e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
 		}
 		return err
-	case !v.OK:
-		output(fmt.Sprintf("The %s install was not verified. %s", name, v.Reason))
 	}
 	return nil
 }
@@ -1817,7 +1824,7 @@ func (e *Engine) updateOne(ctx context.Context, m *Manifest, n string, explicit 
 		output(fmt.Sprintf("%s pinned at %s, skipping", n, t.Version))
 		return false, nil
 	}
-	latest, err := e.versions.Latest(ctx, t.Source, e.aquaDef(t.Source))
+	latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
 	if err != nil {
 		output(fmt.Sprintf("%s: version check failed: %v", n, err))
 		if errors.Is(err, ErrGitHubRateLimited) {
@@ -1918,7 +1925,7 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 		switch {
 		case t.Disabled && status.owned():
 			extras = append(extras, n)
-		case !t.Disabled && !e.probeInstalled(n, &t, &status):
+		case !t.Disabled && !e.converged(n, &t, &status):
 			missing = append(missing, n)
 		}
 	}
@@ -1932,6 +1939,25 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 	slices.Sort(extras)
 	slices.Sort(orphans)
 	return missing, extras, orphans
+}
+
+// converged is probeInstalled on a venv built for the row's Python request,
+// and for an apt: row also a dpkg hold equal to its pin, so Reconcile repairs
+// a hold that a failed apt-mark, a recreated container or a hand-run apt-mark
+// left wrong. An unreadable dpkg record is not converged, so the install that
+// follows records why.
+func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
+	if s.Python != t.Python {
+		return false
+	}
+	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")
+	if !ok || !AptAvailable() {
+		return e.probeInstalled(name, t, s)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	st, err := aptQuery(ctx, pkg)
+	return err == nil && st.installed && st.held == t.Pin
 }
 
 // sweepOrphans uninstalls engine-owned footprints whose manifest row is

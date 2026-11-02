@@ -10,15 +10,19 @@ A `release:` install checks the release's own checksum file when the release pub
 
 ## Install checks
 
-The engine checks an install by running it, not by looking for the file. The recorded binaries must exist and the tool must answer when run. With `version_args`, the answer must carry the recorded version. A binary that is cut short, built for the wrong architecture or at the wrong version counts as not installed and is installed again. A recorded binary that cannot be run at all falls back to a presence check, with a warning.
+The engine checks an install by running it, not by looking for the file. The recorded binaries must exist, and an executable one must answer when run. With `version_args`, the answer must carry the recorded version as a whole number: a longer one (`1.2.30` or `11.2.3` for `1.2.3`) does not count, and text after it, such as `-rc1`, a commit hash or a platform, is not read. The install asked for that exact version, so the check catches a different binary, not a label in a free-text banner. A binary that is cut short, built for the wrong architecture or at the wrong version counts as not installed and is installed again. A check's result is reused until the binary changes, and a replacement counts as a change even when it keeps the old file's size and modification time. A recorded binary that is present but not an executable file, such as a regular file without an execute bit, is not run: it counts as installed by its presence, and the engine logs a warning.
 
-The same check runs as the last step of an install. A binary the system refuses to start fails the install rather than being recorded at its version. Exit status 127 counts as such a refusal, and the loader's own message goes into the recorded error, so it names a missing library. Any other non-zero exit is still an answer, because a tool that does not understand `--version` has still shown it can run. The check runs after the state is recorded and before old versions are pruned, so a failed check leaves the previous version in place.
+Two kinds of install have nothing to run. A Debian package counts as installed when dpkg reports it installed for the host's own architecture, or for every architecture, because that is the copy apt installs for a bare package name. An npm package that ships no binary, such as a shared config, counts as installed when the `package.json` npm installed for it carries the recorded version. A `pip:` tool is checked again whenever its Python interpreter's file changes, and one whose interpreter is gone, or lies outside `python/interpreters` under `ToolsDir`, counts as not installed and is installed again, though its launcher file has not changed.
+
+The same check runs as the last step of an install, and an install that it does not count as installed fails, with the check's reason as the recorded error. A binary the system refuses to start is one such failure. Exit status 127 counts as a refusal, and the loader's own message goes into the error, so it names a missing library. Any other non-zero exit is still an answer, because a tool that does not understand `--version` has still shown it can run, but a tool that gives no answer within 10 seconds fails the install. A binary that answers its `version_args` with another version fails the install too, so an entry whose `version_args` do not print the version shows that as its error. The check runs after the state is recorded and before old versions are pruned, so a failed check keeps the previous version on disk.
 
 ## Writing to disk
 
 Every extracted file and the staging directory are flushed to disk before the rename that publishes a version. The parent directory is flushed after it, and the state file before any replaced version is pruned. A flush failure, a full disk included, fails the install and leaves the previous version live.
 
 Downloads are capped at 1 GiB. Archive extraction refuses a symlink that points outside the install tree. Installs land in versioned directories that are swapped in one step.
+
+The managed directories the engine creates are created owner-writable only and are otherwise left as they are; [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write, including a root `New` has just created.
 
 ## Network
 
@@ -36,7 +40,7 @@ A `manual` entry runs a bash script by design. It is an escape hatch for a volum
 
 ## Binaries the engine runs
 
-The engine starts system binaries by absolute path from `/usr/bin` and `/bin`, never through `PATH`. They are `tar`, `unzip`, `gunzip`, `bzip2`, `xz` and `zstd` for archives, `bash` for `manual` scripts, and `apt-get`, `apt-cache`, `apt-mark` and `dpkg-query` for `apt:` entries. A missing one fails the install that needs it.
+The engine starts system binaries by absolute path from `/usr/bin` and `/bin`, never through `PATH`. They are `tar`, `unzip`, `gunzip`, `bzip2`, `xz` and `zstd` for archives, `bash` for `manual` scripts, and `apt-get`, `apt-cache`, `apt-mark`, `dpkg` and `dpkg-query` for `apt:` entries. A missing one fails the install that needs it.
 
 This matters because the engine's own `bin/` comes before the system directories on `PATH` and lives on the volume. A `PATH` lookup would let a file written there replace those binaries on paths the engine runs with no user present, and as root for the apt binaries.
 

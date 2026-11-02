@@ -60,7 +60,7 @@ job, err := engine.Add(ctx, &toolbelt.AddRequest{Name: "gopls"})
 
 // Disable it. The binary is uninstalled and the entry stays as a template.
 disabled := true
-job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &disabled})
+job, err = engine.Patch("gopls", &toolbelt.PatchRequest{Disabled: &disabled})
 ```
 
 `DefaultSeed` writes four disabled templates on a fresh volume: `gopls`, `typescript-language-server`, `pyright` and `rust-analyzer`. Nothing downloads until one is enabled. Installed tools are linked into `bin/` under `ToolsDir`, so put that directory on the `PATH` of whatever runs them. [The catalog](docs/catalog.md) explains when the engine fetches a newer catalog. To serve the engine over HTTP, mount `httpapi.Handler(engine, "/api/tools")` behind your own authentication. [The REST handler](docs/http-api.md) lists its routes.
@@ -73,7 +73,7 @@ Without `GitHubToken`, GitHub API requests go without a token, and GitHub allows
 - `Add`, `Patch`, `Install`, `Update`, `Remove`, `RemoveWithDependents` and `Reconcile` change the manifest or the disk, each through a job. `EnsureInstalled` installs a tool and waits for it.
 - `ParseManifest` checks a `tools.json` document the way the engine reads it, so you can refuse a bad one before writing it.
 - `Jobs`, `Wait` and `CancelJob` follow the job queue. `RefreshCatalog` and `CatalogInfo` refresh and describe the catalog.
-- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
+- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity`, `ErrQueueFull`, `ErrShuttingDown` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
 - `httpapi.Handler` serves the engine over HTTP, and `cmd/toolcatalog` compiles and checks a catalog.
 
 The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/toolbelt/v3).
@@ -82,8 +82,8 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/too
 
 - Uninstalls remove only the files the engine recorded when it installed the tool. A binary of the same name that it did not install stays.
 - A download whose aqua registry definition declares a checksum installs only when that checksum matches. A tool with no declared checksum installs unverified, and its state says so.
-- A tool counts as installed only when its binary runs. A binary the system cannot start fails the install, and the error carries the system's reason, such as a missing library.
-- A new version is written in full and flushed to disk before it replaces the old one. A failed install leaves the previous version in place.
+- A tool whose recorded binary is executable counts as installed only when that binary runs and answers. A recorded binary that is present but not an executable file, such as a regular file without an execute bit, counts as installed by its presence, and the engine logs a warning. A Debian package counts as installed when dpkg reports it, whether or not it ships a binary, and an npm package that ships no binary when the `package.json` npm installed for it carries the recorded version. An install that this check does not count as installed fails, and the error carries the check's reason, such as the missing library that kept a binary from starting. A binary that runs but answers its `version_args` with another version is one such failure, so a wrong `version_args` shows as the install's error.
+- A downloaded version is written in full and flushed to disk before it replaces the old one, so a failed download leaves the previous version in use. A new version that fails its install check is already recorded and linked, and the previous one stays on disk. A package manager (npm, uv, cargo, go, apt) replaces a version its own way; uv, for one, keeps a `pip:` venv when it cannot resolve the new one.
 - A newer catalog replaces the current one only after it passes the same checks as `toolcatalog verify`. A bad fetch changes nothing.
 - Asking for a tool also installs every tool it depends on, first. A removal that would break an enabled tool is refused and names it.
 

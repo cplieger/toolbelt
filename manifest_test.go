@@ -54,3 +54,67 @@ func TestParseManifest_RefusesWhatNewRefuses(t *testing.T) {
 		})
 	}
 }
+
+// The python grammar is a bare version only, on a pip: or source-less row:
+// uv also accepts paths and executable names
+// (https://docs.astral.sh/uv/concepts/python-versions/#requesting-a-version),
+// which would build a venv outside the managed interpreters.
+func TestParseManifest_AcceptsAPythonRequest(t *testing.T) {
+	cases := map[string]string{
+		"minor version on pip": `{"source":"pip:yamllint","python":"3.14"}`,
+		"patch version on pip": `{"source":"pip:yamllint","python":"3.14.2"}`,
+		"major only on pip":    `{"source":"pip:yamllint","python":"3"}`,
+		"source-less template": `{"disabled":true,"python":"3.14"}`,
+	}
+	for name, tool := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc := fmt.Sprintf(`{"version":%d,"tools":{"t":%s}}`, ManifestVersion, tool)
+
+			m, err := ParseManifest([]byte(doc))
+			if err != nil {
+				t.Fatalf("ParseManifest(%s) error = %v, want nil", doc, err)
+			}
+			if m.Tools["t"].Python == "" {
+				t.Errorf("ParseManifest(%s) dropped the python request", doc)
+			}
+		})
+	}
+}
+
+func TestParseManifest_RefusesABadPythonRequest(t *testing.T) {
+	cases := []struct {
+		name, tool, want string
+	}{
+		{name: "absolute path", tool: `{"source":"pip:yamllint","python":"/usr/bin/python3"}`, want: `python "/usr/bin/python3" is not a version`},
+		{name: "executable name", tool: `{"source":"pip:yamllint","python":"python3"}`, want: `python "python3" is not a version`},
+		{name: "trailing option", tool: `{"source":"pip:yamllint","python":"3.14 --x"}`, want: "is not a version"},
+		{name: "traversal", tool: `{"source":"pip:yamllint","python":"../3"}`, want: "is not a version"},
+		{name: "implementation prefix", tool: `{"source":"pip:yamllint","python":"cpython3.14"}`, want: "is not a version"},
+		{name: "npm source", tool: `{"source":"npm:pyright","python":"3.14"}`, want: `python applies only to pip: sources, not "npm:pyright"`},
+		{name: "manual source", tool: `{"source":"manual","python":"3.14"}`, want: "python applies only to pip: sources"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := fmt.Sprintf(`{"version":%d,"tools":{"t":%s}}`, ManifestVersion, tc.tool)
+
+			_, err := ParseManifest([]byte(doc))
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ParseManifest(%s) error = %v, want one containing %q", doc, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseManifest_RefusesANulVersionArg: execve(2) arguments are
+// NUL-terminated, so a hand-edited element carrying one could never reach
+// the tool.
+func TestParseManifest_RefusesANulVersionArg(t *testing.T) {
+	doc := fmt.Sprintf(`{"version":%d,"tools":{"t":{"source":"manual","version_args":["--version","a\u0000b"]}}}`, ManifestVersion)
+
+	_, err := ParseManifest([]byte(doc))
+
+	if err == nil || !strings.Contains(err.Error(), "t: version_args[1] contains a NUL byte") {
+		t.Errorf("ParseManifest error = %v, want the NUL refusal naming the row and index", err)
+	}
+}

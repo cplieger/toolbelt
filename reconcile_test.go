@@ -38,7 +38,7 @@ func TestDisable_UninstallsAndKeepsTemplate(t *testing.T) {
 	addManual(t, e, "tool", nil)
 
 	on := true
-	jv, err := e.Patch("tool", PatchRequest{Disabled: &on})
+	jv, err := e.Patch("tool", &PatchRequest{Disabled: &on})
 	if err != nil || jv == nil {
 		t.Fatalf("disable patch: job=%v err=%v", jv, err)
 	}
@@ -91,7 +91,7 @@ func TestPatch_EnableInstalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := false
-	jv, err := e.Patch("x", PatchRequest{Disabled: &off})
+	jv, err := e.Patch("x", &PatchRequest{Disabled: &off})
 	if err != nil || jv == nil {
 		t.Fatalf("enable patch: job=%v err=%v", jv, err)
 	}
@@ -109,7 +109,7 @@ func TestPatch_DisableDependentsRefusedThenForced(t *testing.T) {
 	addManual(t, e, "dep", []string{"base"})
 
 	on := true
-	_, err := e.Patch("base", PatchRequest{Disabled: &on})
+	_, err := e.Patch("base", &PatchRequest{Disabled: &on})
 	depErr, isDependents := errors.AsType[*DependentsError](err)
 	if !isDependents || !errors.Is(err, ErrHasDependents) {
 		t.Fatalf("disable with dependents = %v, want DependentsError", err)
@@ -118,7 +118,7 @@ func TestPatch_DisableDependentsRefusedThenForced(t *testing.T) {
 		t.Fatalf("dependents = %v", depErr.Dependents)
 	}
 
-	jv, err := e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+	jv, err := e.Patch("base", &PatchRequest{Disabled: &on, Force: true})
 	if err != nil || jv == nil {
 		t.Fatalf("forced disable: job=%v err=%v", jv, err)
 	}
@@ -174,6 +174,45 @@ func TestReconcile_ConvergesBothWays(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "missing")); err != nil {
 		t.Fatal("missing tool not installed by reconcile")
+	}
+}
+
+// TestReconcile_RebuildsAVenvOnAnotherPythonRequest: a pip: row whose venv
+// was built for another Python request than the manifest's is not converged,
+// though its version matches and its launcher runs, so a hand-edited python
+// field reaches the venv (uv tool install --python).
+func TestReconcile_RebuildsAVenvOnAnotherPythonRequest(t *testing.T) {
+	argv := fakeUV(t)
+	e := pipEngine(t, "3.14")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.Python = "3.13"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("reconcile job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if got, want := readArgv(t, argv), []string{"tool install --reinstall --python 3.14 x==1.0.0"}; !slices.Equal(got, want) {
+		t.Errorf("uv argv = %q, want %q", got, want)
+	}
+	if got := e.store.State().Tools["x"].Python; got != "3.14" {
+		t.Errorf("recorded python = %q, want 3.14", got)
+	}
+
+	jv, _, err = e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := strings.Join(waitJob(t, e, jv.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
+		t.Errorf("second reconcile output = %q, want everything converged", out)
 	}
 }
 
