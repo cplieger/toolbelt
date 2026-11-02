@@ -1093,6 +1093,53 @@ func TestEnsureInstalled_InstallsTheMissingDependencyOfAnInstalledTool(t *testin
 	requireInstalled(t, e, "dep")
 }
 
+// TestEnsureInstalled_ReinstallsAnEnabledDependencyWhoseBinaryIsGone: an
+// installed tool is not ready while an enabled dependency, named in requires
+// or implied by its source's backend, has lost its binary, so EnsureInstalled
+// reinstalls the dependency as Reconcile would.
+func TestEnsureInstalled_ReinstallsAnEnabledDependencyWhoseBinaryIsGone(t *testing.T) {
+	const pkg = "pkg"
+	for _, tc := range []struct {
+		seed func(t *testing.T, e *Engine)
+		name string
+		dep  string
+	}{
+		{name: "requires", dep: "dep", seed: func(t *testing.T, e *Engine) {
+			addManual(t, e, "dep", nil)
+			addManual(t, e, pkg, []string{"dep"})
+		}},
+		{name: "source backend", dep: "node", seed: func(t *testing.T, e *Engine) {
+			addManual(t, e, "node", nil)
+			editManifest(t, e, func(m *Manifest) { m.Tools[pkg] = Tool{Source: "npm:" + pkg, Version: "1.0.0"} })
+			if err := e.store.setToolStatus(pkg, func(s *ToolStatus) { s.InstalledVersion = "1.0.0" }); err != nil {
+				t.Fatal(err)
+			}
+			writeNpmPackage(t, e, pkg, `{"name":"pkg","version":"1.0.0"}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// npm fails if anything reruns it: the npm row itself is installed.
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cat := &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourceNpm: "node"}}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			tc.seed(t, e)
+			if err := os.Remove(filepath.Join(e.toolsDir, "bin", tc.dep)); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if err := e.EnsureInstalled(ctx, pkg); err != nil {
+				t.Fatalf("EnsureInstalled: %v", err)
+			}
+			requireInstalled(t, e, tc.dep)
+		})
+	}
+}
+
 // reconcileJob runs one ReconcileMissing job to its end.
 func reconcileJob(t *testing.T, e *Engine) *Job {
 	t.Helper()

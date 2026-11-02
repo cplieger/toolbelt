@@ -1021,8 +1021,9 @@ func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err erro
 
 // EnsureInstalled synchronously guarantees a tool: present in the
 // manifest (created from the catalog when missing), enabled, installed
-// as Reconcile would leave it, and on PATH. This is the programmatic "a product action needs this
-// binary now" path (a forge login installing gh, an MCP flow installing
+// with its dependencies as Reconcile would leave them, and on PATH. This
+// is the programmatic "a product action needs this binary now" path (a
+// forge login installing gh, an MCP flow installing
 // node); unlike Install it DOES enable a disabled template, because the
 // user explicitly invoked the feature that needs the tool.
 func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
@@ -1031,8 +1032,7 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 		return err
 	}
 	t, inManifest := m.Tools[name]
-	status := e.store.State().Tools[name]
-	if inManifest && !t.Disabled && e.converged(m, name, &t, &status, e.backends()) {
+	if inManifest && !t.Disabled && e.closureConverged(m, name) {
 		return nil
 	}
 	jv, err := e.ensureJob(ctx, name, &t, inManifest)
@@ -2040,6 +2040,21 @@ func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, bac
 	st, err := aptQuery(ctx, pkg)
 	want := aptRequest(t)
 	return err == nil && st.installed && st.held == t.Pin && (want == "" || st.version == want)
+}
+
+// closureConverged reports whether name and every row its install plan walks
+// are enabled and converged, each against its own state record.
+func (e *Engine) closureConverged(m *Manifest, name string) bool {
+	st := e.store.State()
+	backends := e.backends()
+	for n := range installClosure(m, []string{name}, backends) {
+		t, ok := m.Tools[n]
+		status := st.Tools[n]
+		if !ok || t.Disabled || !e.converged(m, n, &t, &status, backends) {
+			return false
+		}
+	}
+	return true
 }
 
 // versionDrifted reports a recorded install at another version than the
