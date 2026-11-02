@@ -4078,11 +4078,65 @@ func TestAptInstall_NothingInstalledRecordsNoVersion(t *testing.T) {
 	wantJobState(t, e, jv, JobFailed)
 
 	st := e.store.State().Tools["jq"]
-	if !strings.Contains(st.LastError, "dpkg reports jq is not installed") {
-		t.Errorf("recorded error = %q, want dpkg's absent package", st.LastError)
+	if !strings.Contains(st.LastError, "apt-get succeeded but dpkg reports jq is not installed") {
+		t.Errorf("recorded error = %q, want dpkg's absent package after apt-get", st.LastError)
 	}
 	if st.InstalledVersion != "" {
 		t.Errorf("installed version = %q, want none recorded", st.InstalledVersion)
+	}
+}
+
+// TestAptInstall_FailedReadAfterInstallIsRecordedByTheNextReconcile: when
+// dpkg-query fails after apt-get installed the package, the job fails with
+// nothing recorded, and the next Reconcile installs again and records the
+// version dpkg reports, in the state and the unpinned row, with the error
+// cleared.
+func TestAptInstall_FailedReadAfterInstallIsRecordedByTheNextReconcile(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded bool
+		reads    int
+	}{
+		{name: "no recorded version", recorded: false, reads: 2},
+		// The install's fast path reads dpkg first.
+		{name: "an older recorded version", recorded: true, reads: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRoot(t)
+			s := stubApt(t)
+			e := newTestEngine(t, nil)
+			setAptRow(t, e, false, tc.recorded)
+			// The install's own read and the hold lift's answer; the read
+			// after apt-get is the one that fails.
+			s.failQueriesAfter(t, tc.reads)
+
+			jv, err := e.Install("jq")
+			if err != nil {
+				t.Fatalf("Install(jq) = %v", err)
+			}
+			wantJobState(t, e, jv, JobFailed)
+			if !s.ran(t, "apt-get-end") || s.installedVersion(t) != aptStubCandidate {
+				t.Fatalf("calls = %q, dpkg at %q; want apt-get to have installed %s", s.lines(t), s.installedVersion(t), aptStubCandidate)
+			}
+			if got := e.store.State().Tools["jq"].LastError; !strings.Contains(got, "parsing file") {
+				t.Fatalf("recorded error = %q, want the dpkg-query failure", got)
+			}
+
+			s.clear(t, "query-budget")
+			rj, _, err := e.Reconcile(ReconcileMissing)
+			if err != nil {
+				t.Fatalf("Reconcile = %v", err)
+			}
+			wantJobState(t, e, rj, JobDone)
+
+			st := e.store.State().Tools["jq"]
+			if st.InstalledVersion != aptStubCandidate || st.LastError != "" {
+				t.Errorf("state = %q (error %q), want dpkg's %s and no error", st.InstalledVersion, st.LastError, aptStubCandidate)
+			}
+			if m, _ := e.store.LoadManifest(); m.Tools["jq"].Version != aptStubCandidate {
+				t.Errorf("manifest version = %q, want dpkg's %s", m.Tools["jq"].Version, aptStubCandidate)
+			}
+		})
 	}
 }
 

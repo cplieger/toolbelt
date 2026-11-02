@@ -2032,11 +2032,11 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 
 // converged is probeInstalled on a venv built for the row's Python request at
 // the row's version, with an enabled row for every dependency, and for an apt:
-// row also a dpkg hold equal to its pin and, when pinned, dpkg at its version,
-// so Reconcile applies a hand-edited version or requires and repairs a hold or
-// a version that a failed apt-mark, a recreated container or a hand-run apt
-// left wrong. An unreadable dpkg record is not converged, so the install that
-// follows records why.
+// row also a dpkg hold equal to its pin, dpkg at its version when pinned and no
+// stale record (aptRecordStale), so Reconcile applies a hand-edited version or
+// requires and repairs what a failed apt-mark or install, a recreated container
+// or a hand-run apt left wrong. An unreadable dpkg record is not converged, so
+// the install that follows records why.
 func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, backends map[string]string) bool {
 	if s.Python != t.Python || versionDrifted(t, s) || !depsSatisfied(m, name, t, backends) {
 		return false
@@ -2049,7 +2049,8 @@ func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, bac
 	defer cancel()
 	st, err := aptQuery(ctx, pkg)
 	want := aptRequest(t)
-	return err == nil && st.installed && st.held == t.Pin && (want == "" || st.version == want)
+	return err == nil && st.installed && st.held == t.Pin && (want == "" || st.version == want) &&
+		!aptRecordStale(s, st)
 }
 
 // closureConverged reports whether name and every row its install plan walks

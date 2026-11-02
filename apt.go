@@ -348,6 +348,14 @@ func aptRequest(t *Tool) string {
 	return ""
 }
 
+// aptRecordStale reports a row whose last install failed while dpkg holds
+// another version than its state records: a failure after apt-get ran (the
+// read that follows it) leaves the record behind dpkg, and an unpinned row
+// otherwise accepts any installed version, so only a new install records it.
+func aptRecordStale(s *ToolStatus, st aptStatus) bool {
+	return s.LastError != "" && st.version != s.InstalledVersion
+}
+
 // installApt installs one Debian package, at want when it is not empty, and
 // returns the version dpkg then reports, which is what the install recorded.
 //
