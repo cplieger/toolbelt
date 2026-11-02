@@ -38,7 +38,7 @@ func TestDisable_UninstallsAndKeepsTemplate(t *testing.T) {
 	addManual(t, e, "tool", nil)
 
 	on := true
-	jv, err := e.Patch("tool", &PatchRequest{Disabled: &on})
+	jv, err := e.Patch("tool", PatchRequest{Disabled: &on})
 	if err != nil || jv == nil {
 		t.Fatalf("disable patch: job=%v err=%v", jv, err)
 	}
@@ -91,7 +91,7 @@ func TestPatch_EnableInstalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	off := false
-	jv, err := e.Patch("x", &PatchRequest{Disabled: &off})
+	jv, err := e.Patch("x", PatchRequest{Disabled: &off})
 	if err != nil || jv == nil {
 		t.Fatalf("enable patch: job=%v err=%v", jv, err)
 	}
@@ -109,7 +109,7 @@ func TestPatch_DisableDependentsRefusedThenForced(t *testing.T) {
 	addManual(t, e, "dep", []string{"base"})
 
 	on := true
-	_, err := e.Patch("base", &PatchRequest{Disabled: &on})
+	_, err := e.Patch("base", PatchRequest{Disabled: &on})
 	depErr, isDependents := errors.AsType[*DependentsError](err)
 	if !isDependents || !errors.Is(err, ErrHasDependents) {
 		t.Fatalf("disable with dependents = %v, want DependentsError", err)
@@ -118,7 +118,7 @@ func TestPatch_DisableDependentsRefusedThenForced(t *testing.T) {
 		t.Fatalf("dependents = %v", depErr.Dependents)
 	}
 
-	jv, err := e.Patch("base", &PatchRequest{Disabled: &on, Force: true})
+	jv, err := e.Patch("base", PatchRequest{Disabled: &on, Force: true})
 	if err != nil || jv == nil {
 		t.Fatalf("forced disable: job=%v err=%v", jv, err)
 	}

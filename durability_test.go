@@ -205,7 +205,7 @@ func installVersion(t *testing.T, e *Engine, ver string) *Job {
 		}
 		return waitJob(t, e, job.ID)
 	}
-	job, perr := e.Patch("tool", &PatchRequest{Version: &ver})
+	job, perr := e.Patch("tool", PatchRequest{Version: &ver})
 	if perr != nil || job == nil {
 		t.Fatalf("patch to %s: job=%v err=%v", ver, job, perr)
 	}

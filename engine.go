@@ -654,13 +654,15 @@ type patchOutcome struct {
 // enabled tool → reinstall, pin change on an enabled apt: tool where apt is
 // available → install, which applies the dpkg hold. Returns nil when no job
 // is needed.
-func (e *Engine) Patch(name string, req *PatchRequest) (*Job, error) {
+//
+//nolint:gocritic // hugeParam: v3 takes a value; a pointer breaks the API.
+func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 	var (
 		out patchOutcome
 		res *job
 	)
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		if err := patchManifest(m, name, req, &out, e.backends()); err != nil {
+		if err := patchManifest(m, name, &req, &out, e.backends()); err != nil {
 			return err
 		}
 		kind, names := out.job(name)
@@ -1048,7 +1050,7 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 func (e *Engine) ensureJob(ctx context.Context, name string, t *Tool, inManifest bool) (*Job, error) {
 	if inManifest && t.Disabled {
 		f := false
-		jv, err := e.Patch(name, &PatchRequest{Disabled: &f})
+		jv, err := e.Patch(name, PatchRequest{Disabled: &f})
 		if err != nil {
 			return nil, err
 		}
