@@ -817,8 +817,8 @@ func enabledDependents(m *Manifest, idx map[string][]string, name string) []stri
 
 // dependentsIndex maps every name to what needs it directly along planEdges:
 // every manifest row, disabled or not, and the catalog entry of each absent
-// name they reach. One walk rather than one per row, so Inventory, which
-// renders every tool, stays linear in the manifest size.
+// name they reach. One walk builds every name's reverse edges, so Inventory
+// does not re-scan the manifest per tool.
 func dependentsIndex(m *Manifest, c *Catalog) map[string][]string {
 	out := map[string][]string{}
 	seen := map[string]bool{}

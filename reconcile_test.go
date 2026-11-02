@@ -1366,7 +1366,8 @@ func TestEnsureInstalled_ReadsASourceLessRowAsHydrated(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// npm fails if anything runs it: the npm row is installed.
+			// npm fails if anything runs it. In the source-backend case the
+			// npm row is already installed; the other cases use no npm.
 			fake := t.TempDir()
 			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
 				t.Fatal(err)
