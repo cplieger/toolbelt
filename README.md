@@ -60,7 +60,7 @@ job, err := engine.Add(ctx, &toolbelt.AddRequest{Name: "gopls"})
 
 // Disable it. The binary is uninstalled and the entry stays as a template.
 disabled := true
-job, err = engine.Patch("gopls", &toolbelt.PatchRequest{Disabled: &disabled})
+job, err = engine.Patch("gopls", toolbelt.PatchRequest{Disabled: &disabled})
 ```
 
 `DefaultSeed` writes four disabled templates on a fresh volume: `gopls`, `typescript-language-server`, `pyright` and `rust-analyzer`. Nothing downloads until one is enabled. Installed tools are linked into `bin/` under `ToolsDir`, so put that directory on the `PATH` of whatever runs them. [The catalog](docs/catalog.md) explains when the engine fetches a newer catalog. To serve the engine over HTTP, mount `httpapi.Handler(engine, "/api/tools")` behind your own authentication. [The REST handler](docs/http-api.md) lists its routes.
