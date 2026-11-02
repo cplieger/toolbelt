@@ -110,3 +110,36 @@ func versionRejected(source, v string) error {
 		return fmt.Errorf("version %q is not a release tag, which allows only letters, digits, '.', '-', '_' and '+'", v)
 	}
 }
+
+// pythonRequestPattern admits only uv's version-number request form
+// (3, 3.14, 3.14.2): uv also takes paths and executable names
+// (https://docs.astral.sh/uv/concepts/python-versions/#requesting-a-version),
+// which would build a venv on an interpreter outside the managed dir.
+var pythonRequestPattern = regexp.MustCompile(`^\d{1,4}(\.\d{1,4}){0,2}$`)
+
+// validatePython refuses a Tool.Python request that is not a bare version, or
+// one on a source other than pip:. An empty source is a template the catalog
+// hydrates later, so only the grammar applies until then.
+func validatePython(source, python string) error {
+	if python == "" {
+		return nil
+	}
+	if !pythonRequestPattern.MatchString(python) {
+		return fmt.Errorf("python %q is not a version such as 3.14", python)
+	}
+	if kind := sourceKind(source); kind != "" && kind != SourcePip {
+		return fmt.Errorf("python applies only to pip: sources, not %q", source)
+	}
+	return nil
+}
+
+// validateVersionArgs refuses an element execve(2) cannot pass: arguments are
+// NUL-terminated, so the probe could never run the tool.
+func validateVersionArgs(args []string) error {
+	for i, a := range args {
+		if strings.ContainsRune(a, 0) {
+			return fmt.Errorf("version_args[%d] contains a NUL byte", i)
+		}
+	}
+	return nil
+}

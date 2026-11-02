@@ -130,7 +130,7 @@ func TestGitHubAPITransport_TokenReachesOnlyTheAPI(t *testing.T) {
 			in := &installer{client: client, output: func(string) {}}
 			rr := releaseRef{Host: releaseHostGitHub, Owner: "o", Repo: "r"}
 
-			if _, err := v.Latest(t.Context(), "release:github/o/r", nil); err != nil {
+			if _, err := v.Latest(t.Context(), &Tool{Source: "release:github/o/r"}, nil); err != nil {
 				t.Fatalf("Latest(release:github/o/r) = %v", err)
 			}
 			if _, err := in.listReleaseAssets(t.Context(), rr, "v1.0.0"); err != nil {
@@ -173,7 +173,7 @@ func TestGitHubAPITransport_SourceErrorFailsTheRequest(t *testing.T) {
 	errSource := errors.New("credential revoked")
 	client := githubTestClient(srv, func(context.Context) (string, error) { return "", errSource })
 
-	_, err := newTestVersionResolver(client).Latest(t.Context(), "release:github/o/r", nil)
+	_, err := newTestVersionResolver(client).Latest(t.Context(), &Tool{Source: "release:github/o/r"}, nil)
 	if !errors.Is(err, errSource) {
 		t.Fatalf("Latest(release:github/o/r) = %v, want an error wrapping the source's", err)
 	}
@@ -211,7 +211,7 @@ func TestNew_SuppliedGitHubTokenIsUsedAndNoGHRuns(t *testing.T) {
 	srv, auth := githubFixture(t)
 	e := engineAgainst(t, srv, &Config{GitHubToken: staticToken("tok-app")})
 
-	if _, err := e.versions.Latest(t.Context(), "release:github/o/r", nil); err != nil {
+	if _, err := e.versions.Latest(t.Context(), &Tool{Source: "release:github/o/r"}, nil); err != nil {
 		t.Fatalf("Latest(release:github/o/r) = %v", err)
 	}
 	if got, _ := auth.header("api.github.com/repos/o/r/releases/latest"); got != "Bearer tok-app" {
@@ -227,7 +227,7 @@ func TestNew_NoGitHubTokenIsAnonymousAndNoGHRuns(t *testing.T) {
 	srv, auth := githubFixture(t)
 	e := engineAgainst(t, srv, &Config{})
 
-	if _, err := e.versions.Latest(t.Context(), "release:github/o/r", nil); err != nil {
+	if _, err := e.versions.Latest(t.Context(), &Tool{Source: "release:github/o/r"}, nil); err != nil {
 		t.Fatalf("Latest(release:github/o/r) = %v", err)
 	}
 	if got, ok := auth.header("api.github.com/repos/o/r/releases/latest"); !ok || got != "" {
@@ -281,7 +281,7 @@ func TestGitHubAPITransport_ExhaustedQuotaIsANamedError(t *testing.T) {
 			}))
 			v := newTestVersionResolver(githubTestClient(srv, staticToken(tc.token)))
 
-			_, err := v.Latest(t.Context(), "aqua:owner/repo", nil)
+			_, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, nil)
 			if _, ok := errors.AsType[*GitHubRateLimitError](err); !ok {
 				t.Fatalf("Latest(aqua:owner/repo) = %v (%T), want a *GitHubRateLimitError", err, err)
 			}
@@ -323,7 +323,7 @@ func TestGitHubAPITransport_OtherForbiddenPassesThrough(t *testing.T) {
 	}))
 	v := newTestVersionResolver(githubTestClient(srv, nil))
 
-	_, err := v.Latest(t.Context(), "aqua:owner/repo", nil)
+	_, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, nil)
 	se, ok := errors.AsType[*httpx.StatusError](err)
 	if !ok || se.Code != http.StatusForbidden {
 		t.Fatalf("Latest(aqua:owner/repo) = %v (%T), want an *httpx.StatusError with code 403", err, err)
@@ -424,7 +424,7 @@ func TestGitHubAPITransport_RateLimitRefusalIsTyped(t *testing.T) {
 			v := newTestVersionResolver(githubTestClient(srv, staticToken(tc.token)))
 
 			before := time.Now()
-			_, err := v.Latest(t.Context(), "aqua:owner/repo", nil)
+			_, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, nil)
 			after := time.Now()
 			rl, ok := errors.AsType[*GitHubRateLimitError](err)
 			if !ok {
@@ -456,7 +456,7 @@ func TestGitHubAPITransport_PlainForbiddenIsNotARateLimit(t *testing.T) {
 		`{"message":"Resource not accessible by integration"}`)
 	v := newTestVersionResolver(githubTestClient(srv, nil))
 
-	_, err := v.Latest(t.Context(), "aqua:owner/repo", nil)
+	_, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, nil)
 	if se, ok := errors.AsType[*httpx.StatusError](err); !ok || se.Code != http.StatusForbidden {
 		t.Errorf("Latest(aqua:owner/repo) = %v (%T), want an *httpx.StatusError with code 403", err, err)
 	}
@@ -663,17 +663,17 @@ func TestGitHubAPITransport_RateLimitIsHeldPerCredential(t *testing.T) {
 		return tok.Load().(string), nil
 	}))
 
-	if _, err := v.Latest(t.Context(), "aqua:o/one", nil); !errors.Is(err, ErrGitHubRateLimited) {
+	if _, err := v.Latest(t.Context(), &Tool{Source: "aqua:o/one"}, nil); !errors.Is(err, ErrGitHubRateLimited) {
 		t.Fatalf("anonymous Latest(aqua:o/one) = %v, want ErrGitHubRateLimited from the server", err)
 	}
-	if _, err := v.Latest(t.Context(), "aqua:o/two", nil); !errors.Is(err, ErrGitHubRateLimited) {
+	if _, err := v.Latest(t.Context(), &Tool{Source: "aqua:o/two"}, nil); !errors.Is(err, ErrGitHubRateLimited) {
 		t.Errorf("anonymous Latest(aqua:o/two) after a refusal = %v, want ErrGitHubRateLimited", err)
 	}
 	if n := requests.Load(); n != 1 {
 		t.Errorf("server saw %d anonymous requests, want 1: the second must be refused without sending", n)
 	}
 	tok.Store("tok")
-	if got, err := v.Latest(t.Context(), "aqua:o/three", nil); err != nil || got != "v1.0.0" {
+	if got, err := v.Latest(t.Context(), &Tool{Source: "aqua:o/three"}, nil); err != nil || got != "v1.0.0" {
 		t.Errorf("Latest(aqua:o/three) with a token = %q, %v; want v1.0.0: another credential's refusal does not hold this one", got, err)
 	}
 }

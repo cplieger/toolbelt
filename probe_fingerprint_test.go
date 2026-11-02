@@ -3,17 +3,20 @@ package toolbelt
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/cplieger/keyenc"
 )
 
 // TestProbeFingerprintCannotBeForged pins that two different probe
 // subjects never share a fingerprint: a collision reuses one binary's
-// verdict for another shape. The previous raw '|'-joined form collapsed
-// on a path or version containing '|', or on an arg list whose elements
-// merge across a space join. Each pair below is one it collapsed.
+// verdict for another shape. Each pair below would collapse under a plain
+// separator join.
 func TestProbeFingerprintCannotBeForged(t *testing.T) {
 	// Build the two subjects as real files, since probeFingerprint stats them:
 	// identical size and mtime, so only the varying components can distinguish
@@ -97,11 +100,9 @@ func TestProbeFingerprintSeparatesPathFromVersion(t *testing.T) {
 	}
 }
 
-// TestProbeFingerprintIsStableForOrdinaryInput pins that adopting keyenc did
-// not change the fingerprint for the inputs the reconciler actually produces:
-// no ordinary component carries a reserved character, so the value stays the
-// plain separator-joined form. A change here silently invalidates every cached
-// probe verdict, which costs a round of re-probing on the next reconcile.
+// TestProbeFingerprintIsStableForOrdinaryInput pins the plain separator-joined
+// form for the inputs the reconciler produces: no ordinary component carries a
+// reserved character, so keyenc neither escapes nor hashes any of them.
 func TestProbeFingerprintIsStableForOrdinaryInput(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "jq")
@@ -121,11 +122,65 @@ func TestProbeFingerprintIsStableForOrdinaryInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("evalsymlinks: %v", err)
 	}
-	want := resolved + ":1:" + strconv.FormatInt(fi.ModTime().UnixNano(), 10) + ":1.8.1:--version"
+	st := fi.Sys().(*syscall.Stat_t)
+	want := strings.Join([]string{
+		resolved, "-rw-------", "1", strconv.FormatInt(fi.ModTime().UnixNano(), 10),
+		strconv.FormatUint(st.Dev, 10), strconv.FormatUint(st.Ino, 10), strconv.FormatInt(st.Ctim.Nano(), 10),
+		"1.8.1", "--version",
+	}, ":")
 	if got != want {
 		t.Errorf("probeFingerprint() = %q, want the plain joined form %q", got, want)
 	}
 	if keyenc.IsHashed(got) {
 		t.Error("an ordinary fingerprint must not be reduced to a hashed identity")
 	}
+}
+
+// TestFileIdentity_SeparatesARenameWithinOneClockTick pins that a file
+// renamed over another within one clock tick, which then shares its ctime,
+// mtime, mode and size, still reads as a different file.
+func TestFileIdentity_SeparatesARenameWithinOneClockTick(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "tool")
+	next := filepath.Join(dir, "tool.next")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := os.WriteFile(target, []byte("1"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(next, []byte("2"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		oldStat := statTimes(t, target)
+		before, err := fileIdentity(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(next, target); err != nil {
+			t.Fatal(err)
+		}
+		after, err := fileIdentity(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if statTimes(t, target) == oldStat {
+			if slices.Equal(before, after) {
+				t.Errorf("a rename within one tick kept the identity %q", before)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Skip("this kernel stamped every rename on a later tick than the write")
+		}
+	}
+}
+
+// statTimes is a file's mtime and ctime.
+func statTimes(t *testing.T, path string) [2]int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return [2]int64{fi.ModTime().UnixNano(), fi.Sys().(*syscall.Stat_t).Ctim.Nano()}
 }

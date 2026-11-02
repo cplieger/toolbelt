@@ -2,10 +2,12 @@ package toolbelt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"testing"
+	"time"
 )
 
 // newLineQueue builds a queue whose jobs run the given body. The body
@@ -141,5 +143,120 @@ func TestJobQueue_TerminalViewsSurviveTheRecentWindow(t *testing.T) {
 	}
 	if slices.Contains(recentIDs, ids[0]) {
 		t.Errorf("the first of %d jobs is still in recent history: %v", burst, recentIDs)
+	}
+}
+
+// TestJobQueue_ReservationHoldsItsPlaceUnseen pins the transaction Add,
+// Patch and Remove stand on: a reserved job counts against the cap and
+// keeps its place in the run order, but no reader sees it and the worker,
+// free to run, waits for its publish; a released one leaves no trace.
+func TestJobQueue_ReservationHoldsItsPlaceUnseen(t *testing.T) {
+	ran := make(chan string, jobQueueCap+3)
+	unblock := make(chan struct{})
+	var q *jobQueue
+	q = newLineQueue(t, func(j *job, _ func(string)) error {
+		q.mu.Lock()
+		reserved := j.reserved
+		q.mu.Unlock()
+		if reserved {
+			t.Errorf("job %v ran while reserved", j.names)
+		}
+		if j.names[0] == "busy" {
+			<-unblock
+		}
+		ran <- j.names[0]
+		return nil
+	})
+
+	busy, err := q.Enqueue(JobKindInstall, []string{"busy"})
+	if err != nil {
+		t.Fatalf("Setup: Enqueue: %v", err)
+	}
+	res, err := q.reserve(JobKindInstall, []string{"reserved"}, nil)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	later, err := q.Enqueue(JobKindInstall, []string{"later"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	// Once busy is collected the worker has moved on to the queue's head.
+	close(unblock)
+	if v, err := q.Wait(t.Context(), busy.ID); err != nil || v.State != JobDone {
+		t.Fatalf("Setup: Wait(busy) = %+v, %v", v, err)
+	}
+	if _, known := q.lookup(res.id); known {
+		t.Error("lookup knows the reserved job, want it unseen")
+	}
+	if q.Cancel(res.id) {
+		t.Error("Cancel reached the reserved job, want it unseen")
+	}
+	if set := q.InstallingSet(); set["reserved"] {
+		t.Errorf("InstallingSet = %v, want the reserved job left out", set)
+	}
+	if a := q.Active(); a == nil || a.ID != later.ID || a.State != JobQueued {
+		t.Errorf("Active = %+v, want %s still queued behind the reservation", a, later.ID)
+	}
+
+	published := q.publish(res)
+	if published.ID != res.id || published.State != JobQueued {
+		t.Errorf("publish = %+v, want %s queued", published, res.id)
+	}
+	for _, id := range []string{published.ID, later.ID} {
+		if v, err := q.Wait(t.Context(), id); err != nil || v.State != JobDone {
+			t.Fatalf("Wait(%s) = %+v, %v, want done", id, v, err)
+		}
+	}
+	if order := []string{<-ran, <-ran, <-ran}; !slices.Equal(order, []string{"busy", "reserved", "later"}) {
+		t.Errorf("run order = %q, want busy, then the reservation, then later", order)
+	}
+
+	t.Run("a reservation counts against the cap until released", func(t *testing.T) {
+		held := make([]*job, 0, jobQueueCap)
+		for range jobQueueCap {
+			r, err := q.reserve(JobKindInstall, []string{"held"}, nil)
+			if err != nil {
+				t.Fatalf("Setup: reserve: %v", err)
+			}
+			held = append(held, r)
+		}
+		if _, err := q.Enqueue(JobKindInstall, []string{"over"}); !errors.Is(err, ErrQueueFull) {
+			t.Errorf("Enqueue past reserved slots = %v, want ErrQueueFull", err)
+		}
+		for _, r := range held {
+			q.release(r)
+		}
+		jv, err := q.Enqueue(JobKindInstall, []string{"after"})
+		if err != nil {
+			t.Fatalf("Enqueue after release: %v", err)
+		}
+		if v, err := q.Wait(t.Context(), jv.ID); err != nil || v.State != JobDone {
+			t.Errorf("Wait after release = %+v, %v, want done", v, err)
+		}
+		if got := <-ran; got != "after" {
+			t.Errorf("ran %q after the releases, want after", got)
+		}
+	})
+}
+
+func TestJobQueue_PublishAfterCloseIsCancelled(t *testing.T) {
+	q := newLineQueue(t, func(*job, func(string)) error { return nil })
+	res, err := q.reserve(JobKindInstall, []string{"tool"}, nil)
+	if err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	q.Close()
+	if _, recent := q.Snapshot(); len(recent) != 0 {
+		t.Errorf("history after Close = %+v, want the reservation unseen until publish", recent)
+	}
+
+	v := q.publish(res)
+	if v.State != JobCancelled || v.CancelCause != CancelShutdown {
+		t.Errorf("publish after Close = state %s cause %v, want cancelled by shutdown", v.State, v.CancelCause)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if final, err := q.Wait(ctx, v.ID); err != nil || final.State != JobCancelled {
+		t.Errorf("Wait = %+v, %v, want the cancelled view", final, err)
 	}
 }

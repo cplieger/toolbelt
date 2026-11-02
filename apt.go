@@ -6,29 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
 
-// The apt source installs Debian packages, and it is the one source
-// whose artifacts do NOT live on the persistent volume: apt writes into
-// /usr, which is the container layer, so an apt entry dies with the
-// container and is re-applied by the boot converge. Three consequences
-// shape everything below.
-//
-// Detection cannot execute a binary. A package such as libc6-dev ships
-// none, and after `apt-get remove` a config-files-only package still
-// reports a version, so the dpkg STATUS word is the only honest probe
-// (aptInstalled).
-//
-// Uninstall is a no-op. Removing an entry stops it being reinstalled; it
-// does not remove the package now, because the entry was never a record
-// of something on disk in the first place.
-//
-// Nothing here is reachable on a host that is not Debian-derived or not
-// root, and the engine reports that as a capability rather than
-// discovering it as a failure (AptAvailable).
+// apt writes into /usr, the container layer, so an apt entry dies with the
+// container and the boot converge re-applies it. Hence: detection reads the
+// dpkg status word, never a binary (aptQuery); uninstall drops the entry and
+// leaves the package (installer.uninstall); and a host that is not
+// Debian-derived or not root reports apt as a capability (AptAvailable).
 
 // aptNamePattern is the anchored package-name grammar. It is the first
 // of two gates and it exists to stop anything that is not shaped like a
@@ -66,27 +55,31 @@ func aptValidName(s string) bool {
 	return !strings.HasSuffix(s, "-")
 }
 
-// aptSetHold marks an apt package held (or releases the hold), which is
-// what makes a pinned row survive apt's own dependency resolution: a held
-// package is one apt refuses to upgrade or remove as a side effect of some
-// other install.
-//
-// dpkg's own marking, not a preferences file. A pin is per-package state
-// with exactly this meaning, and /etc/apt/preferences.d would put this
-// engine's opinion in a file an operator also edits by hand.
-func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) error {
+// syncAptHold makes a package's dpkg hold equal hold, and is the only caller
+// of apt-mark; a pin means apt will not move the package as another
+// install's side effect. A hold is released whatever the package's status,
+// since apt-get -y refuses a held package, but only an installed one is held.
+// dpkg's own marking, not /etc/apt/preferences.d, which operators hand-edit.
+func (in *installer) syncAptHold(ctx context.Context, pkg string, hold bool) error {
 	// The name goes to apt-mark as an argv element, so no shell parses it,
 	// but the grammar gate still runs: a name this engine would refuse to
 	// install is a name it must not mark either.
 	if !aptValidName(pkg) {
 		return fmt.Errorf("refusing to hold %q: not a valid package name", pkg)
 	}
+	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
+	defer cancel()
+	st, err := aptQuery(ctx, pkg)
+	if err != nil {
+		return err
+	}
+	if st.held == hold || hold && !st.installed {
+		return nil
+	}
 	action := "unhold"
 	if hold {
 		action = "hold"
 	}
-	ctx, cancel := context.WithTimeout(ctx, aptHoldTimeout)
-	defer cancel()
 	cmd, err := systemCommand(ctx, "apt-mark", action, "--", pkg)
 	if err != nil {
 		return err
@@ -105,6 +98,10 @@ func (in *installer) aptSetHold(ctx context.Context, pkg string, hold bool) erro
 // than the version's presence.
 const aptStatusInstalled = "installed"
 
+// geteuid is a variable so tests can drive the apt paths against stub
+// binaries without running as root.
+var geteuid = os.Geteuid
+
 // aptHoldTimeout bounds an apt-mark call. It writes one dpkg selection and
 // touches no network, so this is a wedge guard rather than a work budget.
 const aptHoldTimeout = 30 * time.Second
@@ -120,43 +117,114 @@ const aptHoldTimeout = 30 * time.Second
 // sudo would be inventing a privilege escalation its caller did not ask
 // for.
 func AptAvailable() bool {
-	if os.Geteuid() != 0 {
+	if geteuid() != 0 {
 		return false
 	}
 	return hasSystemBin("apt-get")
 }
 
-// aptInstalled reports whether a package is installed AND its version.
-// See aptStatusFrom for why the status word, not just the version, decides.
-func aptInstalled(ctx context.Context, pkg string) (version string, installed bool) {
-	cmd, err := systemCommand(ctx, "dpkg-query", "-W", "-f=${db:Status-Status} ${Version}", "--", pkg)
+// aptStatus is one package's dpkg record. held is the selection apt-mark
+// sets, which dpkg reports as the "hold" want state (dpkg-query(1), Status),
+// on a package that is not installed too.
+type aptStatus struct {
+	version   string
+	installed bool
+	held      bool
+}
+
+// aptUnknownPackage is dpkg-query's untranslated message for a name it has no
+// record of. dpkg-query(1) documents only the exit status, 1, which other
+// failures share, and translates the text, so aptEnv pins the C locale.
+const aptUnknownPackage = "no packages found matching"
+
+// aptQuery reads a package's dpkg record. A package dpkg has no record of
+// reads as the zero aptStatus; every other failure is an error, so a caller
+// never takes an unread record for an absent one.
+func aptQuery(ctx context.Context, pkg string) (aptStatus, error) {
+	cmd, err := systemCommand(ctx, "dpkg-query", "-W", aptStatusFormat, "--", pkg)
 	if err != nil {
-		return "", false
+		return aptStatus{}, err
+	}
+	cmd.Env = aptEnv()
+	out, err := cmd.Output()
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok &&
+		exitErr.ExitCode() == 1 && strings.Contains(string(exitErr.Stderr), aptUnknownPackage) {
+		return aptStatus{}, nil
+	}
+	if err != nil {
+		return aptStatus{}, commandFailed("dpkg-query "+pkg, err, "")
+	}
+	st, err := aptStatusFrom(string(out), func() (string, error) { return dpkgNativeArch(ctx) })
+	if err != nil {
+		return aptStatus{}, fmt.Errorf("dpkg-query %s: %w", pkg, err)
+	}
+	return st, nil
+}
+
+// aptStatusFormat is the dpkg-query format aptStatusFrom parses. Tabs because
+// a record that is not installed has an empty version and may have an empty
+// architecture; the newline because dpkg-query prints one record per
+// installed architecture of a Multi-Arch: same package and adds no separator.
+const aptStatusFormat = "-f=${Architecture}\t${db:Status-Want}\t${db:Status-Status}\t${Version}\n"
+
+// aptStatusFrom reads an aptStatusFormat answer. For a bare name apt-get and
+// apt-mark act on the native architecture's record, or an all or unrecorded
+// one, so nativeArch is asked unless the sole record is all or unrecorded,
+// and a package installed only for a foreign architecture reads as absent.
+// The status word decides: after `apt-get remove nano` (apt 3.0.3) dpkg keeps
+// a config-files record at 8.4-1+deb13u1 and exits 0 with no binary on disk,
+// so a version-only read reports every apt entry present after a recreate.
+func aptStatusFrom(out string, nativeArch func() (string, error)) (aptStatus, error) {
+	var records [][]string
+	for line := range strings.Lines(out) {
+		fields := strings.Split(strings.TrimRight(line, "\n"), "\t")
+		if len(fields) != 4 {
+			return aptStatus{}, fmt.Errorf("unreadable dpkg status %q", strings.TrimSpace(out))
+		}
+		records = append(records, fields)
+	}
+	if len(records) == 0 {
+		return aptStatus{}, errors.New("empty dpkg status")
+	}
+	rec := records[0]
+	if len(records) > 1 || !archIndependent(rec[0]) {
+		native, err := nativeArch()
+		if err != nil {
+			return aptStatus{}, err
+		}
+		i := slices.IndexFunc(records, func(r []string) bool {
+			return r[0] == native || archIndependent(r[0])
+		})
+		if i < 0 {
+			return aptStatus{}, nil
+		}
+		rec = records[i]
+	}
+	st := aptStatus{held: rec[1] == "hold", installed: rec[2] == aptStatusInstalled}
+	if st.installed {
+		st.version = rec[3]
+	}
+	return st, nil
+}
+
+func archIndependent(arch string) bool { return arch == "all" || arch == "" }
+
+// dpkgNativeArch is dpkg's native architecture (dpkg(1), --print-architecture).
+func dpkgNativeArch(ctx context.Context) (string, error) {
+	cmd, err := systemCommand(ctx, "dpkg", "--print-architecture")
+	if err != nil {
+		return "", err
 	}
 	cmd.Env = aptEnv()
 	out, err := cmd.Output()
 	if err != nil {
-		return "", false
+		return "", commandFailed("dpkg --print-architecture", err, "")
 	}
-	return aptStatusFrom(string(out))
-}
-
-// aptStatusFrom reads one `dpkg-query -W -f='${db:Status-Status}
-// ${Version}'` answer.
-//
-// The status word is the whole point. dpkg keeps a record for a package
-// that has been REMOVED with its configuration files left in place, and
-// that record still carries a version: measured on apt 3.0.3, after
-// `apt-get remove nano`, the same query prints `config-files 8.4-1+deb13u1`
-// and exits 0 with no binary on disk. A version-only read therefore
-// reports a removed package as installed, and after a container recreate
-// it would report every apt entry as present while nothing is.
-func aptStatusFrom(out string) (version string, installed bool) {
-	status, version, ok := strings.Cut(strings.TrimSpace(out), " ")
-	if !ok || status != aptStatusInstalled {
-		return "", false
+	arch := strings.TrimSpace(string(out))
+	if arch == "" {
+		return "", errors.New("dpkg printed no native architecture")
 	}
-	return strings.TrimSpace(version), true
+	return arch, nil
 }
 
 // aptCandidate reports the version apt would install now. It is what an apt
@@ -256,6 +324,14 @@ func (in *installer) installApt(ctx context.Context, pkg string) error {
 	if err := in.aptKnownName(ctx, pkg); err != nil {
 		return err
 	}
+	// apt-get -y refuses to change a held package. Lifting this package's
+	// hold, rather than passing --allow-change-held-packages, keeps every
+	// other held package fixed: that flag covers the whole transaction, so a
+	// dependency another pin holds could move (apt-get(8)). The job restores
+	// the hold as its last step (Engine.holdToPin).
+	if err := in.syncAptHold(ctx, pkg, false); err != nil {
+		return fmt.Errorf("lift the hold for the install: %w", err)
+	}
 	return in.aptGetInstall(ctx, []string{pkg})
 }
 
@@ -304,6 +380,10 @@ func aptEnv() []string {
 	return systemPATHFirst(append(os.Environ(),
 		"DEBIAN_FRONTEND=noninteractive",
 		"DEBCONF_NONINTERACTIVE_SEEN=true",
+		// The engine matches apt and dpkg messages, which both translate. The
+		// last value of a repeated key wins (os/exec), and gettext ignores
+		// LANGUAGE under the C locale.
+		"LC_ALL=C",
 	))
 }
 

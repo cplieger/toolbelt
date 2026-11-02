@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cplieger/atomicfile/v4"
 )
 
 // wantFinding is one expected root-integrity finding: the exact path the
@@ -122,6 +125,41 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				mkdirs(t, configDir, toolsDir)
 				chmod(t, toolsDir, 0o775)
 				return []wantFinding{{toolsDir, "group- or other-writable (mode 0775)"}}
+			},
+		},
+		"python interpreters dir is group-writable": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				dir := filepath.Join(toolsDir, "python", "interpreters")
+				mkdirs(t, configDir, dir)
+				chmod(t, dir, 0o775)
+				return []wantFinding{{dir, "group- or other-writable (mode 0775)"}}
+			},
+		},
+		"npm modules dir is group-writable": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				dir := filepath.Join(toolsDir, "npm", "lib", "node_modules")
+				mkdirs(t, configDir, dir)
+				chmod(t, dir, 0o770)
+				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
+			},
+		},
+		"npm lib dir is a symlink out of the tree": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				outside := filepath.Join(filepath.Dir(toolsDir), "outside")
+				mkdirs(t, configDir, filepath.Join(toolsDir, "npm"), filepath.Join(outside, "node_modules"))
+				symlink(t, outside, filepath.Join(toolsDir, "npm", "lib"))
+				return []wantFinding{
+					{filepath.Join(toolsDir, "npm", "lib"), "is a symlink"},
+					{filepath.Join(toolsDir, "npm", "lib", "node_modules"), "outside the tool tree"},
+				}
+			},
+		},
+		"python tools dir is group-writable": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				dir := filepath.Join(toolsDir, "python", "tools")
+				mkdirs(t, configDir, dir)
+				chmod(t, dir, 0o770)
+				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
 			},
 		},
 		"bin dir is other-writable": {
@@ -331,11 +369,11 @@ func TestNew_VerifyRootIntegrityLogsRefusal(t *testing.T) {
 }
 
 // TestNew_VerifyRootIntegrityLeavesNothingBehind pins the placement of
-// the check inside New. It runs before newStore (whose initFiles writes
-// tools.json and CREATES ConfigDir — a check after it would be judging a
-// directory this library just made), before the MkdirAll of bin/, and
-// before newJobQueue, whose worker goroutine a later error would leak
-// because the caller gets a nil Engine and can never Close it.
+// the first check inside New. It runs before newStore (whose initFiles
+// writes tools.json, so an unfit existing ConfigDir is refused before
+// anything is written through it), before bin/ is created, and before
+// newJobQueue, whose worker goroutine a later error would leak because
+// the caller gets a nil Engine and can never Close it.
 func TestNew_VerifyRootIntegrityLeavesNothingBehind(t *testing.T) {
 	root := t.TempDir()
 	configDir := filepath.Join(root, "config")
@@ -372,6 +410,53 @@ func TestNew_VerifyRootIntegrityLeavesNothingBehind(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > before {
 		t.Errorf("refused New leaked goroutines: %d -> %d", before, after)
+	}
+}
+
+// TestNew_VerifyRootIntegrityJudgesTheRootsItCreates pins the second
+// check: roots that did not exist at the first check are created by New
+// itself, through whatever mode the filesystem stores, so New judges them
+// again before it builds an Engine. The config-dir probe runs between the
+// two checks, which is where each case widens a root New just created.
+func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
+	cases := []struct {
+		widen func(configDir, toolsDir string) string
+		name  string
+	}{
+		{
+			name:  "tools dir created as the config dir's parent",
+			widen: func(_, toolsDir string) string { return toolsDir },
+		},
+		{
+			name:  "config dir created for the manifest",
+			widen: func(configDir, _ string) string { return configDir },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			toolsDir := filepath.Join(t.TempDir(), "tools")
+			configDir := filepath.Join(toolsDir, "config")
+			widened := tc.widen(configDir, toolsDir)
+
+			orig := probeWritable
+			t.Cleanup(func() { probeWritable = orig })
+			probeWritable = func(ctx context.Context, dir string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+				if err := os.Chmod(widened, 0o770); err != nil {
+					return atomicfile.ProbeResult{}, err
+				}
+				return orig(ctx, dir, opts...)
+			}
+
+			e, err := New(&Config{
+				ConfigDir: configDir, ToolsDir: toolsDir,
+				VerifyRootIntegrity: true, Logger: quietLogger(),
+			})
+			if e != nil {
+				e.Close()
+				t.Fatal("New returned an Engine over a root it created group-writable")
+			}
+			assertFindings(t, err, []wantFinding{{path: widened, reason: "group- or other-writable (mode 0770)"}})
+		})
 	}
 }
 

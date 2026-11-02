@@ -1,13 +1,18 @@
 package toolbelt
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestLatestGitHubTag_PaginatesAndVersionCompares reproduces the
@@ -52,7 +57,7 @@ func TestLatestGitHubTag_PaginatesAndVersionCompares(t *testing.T) {
 		VersionSource: "github_tag",
 		VersionFilter: `Version startsWith "go" and not (Version contains "rc" or Version contains "beta")`,
 	}
-	got, err := v.latestGitHubTag(t.Context(), "golang", "go", aq)
+	got, err := v.latestGitHubTag(t.Context(), "golang", "go", aq, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +72,7 @@ func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
 	}))
 	v := newTestVersionResolver(srv.Client())
 	aq := &AquaPackage{VersionFilter: `Version startsWith "go"`}
-	if _, err := v.latestGitHubTag(t.Context(), "o", "r", aq); err == nil {
+	if _, err := v.latestGitHubTag(t.Context(), "o", "r", aq, false); err == nil {
 		t.Fatal("want error when nothing matches")
 	}
 }
@@ -80,7 +85,7 @@ func TestLatestGitHubTag_NoMatchErrors(t *testing.T) {
 func TestLatestGitHubTag_WalksEveryPageOfTheCap(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		if page == tagPageCap {
+		if page == listPageCap {
 			fmt.Fprint(w, `[{"name":"v1.0.0"}]`)
 			return
 		}
@@ -94,9 +99,9 @@ func TestLatestGitHubTag_WalksEveryPageOfTheCap(t *testing.T) {
 	}))
 	v := newTestVersionResolver(srv.Client())
 
-	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "v"})
+	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "v"}, false)
 	if err != nil {
-		t.Fatalf("latestGitHubTag with the newest tag on page %d: %v", tagPageCap, err)
+		t.Fatalf("latestGitHubTag with the newest tag on page %d: %v", listPageCap, err)
 	}
 	if got != "v1.0.0" {
 		t.Errorf("latestGitHubTag = %q, want v1.0.0", got)
@@ -113,7 +118,7 @@ func TestLatestGitHubTag_PrefixRejectsForeignTags(t *testing.T) {
 	}))
 	v := newTestVersionResolver(srv.Client())
 
-	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "cli/v"})
+	got, err := v.latestGitHubTag(t.Context(), "o", "r", &AquaPackage{VersionPrefix: "cli/v"}, false)
 	if err != nil {
 		t.Fatalf("latestGitHubTag: %v", err)
 	}
@@ -136,7 +141,7 @@ func TestLatestAqua_TagVersioningNeverReadsTheReleaseEndpoint(t *testing.T) {
 	}))
 	v := newTestVersionResolver(srv.Client())
 
-	got, err := v.Latest(t.Context(), "aqua:owner/repo", &AquaPackage{VersionSource: "github_tag"})
+	got, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, &AquaPackage{VersionSource: "github_tag"})
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -160,7 +165,7 @@ func TestLatestAqua_LatestReleaseFailingTheFilterFallsBackToTags(t *testing.T) {
 	v := newTestVersionResolver(srv.Client())
 	aq := &AquaPackage{VersionFilter: `not (Version in ["latest", "stable"])`}
 
-	got, err := v.Latest(t.Context(), "aqua:owner/repo", aq)
+	got, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, aq)
 	if err != nil {
 		t.Fatalf("Latest: %v", err)
 	}
@@ -171,8 +176,8 @@ func TestLatestAqua_LatestReleaseFailingTheFilterFallsBackToTags(t *testing.T) {
 
 func TestLatestAqua_RuntimeResolvesFromItsOwnIndex(t *testing.T) {
 	cases := []struct {
-		name, source, host, path, body, want string
-		aq                                   *AquaPackage
+		name, source, version, host, path, body, want string
+		aq                                            *AquaPackage
 	}{
 		{
 			name: "node", source: "aqua:nodejs/node",
@@ -191,6 +196,28 @@ func TestLatestAqua_RuntimeResolvesFromItsOwnIndex(t *testing.T) {
 			},
 			want: "go1.27.1",
 		},
+		// nodejs.org's index lists v27.0.0-alpha.0.0.0 first, above v26.13.0.
+		{
+			name: "node skips a prerelease above the stable line", source: "aqua:nodejs/node", version: "v26.12.1",
+			host: "nodejs.org", path: "/dist/index.json",
+			body: `[{"version":"v27.0.0-alpha.0.0.0"},{"version":"v26.13.0"},{"version":"v26.12.1"}]`,
+			aq:   &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "nodejs", RepoName: "node"},
+			want: "v26.13.0",
+		},
+		{
+			name: "node follows the prerelease line it is on", source: "aqua:nodejs/node", version: "v27.0.0-alpha.0.0.0",
+			host: "nodejs.org", path: "/dist/index.json",
+			body: `[{"version":"v27.0.0-alpha.0.0.0"},{"version":"v26.13.0"},{"version":"v26.12.1"}]`,
+			aq:   &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "nodejs", RepoName: "node"},
+			want: "v27.0.0-alpha.0.0.0",
+		},
+		{
+			name: "go skips a release candidate without a filter", source: "aqua:golang/go", version: "go1.27.1",
+			host: "go.dev", path: "/dl/",
+			body: `[{"version":"go1.28rc1"},{"version":"go1.27.3"}]`,
+			aq:   &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "golang", RepoName: "go"},
+			want: "go1.27.3",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -204,7 +231,7 @@ func TestLatestAqua_RuntimeResolvesFromItsOwnIndex(t *testing.T) {
 			}))
 			v := newTestVersionResolver(srv.Client())
 
-			got, err := v.Latest(t.Context(), tc.source, tc.aq)
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source, Version: tc.version}, tc.aq)
 			if err != nil {
 				t.Fatalf("Latest(%s) = %v", tc.source, err)
 			}
@@ -212,6 +239,393 @@ func TestLatestAqua_RuntimeResolvesFromItsOwnIndex(t *testing.T) {
 				t.Errorf("Latest(%s) = %q, want %q", tc.source, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLatestGitHubTag_SkipsPrereleases(t *testing.T) {
+	cases := []struct{ name, recorded, want string }{
+		{name: "stable line skips the release candidate", recorded: "v2.8.0", want: "v2.9.0"},
+		{name: "unrecorded version skips the release candidate", recorded: "", want: "v2.9.0"},
+		{name: "prerelease line takes the release candidate", recorded: "v3.0.0-beta.1", want: "v3.0.0-rc.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/tags") {
+					t.Errorf("request to %s, want only the tag list", r.URL.Path)
+				}
+				fmt.Fprint(w, `[{"name":"v3.0.0-rc.1"},{"name":"v2.9.0"},{"name":"v2.8.0"}]`)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			tool := &Tool{Source: "aqua:o/r", Version: tc.recorded}
+			got, err := v.Latest(t.Context(), tool, &AquaPackage{VersionSource: "github_tag"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest(recorded %q) = %q, want %q", tc.recorded, got, tc.want)
+			}
+		})
+	}
+}
+
+// GitLab marks no release as a prerelease and lists by release date
+// (https://docs.gitlab.com/api/releases/#list-releases), so the engine picks
+// by version from the newest page.
+func TestLatestGitLabRelease_PicksByVersion(t *testing.T) {
+	cases := []struct{ name, body, recorded, want string }{
+		{
+			name: "skips a newer prerelease", recorded: "v1.9.9",
+			body: `[{"tag_name":"v2.1.0-rc1"},{"tag_name":"v2.0.0"},{"tag_name":"v1.9.9"}]`, want: "v2.0.0",
+		},
+		{
+			name: "prerelease line takes the prerelease", recorded: "v2.1.0-rc0",
+			body: `[{"tag_name":"v2.1.0-rc1"},{"tag_name":"v2.0.0"}]`, want: "v2.1.0-rc1",
+		},
+		{
+			name: "a back-branch patch released last is not latest", recorded: "v1.9.9",
+			body: `[{"tag_name":"v1.9.10"},{"tag_name":"v2.0.0"}]`, want: "v2.0.0",
+		},
+		{
+			name: "no version-shaped tag keeps the newest release",
+			body: `[{"tag_name":"nightly"},{"tag_name":"stable"}]`, want: "nightly",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked string
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				asked = r.Host + r.URL.EscapedPath() + "?" + r.URL.RawQuery
+				fmt.Fprint(w, tc.body)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: "release:gitlab/o/r", Version: tc.recorded}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest = %q, want %q", got, tc.want)
+			}
+			if want := "gitlab.com/api/v4/projects/o%2Fr/releases?per_page=100&page=1"; asked != want {
+				t.Errorf("asked %q, want %q", asked, want)
+			}
+		})
+	}
+}
+
+// fullPage renders a full 100-entry page of JSON objects whose key field
+// holds name; a name with no digit parses as no version.
+func fullPage(key, name string) string {
+	entries := make([]string, 0, 100)
+	for range 100 {
+		entries = append(entries, fmt.Sprintf(`{%q:%q}`, key, name))
+	}
+	return "[" + strings.Join(entries, ",") + "]"
+}
+
+// GitLab paginates releases at most 100 per page
+// (https://docs.gitlab.com/api/rest/#pagination); the highest version can sit
+// on any page because the order is by release date.
+func TestLatestGitLabRelease_WalksEveryPage(t *testing.T) {
+	cases := []struct {
+		name     string
+		pages    map[int]string
+		recorded string
+		want     string
+	}{
+		{
+			name: "a higher version on page 2 wins", recorded: "v1.0.0",
+			pages: map[int]string{
+				1: strings.Replace(fullPage("tag_name", "nightly"), `"nightly"`, `"v1.9.10"`, 1),
+				2: `[{"tag_name":"v2.0.0"},{"tag_name":"v1.0.0"}]`,
+			},
+			want: "v2.0.0",
+		},
+		{
+			name: "no version-shaped tag on any page keeps the newest release",
+			pages: map[int]string{
+				1: fullPage("tag_name", "nightly"),
+				2: `[{"tag_name":"stable"}]`,
+			},
+			want: "nightly",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []int
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if got := r.URL.Query().Get("per_page"); got != "100" {
+					t.Errorf("per_page = %q, want 100", got)
+				}
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				asked = append(asked, page)
+				body, ok := tc.pages[page]
+				if !ok {
+					body = `[]`
+				}
+				fmt.Fprint(w, body)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: "release:gitlab/o/r", Version: tc.recorded}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest = %q, want %q", got, tc.want)
+			}
+			if !slices.Equal(asked, []int{1, 2}) {
+				t.Errorf("pages asked = %v, want [1 2] (stop at the short page)", asked)
+			}
+		})
+	}
+}
+
+// A walk that reaches the page cap with the cap page still full has not seen
+// every version, so the highest it saw is not known to be the latest.
+func TestLatest_FullCapPageIsAnIncompleteWalk(t *testing.T) {
+	cases := []struct {
+		name, source, key string
+		aq                *AquaPackage
+	}{
+		{name: "gitlab releases", source: "release:gitlab/o/r", key: "tag_name"},
+		{name: "github tag list", source: "aqua:o/r", key: "name", aq: &AquaPackage{VersionSource: "github_tag"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pagesAsked := 0
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+				pagesAsked++
+				body := fullPage(tc.key, "ancient")
+				if page == 1 {
+					body = strings.Replace(body, `"ancient"`, `"v1.0.0"`, 1)
+				}
+				fmt.Fprint(w, body)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source}, tc.aq)
+			if !errors.Is(err, errIncompleteWalk) {
+				t.Errorf("Latest = %q, %v; want errIncompleteWalk", got, err)
+			}
+			if pagesAsked != listPageCap {
+				t.Errorf("pages asked = %d, want %d", pagesAsked, listPageCap)
+			}
+		})
+	}
+}
+
+func TestLatestGitLabRelease_NoReleasesErrors(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[]`)
+	}))
+	v := newTestVersionResolver(srv.Client())
+	if _, err := v.Latest(t.Context(), &Tool{Source: "release:gitlab/o/r"}, nil); err == nil {
+		t.Fatal("Latest succeeded with no releases, want an error")
+	}
+}
+
+func TestLatestTag(t *testing.T) {
+	cases := []struct {
+		name       string
+		candidates []string
+		allowPre   bool
+		want       string
+	}{
+		{name: "release beats a higher rc", candidates: []string{"v1.3.0-rc.1", "v1.2.0"}, want: "v1.2.0"},
+		{name: "go rc is a prerelease", candidates: []string{"go1.28rc1", "go1.27.3"}, want: "go1.27.3"},
+		{name: "prerelease allowed wins", candidates: []string{"v1.3.0-rc.1", "v1.2.0"}, allowPre: true, want: "v1.3.0-rc.1"},
+		{name: "release above a prerelease wins when allowed", candidates: []string{"v1.3.0-rc.1", "v1.3.0"}, allowPre: true, want: "v1.3.0"},
+		{name: "only prereleases leave nothing", candidates: []string{"v2.0.0-beta.1", "v2.0.0-rc.1"}, want: ""},
+		{name: "only prereleases when allowed takes the highest", candidates: []string{"v2.0.0-beta.1", "v2.0.0-rc.1"}, allowPre: true, want: "v2.0.0-rc.1"},
+		{name: "an unparsed tag is no release", candidates: []string{"latest", "v2.0.0-rc.1"}, want: ""},
+		{name: "an unparsed tag never beats a prerelease", candidates: []string{"latest", "v2.0.0-rc.1"}, allowPre: true, want: "v2.0.0-rc.1"},
+		{name: "unparsed tags alone compare by name", candidates: []string{"nightly", "stable"}, want: "stable"},
+		{name: "date tags compare", candidates: []string{"2024-12-01", "2025-01-06"}, want: "2025-01-06"},
+		{name: "a date tag beats a later dated prerelease", candidates: []string{"2025-01-06", "2025-02-01-rc1"}, want: "2025-01-06"},
+		{name: "a v-prefixed date tag is a release", candidates: []string{"v1.2.3", "v2025-01-06"}, want: "v2025-01-06"},
+		{name: "a nightly date is no release", candidates: []string{"v1.2.3", "nightly-2025-01-06"}, want: "v1.2.3"},
+		{name: "a weekly date is no release", candidates: []string{"v26.13.0", "weekly.2025-01-06"}, want: "v26.13.0"},
+		{name: "a snapshot date is no release", candidates: []string{"v1.2.3", "snapshot-2024-12-01"}, want: "v1.2.3"},
+		{name: "no candidates", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := latestTag(tc.candidates, "", tc.allowPre); got != tc.want {
+				t.Errorf("latestTag(%v, allowPre=%v) = %q, want %q", tc.candidates, tc.allowPre, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsPrereleaseTag(t *testing.T) {
+	cases := []struct {
+		tag    string
+		prefix string
+		want   bool
+	}{
+		{tag: "v27.0.0-alpha.0.0.0", want: true},
+		{tag: "go1.28rc1", want: true},
+		{tag: "v0.0.0-20261011093844-7a2c2c0b7aa6", want: true},
+		{tag: "2025-02-01-rc1", want: true},
+		{tag: "nightly-2025-01-06", want: true},
+		{tag: "weekly.2025-01-06", want: true},
+		{tag: "snapshot-2024-12-01", want: true},
+		{tag: "v1.2.3", want: false},
+		{tag: "2025-01-06", want: false},
+		{tag: "v2025-01-06", want: false},
+		{tag: "release-2025-01-06", prefix: "release-", want: false},
+		{tag: "latest", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.tag, func(t *testing.T) {
+			if got := isPrereleaseTag(tc.tag, tc.prefix); got != tc.want {
+				t.Errorf("isPrereleaseTag(%q, %q) = %v, want %v", tc.tag, tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
+// Every list source refuses a row that is not on a prerelease line when it
+// lists only prereleases (or, for Go, only a pseudo-version), and a row
+// recorded at a prerelease follows them.
+func TestLatest_OnlyPrereleasesListed(t *testing.T) {
+	const pseudo = "v0.0.0-20261011093844-7a2c2c0b7aa6"
+	node := &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "nodejs", RepoName: "node"}
+	golang := &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "golang", RepoName: "go"}
+	cases := []struct {
+		name, source, stable, pre, want string
+		aq                              *AquaPackage
+		routes                          map[string]string
+	}{
+		{
+			name: "node index", source: "aqua:nodejs/node", aq: node, stable: "v26.13.0", pre: "v27.0.0-alpha.0", want: "v27.0.0-alpha.0.0.0",
+			routes: map[string]string{"nodejs.org/dist/index.json": `[{"version":"v27.0.0-alpha.0.0.0"}]`},
+		},
+		{
+			name: "go index", source: "aqua:golang/go", aq: golang, stable: "go1.27.3", pre: "go1.28rc0", want: "go1.28rc1",
+			routes: map[string]string{"go.dev/dl/": `[{"version":"go1.28rc1"}]`},
+		},
+		{
+			name: "github tag list", source: "aqua:o/r", aq: &AquaPackage{VersionSource: "github_tag"}, pre: "v3.0.0-beta.1", want: "v3.0.0-rc.1",
+			routes: map[string]string{"api.github.com/repos/o/r/tags": `[{"name":"v3.0.0-rc.1"}]`},
+		},
+		{
+			name: "gitlab releases", source: "release:gitlab/o/r", stable: "v2.0.0", pre: "v2.1.0-rc0", want: "v2.1.0-rc1",
+			routes: map[string]string{"gitlab.com/api/v4/projects/o/r/releases": `[{"tag_name":"v2.1.0-rc1"}]`},
+		},
+		{
+			name: "go module list", source: "go:example.com/m", stable: "v1.2.0", pre: "v1.3.0-beta.1", want: "v1.3.0-rc.1",
+			routes: map[string]string{"proxy.golang.org/example.com/m/@v/list": "v1.3.0-rc.1\n"},
+		},
+		{
+			name: "go module pseudo-version", source: "go:mvdan.cc/unparam", pre: pseudo, want: pseudo,
+			routes: map[string]string{
+				"proxy.golang.org/mvdan.cc/unparam/@v/list": "",
+				"proxy.golang.org/mvdan.cc/unparam/@latest": `{"Version":"` + pseudo + `"}`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, ok := tc.routes[r.Host+r.URL.Path]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprint(w, body)
+		}))
+		t.Run(tc.name+" refuses a stable row", func(t *testing.T) {
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source, Version: tc.stable}, tc.aq)
+			if !errors.Is(err, errOnlyPrereleases) {
+				t.Errorf("Latest(recorded %q) = %q, %v; want errOnlyPrereleases", tc.stable, got, err)
+			}
+		})
+		t.Run(tc.name+" follows a prerelease row", func(t *testing.T) {
+			v := newTestVersionResolver(srv.Client())
+			got, err := v.Latest(t.Context(), &Tool{Source: tc.source, Version: tc.pre}, tc.aq)
+			if err != nil || got != tc.want {
+				t.Errorf("Latest(recorded %q) = %q, %v; want %q", tc.pre, got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestVersionCache_KeysThePrereleaseLine(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"version":"v27.0.0-alpha.0.0.0"},{"version":"v26.13.0"}]`)
+	}))
+	v := newTestVersionResolver(srv.Client())
+	aq := &AquaPackage{Type: aquaTypeHTTP, RepoOwner: "nodejs", RepoName: "node"}
+	stable := &Tool{Source: "aqua:nodejs/node", Version: "v26.12.1"}
+	alpha := &Tool{Source: "aqua:nodejs/node", Version: "v27.0.0-alpha.0.0.0"}
+	for _, tool := range []*Tool{stable, alpha} {
+		if _, err := v.Latest(t.Context(), tool, aq); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := v.Cached(stable, aq); got != "v26.13.0" {
+		t.Errorf("Cached(stable row) = %q, want v26.13.0", got)
+	}
+	if got := v.Cached(alpha, aq); got != "v27.0.0-alpha.0.0.0" {
+		t.Errorf("Cached(prerelease row) = %q, want v27.0.0-alpha.0.0.0", got)
+	}
+}
+
+// A catalog refresh that changes how an aqua package picks its version makes
+// the answer chosen under the old definition stale.
+func TestVersionCache_KeysTheAquaDefinition(t *testing.T) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `[{"version":"other-2.0.0"},{"version":"cli-1.0.0"},{"version":"cli-0.9.5"}]`)
+	}))
+	old := AquaPackage{Type: aquaTypeHTTP, VersionPrefix: "cli-"}
+	tests := []struct {
+		name   string
+		edit   func(*AquaPackage)
+		latest string // the new definition's answer; empty skips the resolve
+	}{
+		{"version_prefix", func(a *AquaPackage) { a.VersionPrefix = "other-" }, "other-2.0.0"},
+		{"version_filter", func(a *AquaPackage) { a.VersionFilter = `Version != "cli-1.0.0"` }, "cli-0.9.5"},
+		{"version_source", func(a *AquaPackage) { a.VersionSource = "github_tag" }, ""},
+		{"type", func(a *AquaPackage) { a.Type = "github_release" }, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := newTestVersionResolver(srv.Client())
+			tool := &Tool{Source: "aqua:nodejs/node", Version: "cli-0.9.0"}
+			before := old
+			if got, err := v.Latest(t.Context(), tool, &before); err != nil || got != "cli-1.0.0" {
+				t.Fatalf("Latest(old definition) = %q, %v; want cli-1.0.0", got, err)
+			}
+			after := old
+			tc.edit(&after)
+			if got := v.Cached(tool, &after); got != "" {
+				t.Errorf("Cached(changed %s) = %q, want a miss", tc.name, got)
+			}
+			if got := v.Cached(tool, &before); got != "cli-1.0.0" {
+				t.Errorf("Cached(old definition) = %q, want cli-1.0.0", got)
+			}
+			if tc.latest == "" {
+				return
+			}
+			if got, err := v.Latest(t.Context(), tool, &after); err != nil || got != tc.latest {
+				t.Fatalf("Latest(changed %s) = %q, %v; want %q", tc.name, got, err, tc.latest)
+			}
+			if got := v.Cached(tool, &after); got != tc.latest {
+				t.Errorf("Cached(changed %s) after Latest = %q, want %q", tc.name, got, tc.latest)
+			}
+		})
+	}
+}
+
+// A tool with no aqua definition and one whose definition sets none of the
+// version fields pick the same way, so they share a cache entry.
+func TestVersionCache_NilDefinitionIsTheZeroDefinition(t *testing.T) {
+	v := newTestVersionResolver(nil)
+	tool := &Tool{Source: "aqua:cli/cli", Version: "v1.0.0"}
+	v.cache[toolLatestKey(tool, nil)] = "v2.0.0"
+	if got := v.Cached(tool, &AquaPackage{RepoOwner: "cli", RepoName: "cli"}); got != "v2.0.0" {
+		t.Errorf("Cached(zero definition) = %q, want v2.0.0", got)
 	}
 }
 
@@ -294,7 +708,7 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 		fmt.Fprint(w, `{"version":"5.3.0"}`)
 	}))
 	v := newTestVersionResolver(srv.Client())
-	got, err := v.Latest(t.Context(), "npm:typescript-language-server", nil)
+	got, err := v.Latest(t.Context(), &Tool{Source: "npm:typescript-language-server"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,4 +724,531 @@ func TestLatestNpm_UsesDistTagEndpoint(t *testing.T) {
 // httptest servers, so the index has nothing to contribute.
 func newTestVersionResolver(client *http.Client) *versionResolver {
 	return newVersionResolver(client, nil)
+}
+
+// goProxy fakes proxy.golang.org: routes maps a request path to its body,
+// every other path answers 404 as the proxy does for a path no module owns
+// (https://go.dev/ref/mod#goproxy-protocol). It records the paths asked.
+func goProxy(t *testing.T, routes map[string]string) (*versionResolver, *[]string) {
+	t.Helper()
+	var asked []string
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		if r.Host != "proxy.golang.org" {
+			t.Errorf("request to host %s, want proxy.golang.org", r.Host)
+		}
+		body, ok := routes[r.URL.Path]
+		if !ok {
+			http.Error(w, "not found: module: no matching versions for query \"latest\"", http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, body)
+	}))
+	return newTestVersionResolver(srv.Client()), &asked
+}
+
+func TestLatestGoModule_ResolvesTheOwningModule(t *testing.T) {
+	cases := []struct {
+		name, pkg, want string
+		routes          map[string]string
+	}{
+		{
+			name: "command inside its module",
+			pkg:  "github.com/rhysd/actionlint/cmd/actionlint",
+			routes: map[string]string{
+				"/github.com/rhysd/actionlint/@v/list":        "v1.7.11\nv1.7.12\n",
+				"/github.com/rhysd/actionlint/@v/v1.7.12.mod": "module github.com/rhysd/actionlint\n",
+			},
+			want: "v1.7.12",
+		},
+		{
+			name: "deep package of golang.org/x/tools",
+			pkg:  "golang.org/x/tools/go/analysis/passes/fieldalignment/cmd/fieldalignment",
+			routes: map[string]string{
+				"/golang.org/x/tools/@v/list":        "v0.44.0\nv0.45.1\nv0.45.0\n",
+				"/golang.org/x/tools/@v/v0.45.1.mod": "module golang.org/x/tools\n",
+			},
+			want: "v0.45.1",
+		},
+		{
+			name: "nested module wins over its parent",
+			pkg:  "golang.org/x/tools/gopls",
+			routes: map[string]string{
+				"/golang.org/x/tools/gopls/@v/list":        "v0.21.0\n",
+				"/golang.org/x/tools/gopls/@v/v0.21.0.mod": "module golang.org/x/tools/gopls\n",
+				"/golang.org/x/tools/@v/list":              "v0.45.1\n",
+			},
+			want: "v0.21.0",
+		},
+		{
+			name: "upper-case path is case-escaped",
+			pkg:  "github.com/BurntSushi/toml/cmd/tomlv",
+			routes: map[string]string{
+				"/github.com/!burnt!sushi/toml/@v/list":       "v1.5.0\nv1.6.0\n",
+				"/github.com/!burnt!sushi/toml/@v/v1.6.0.mod": "module github.com/BurntSushi/toml\n",
+			},
+			want: "v1.6.0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := goProxy(t, tc.routes)
+			got, err := v.Latest(t.Context(), &Tool{Source: "go:" + tc.pkg}, nil)
+			if err != nil {
+				t.Fatalf("Latest(go:%s) = %v", tc.pkg, err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest(go:%s) = %q, want %q", tc.pkg, got, tc.want)
+			}
+		})
+	}
+}
+
+// The go command admits +incompatible versions to "latest" only when the
+// highest unretracted compatible version's .mod is the synthesized
+// "module <path>\n" (cmd/go/internal/modload query.go filterVersions). The
+// archiver, blackfriday and docker cases are live proxy data, their answers
+// those of `go list -m <module>@latest` (go1.27.3).
+func TestLatestGoModule_IncompatibleVersions(t *testing.T) {
+	const realMod = "module example.com/m\n\ngo 1.21\n"
+	const legacyMod = "module example.com/m\n"
+	cases := []struct {
+		name, mod, pkg, list, recorded, want string
+		routes                               map[string]string
+		wantErr                              bool
+	}{
+		{
+			name:   "a real go.mod on the highest compatible version excludes them",
+			list:   "v1.4.0\nv2.0.0+incompatible\n",
+			routes: map[string]string{"v1.4.0.mod": realMod},
+			want:   "v1.4.0",
+		},
+		{
+			name:   "a synthesized go.mod on the highest compatible version admits them",
+			list:   "v1.4.0\nv2.0.0+incompatible\n",
+			routes: map[string]string{"v1.4.0.mod": legacyMod},
+			want:   "v2.0.0+incompatible",
+		},
+		{
+			name:   "only incompatible versions listed",
+			list:   "v2.0.0+incompatible\nv2.1.0+incompatible\n",
+			routes: map[string]string{"v2.1.0+incompatible.mod": legacyMod},
+			want:   "v2.1.0+incompatible",
+		},
+		{
+			name: "mholt/archiver: legacy v1, the list beats a lagging @latest",
+			mod:  "github.com/mholt/archiver",
+			pkg:  "github.com/mholt/archiver/cmd/arc",
+			list: "v1.1.1\nv1.1.2\nv2.0.0+incompatible\nv2.1.0+incompatible\nv3.0.0+incompatible\nv3.0.1+incompatible\nv3.1.0+incompatible\nv3.1.1+incompatible\n",
+			routes: map[string]string{
+				"v1.1.2.mod":              "module github.com/mholt/archiver\n",
+				"v3.1.1+incompatible.mod": "module github.com/mholt/archiver\n",
+				"latest":                  `{"Version":"v2.1.0+incompatible"}`,
+			},
+			want: "v3.1.1+incompatible",
+		},
+		{
+			name:   "russross/blackfriday: v1.6.0 has a go.mod",
+			mod:    "github.com/russross/blackfriday",
+			pkg:    "github.com/russross/blackfriday",
+			list:   "v1.5.1\nv1.5.2\nv1.6.0\nv1.6.0-pre.1\nv2.0.0+incompatible\n",
+			routes: map[string]string{"v1.6.0.mod": "module github.com/russross/blackfriday\n\ngo 1.13\n"},
+			want:   "v1.6.0",
+		},
+		{
+			name: "docker/docker: a command inside a legacy module skips an incompatible rc",
+			mod:  "github.com/docker/docker",
+			pkg:  "github.com/docker/docker/cmd/dockerd",
+			list: "v1.13.0\nv1.13.1\nv28.5.1+incompatible\nv28.5.2+incompatible\nv28.6.0-rc.1+incompatible\n",
+			routes: map[string]string{
+				"v1.13.1.mod":              "module github.com/docker/docker\n",
+				"v28.5.2+incompatible.mod": "module github.com/docker/docker\n",
+			},
+			want: "v28.5.2+incompatible",
+		},
+		{
+			name:     "a prerelease row follows an incompatible rc",
+			list:     "v1.13.1\nv28.5.2+incompatible\nv28.6.0-rc.1+incompatible\n",
+			recorded: "v28.6.0-rc.0+incompatible",
+			routes: map[string]string{
+				"v1.13.1.mod":              legacyMod,
+				"v28.5.2+incompatible.mod": legacyMod,
+			},
+			want: "v28.6.0-rc.1+incompatible",
+		},
+		{
+			name: "a compatible prerelease with a go.mod still excludes them",
+			list: "v1.0.0\nv1.1.0-rc.1\nv2.0.0+incompatible\n",
+			routes: map[string]string{
+				"v1.0.0.mod":      legacyMod,
+				"v1.1.0-rc.1.mod": realMod,
+			},
+			want: "v1.0.0",
+		},
+		{
+			name: "a retracted compatible version does not decide",
+			list: "v1.0.0\nv1.1.0\nv2.0.0+incompatible\n",
+			routes: map[string]string{
+				"v1.0.0.mod": legacyMod,
+				"v1.1.0.mod": realMod + "retract v1.1.0\n",
+			},
+			want: "v2.0.0+incompatible",
+		},
+		{
+			name:    "the deciding go.mod missing from the proxy is an error",
+			list:    "v1.4.0\nv2.0.0+incompatible\n",
+			routes:  map[string]string{},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mod, pkg := "example.com/m", "example.com/m"
+			if tc.pkg != "" {
+				mod, pkg = tc.mod, tc.pkg
+			}
+			base := "/" + mod + "/@"
+			routes := map[string]string{base + "v/list": tc.list}
+			for p, body := range tc.routes {
+				if p == "latest" {
+					routes[base+p] = body
+				} else {
+					routes[base+"v/"+p] = body
+				}
+			}
+			v, asked := goProxy(t, routes)
+			got, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg, Version: tc.recorded}, nil)
+			for i, p := range *asked {
+				if slices.Contains((*asked)[:i], p) {
+					t.Errorf("asked %s twice", p)
+				}
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("Latest(go:%s) = %q, want an error", pkg, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Latest(go:%s) = %v", pkg, err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest(go:%s) = %q, want %q", pkg, got, tc.want)
+			}
+		})
+	}
+}
+
+// The proxy's @latest is the go command's fallback for an empty list, and it
+// can lag @v/list (gremlins answered v0.5.1 on @latest with v0.6.0 listed).
+func TestLatestGoModule_ListBeatsALaggingLatest(t *testing.T) {
+	v, _ := goProxy(t, map[string]string{
+		"/github.com/go-gremlins/gremlins/@v/list":       "v0.5.1\nv0.6.0\n",
+		"/github.com/go-gremlins/gremlins/@latest":       `{"Version":"v0.5.1"}`,
+		"/github.com/go-gremlins/gremlins/@v/v0.6.0.mod": "module github.com/go-gremlins/gremlins\n",
+	})
+	got, err := v.Latest(t.Context(), &Tool{Source: "go:github.com/go-gremlins/gremlins/cmd/gremlins"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "v0.6.0" {
+		t.Errorf("Latest = %q, want v0.6.0", got)
+	}
+}
+
+// The go command's "latest" is the highest release; a prerelease counts here
+// only when the recorded version is one.
+func TestLatestGoModule_SkipsPrereleases(t *testing.T) {
+	cases := []struct{ name, recorded, want string }{
+		{name: "release line", recorded: "v1.1.0", want: "v1.2.0"},
+		{name: "prerelease line", recorded: "v1.3.0-beta.1", want: "v1.3.0-rc.1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, _ := goProxy(t, map[string]string{
+				"/example.com/m/@v/list": "v1.2.0\nv1.3.0-rc.1\n",
+			})
+			got, err := v.Latest(t.Context(), &Tool{Source: "go:example.com/m", Version: tc.recorded}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest(recorded %q) = %q, want %q", tc.recorded, got, tc.want)
+			}
+		})
+	}
+}
+
+// The go command leaves retracted versions out of "latest" and reads the
+// retractions from the go.mod of the version "latest" names when nothing is
+// retracted: the highest release, else the highest prerelease
+// (https://go.dev/ref/mod#go-mod-file-retract).
+func TestLatestGoModule_SkipsRetractedVersions(t *testing.T) {
+	cases := []struct {
+		name, list, recorded, want string
+		mods                       map[string]string
+		wantErr                    error
+	}{
+		{
+			name: "single version retracted",
+			list: "v1.0.0\nv1.1.0\n",
+			mods: map[string]string{"v1.1.0": "module example.com/m\nretract v1.1.0\n"},
+			want: "v1.0.0",
+		},
+		{
+			name: "range retracted",
+			list: "v1.0.0\nv1.1.0\n",
+			mods: map[string]string{"v1.1.0": "module example.com/m\nretract [v1.0.5, v1.1.0]\n"},
+			want: "v1.0.0",
+		},
+		{
+			name:    "every version retracted",
+			list:    "v1.0.0\nv1.1.0\n",
+			mods:    map[string]string{"v1.1.0": "module example.com/m\nretract [v1.0.0, v1.1.0]\n"},
+			wantErr: errAllRetracted,
+		},
+		{
+			name:     "every version retracted on a prerelease row",
+			list:     "v1.0.0\nv1.1.0-rc.1\n",
+			recorded: "v1.1.0-beta.1",
+			mods:     map[string]string{"v1.0.0": "module example.com/m\nretract [v1.0.0, v1.1.0-rc.1]\n"},
+			wantErr:  errAllRetracted,
+		},
+		{
+			name:    "only a prerelease survives on a stable row",
+			list:    "v1.0.0\nv1.1.0-rc.1\n",
+			mods:    map[string]string{"v1.0.0": "module example.com/m\nretract v1.0.0\n"},
+			wantErr: errOnlyPrereleases,
+		},
+		{
+			name:     "a prerelease row reads the retractions of the highest release",
+			list:     "v1.0.0\nv1.1.0-rc.1\n",
+			recorded: "v1.1.0-beta.1",
+			mods: map[string]string{
+				"v1.0.0":      "module example.com/m\nretract v1.1.0-rc.1\n",
+				"v1.1.0-rc.1": "module example.com/m\n",
+			},
+			want: "v1.0.0",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			routes := map[string]string{"/example.com/m/@v/list": tc.list}
+			for ver, mod := range tc.mods {
+				routes["/example.com/m/@v/"+ver+".mod"] = mod
+			}
+			v, _ := goProxy(t, routes)
+			got, err := v.Latest(t.Context(), &Tool{Source: "go:example.com/m", Version: tc.recorded}, nil)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Errorf("Latest = %q, %v; want %v", got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Latest = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Only "no such module" (404 or 410) moves the walk to a shorter prefix; any
+// other answer is an outage, and a shorter prefix would name the wrong module.
+func TestLatestGoModule_OtherErrorStopsTheWalk(t *testing.T) {
+	var asked []string
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked = append(asked, r.URL.Path)
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	v := newTestVersionResolver(srv.Client())
+	_, err := v.Latest(t.Context(), &Tool{Source: "go:example.com/m/cmd/x"}, nil)
+	if err == nil {
+		t.Fatal("Latest succeeded, want the 403 as an error")
+	}
+	if len(asked) != 1 || asked[0] != "/example.com/m/cmd/x/@v/list" {
+		t.Errorf("asked %q, want only /example.com/m/cmd/x/@v/list", asked)
+	}
+}
+
+func TestLatestGoModule_NoModuleOwnsThePath(t *testing.T) {
+	v, asked := goProxy(t, map[string]string{})
+	_, err := v.Latest(t.Context(), &Tool{Source: "go:example.com/a/b"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "example.com/a/b") {
+		t.Fatalf("Latest = %v, want an error naming example.com/a/b", err)
+	}
+	want := []string{"/example.com/a/b/@v/list", "/example.com/a/@v/list", "/example.com/@v/list"}
+	if !slices.Equal(*asked, want) {
+		t.Errorf("asked %q, want %q", *asked, want)
+	}
+}
+
+// deepGoPath is a valid package path with n candidate module paths:
+// example.com and each of its n-1 nested directories.
+func deepGoPath(n int) string {
+	return "example.com" + strings.Repeat("/d", n-1)
+}
+
+func TestLatestGoModule_PrefixCap(t *testing.T) {
+	t.Run("a path past the cap is refused before any request", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + deepGoPath(maxGoModulePrefixes+1)}, nil)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoModulePrefixes)) {
+			t.Errorf("Latest = %v, want an error naming the cap of %d", err, maxGoModulePrefixes)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+	})
+	t.Run("a path at the cap walks every prefix", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + deepGoPath(maxGoModulePrefixes)}, nil)
+		if err == nil || !strings.Contains(err.Error(), "no module") {
+			t.Errorf("Latest = %v, want no module found", err)
+		}
+		if len(*asked) != maxGoModulePrefixes {
+			t.Errorf("asked %d paths, want %d", len(*asked), maxGoModulePrefixes)
+		}
+	})
+	t.Run("a path past the cap whose prefixes are not module paths is refused", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := "example.com" + strings.Repeat("/v1", maxGoModulePrefixes)
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoModulePrefixes)) {
+			t.Errorf("Latest = %v, want an error naming the cap of %d", err, maxGoModulePrefixes)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+	})
+}
+
+func TestLatestGoModule_PathLengthLimit(t *testing.T) {
+	t.Run("a path of the limit is refused before any request", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := "example.com/" + strings.Repeat("a", maxGoPackagePathLen-len("example.com/"))
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoPackagePathLen)) {
+			t.Errorf("Latest = %v, want an error naming the limit of %d", err, maxGoPackagePathLen)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+	})
+	t.Run("a path one byte under the limit is looked up", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := "example.com/" + strings.Repeat("a", maxGoPackagePathLen-1-len("example.com/"))
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		if err == nil || !strings.Contains(err.Error(), "no module") {
+			t.Errorf("Latest = %v, want no module found", err)
+		}
+		if len(*asked) != 2 {
+			t.Errorf("asked %d paths, want 2", len(*asked))
+		}
+	})
+	t.Run("a 32 KB path is refused at once", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := deepGoPath(16000)
+		start := time.Now()
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		elapsed := time.Since(start)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoPackagePathLen)) {
+			t.Errorf("Latest = %v, want an error naming the limit of %d", err, maxGoPackagePathLen)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("refusing a %d-byte path took %v, want under 500ms", len(pkg), elapsed)
+		}
+	})
+}
+
+// slowly delays every answer of h, so a walk of many requests outlasts a
+// shortened resolution budget while each request stays inside its own.
+func slowly(delay time.Duration, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			h(w, r)
+		case <-r.Context().Done():
+		}
+	}
+}
+
+func shortenResolutionBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := latestResolutionBudget
+	latestResolutionBudget = d
+	t.Cleanup(func() { latestResolutionBudget = orig })
+}
+
+func TestLatest_OneDeadlineBoundsTheWholeResolution(t *testing.T) {
+	const delay = 40 * time.Millisecond
+	shortenResolutionBudget(t, 5*delay)
+
+	cases := []struct {
+		name    string
+		tool    *Tool
+		aq      *AquaPackage
+		handler http.HandlerFunc
+		walk    int // requests the walk makes when nothing stops it
+	}{
+		{
+			name:    "go module prefix walk",
+			tool:    &Tool{Source: "go:" + deepGoPath(maxGoModulePrefixes)},
+			handler: http.NotFound,
+			walk:    maxGoModulePrefixes,
+		},
+		{
+			name: "github tag pages",
+			tool: &Tool{Source: "aqua:o/r"},
+			aq:   &AquaPackage{VersionSource: "github_tag"},
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, fullPage("name", "v1.0.0"))
+			},
+			walk: listPageCap,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			asked := 0
+			srv := httptest.NewTestServer(t, slowly(delay, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				asked++
+				mu.Unlock()
+				tc.handler(w, r)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			start := time.Now()
+			_, err := v.Latest(t.Context(), tc.tool, tc.aq)
+			elapsed := time.Since(start)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Latest = %v, want context.DeadlineExceeded", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if asked >= tc.walk {
+				t.Errorf("answered %d requests, want fewer than the %d of an unbounded walk", asked, tc.walk)
+			}
+			if limit := latestResolutionBudget + 3*delay; elapsed > limit {
+				t.Errorf("Latest returned after %s, want within %s", elapsed, limit)
+			}
+		})
+	}
+}
+
+func TestLatest_AptIsOutsideTheResolutionBudget(t *testing.T) {
+	fakeRoot(t)
+	stubApt(t)
+	shortenResolutionBudget(t, time.Nanosecond)
+	got, err := newTestVersionResolver(nil).Latest(t.Context(), &Tool{Source: "apt:jq"}, nil)
+	if err != nil || got != "1.7.1-1" {
+		t.Errorf("Latest = %q, %v; want the stub's candidate 1.7.1-1", got, err)
+	}
 }

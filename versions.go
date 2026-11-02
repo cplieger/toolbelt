@@ -1,24 +1,62 @@
 package toolbelt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"path"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cplieger/httpx/v5"
 	goversion "github.com/hashicorp/go-version"
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
+	"golang.org/x/mod/semver"
 )
 
-// versionLookupBudget bounds one latest-version resolution end to end,
-// retries included (httpx retries transient failures and honors 429
-// Retry-After inside this window).
+// versionLookupBudget bounds one upstream request of a latest-version
+// resolution, retries included (httpx retries transient failures and honors
+// 429 Retry-After inside this window).
 const versionLookupBudget = 45 * time.Second
+
+// latestResolutionBudget bounds one whole resolution, so a walk of many
+// requests (tag pages, Go module prefixes, go.mod reads) cannot restart
+// versionLookupBudget per request. A var so a test can shorten it.
+var latestResolutionBudget = 2 * time.Minute
+
+// maxGoModulePrefixes caps the elements of one go: package path, and so the
+// prefixes walked, each costing a proxy request when it is a module path. The
+// go command sets no limit; the deepest common command path, golang.org/x/tools's
+// fieldalignment, has 9.
+const maxGoModulePrefixes = 16
+
+// maxGoPackagePathLen refuses a go: package path that cannot be built: go
+// install extracts it under GOMODCACHE, and Linux refuses a path of PATH_MAX
+// (4096) bytes or more with ENAMETOOLONG. Go itself sets no length limit.
+const maxGoPackagePathLen = 4096
+
+// versionResponseCap bounds one version-lookup response body.
+const versionResponseCap = 4 << 20
+
+// errOnlyPrereleases is the answer of a version list holding nothing but
+// prereleases for a tool not recorded at one.
+var errOnlyPrereleases = errors.New("only prereleases are published; record a prerelease version to follow them")
+
+// errIncompleteWalk is the answer of a paginated list still full at
+// listPageCap: a later page may hold the highest version.
+var errIncompleteWalk = errors.New("the version list runs past the page cap")
+
+// errAllRetracted is the answer of a Go module whose every listed version is
+// retracted; the go command's "latest" finds no version then either.
+var errAllRetracted = errors.New("every published version is retracted")
 
 // versionResolver finds the latest upstream version for a tool source.
 // Results are cached in memory so Inventory can surface "update
@@ -26,50 +64,88 @@ const versionLookupBudget = 45 * time.Second
 // and reconcile jobs.
 type versionResolver struct {
 	client *http.Client
-	cache  map[string]string // source -> latest version
-	// aptIdx guarantees a package index exists before apt-cache is asked
-	// anything. Both consumer images ship with /var/lib/apt/lists empty,
-	// and apt-cache answers "no Candidate line" rather than erroring on a
-	// missing index, so without this a first-ever apt add fails while
-	// looking like a broken package name.
+	cache  map[latestKey]string
+	// aptIdx ensures a package index exists before apt-cache runs: with
+	// /var/lib/apt/lists empty, apt-cache answers "no Candidate line" and a
+	// first apt add reads as a broken package name.
 	aptIdx *aptIndex
 
 	mu sync.Mutex
 }
 
 func newVersionResolver(client *http.Client, aptIdx *aptIndex) *versionResolver {
-	return &versionResolver{client: client, cache: map[string]string{}, aptIdx: aptIdx}
+	return &versionResolver{client: client, cache: map[latestKey]string{}, aptIdx: aptIdx}
 }
 
-// Cached returns the cached latest version for a source, if any.
-func (v *versionResolver) Cached(source string) string {
+// latestKey keys the latest-version cache: the answer for a source depends
+// on whether the recorded version admits prereleases and on the aqua fields
+// latestAqua picks by, which a catalog refresh can change.
+type latestKey struct {
+	source        string
+	aquaType      string
+	versionSource string
+	versionFilter string
+	versionPrefix string
+	allowPre      bool
+}
+
+func toolLatestKey(t *Tool, aq *AquaPackage) latestKey {
+	key := latestKey{source: t.Source, allowPre: recordedPrerelease(t, aq)}
+	if aq != nil {
+		key.aquaType, key.versionSource = aq.Type, aq.VersionSource
+		key.versionFilter, key.versionPrefix = aq.VersionFilter, aq.VersionPrefix
+	}
+	return key
+}
+
+// Cached returns the cached latest version for the tool, if any.
+func (v *versionResolver) Cached(t *Tool, aq *AquaPackage) string {
+	key := toolLatestKey(t, aq)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.cache[source]
+	return v.cache[key]
 }
 
 // Latest resolves the newest upstream version for the tool and caches
 // it. aq carries the catalog's aqua definition when the source is
-// aqua: (for version_source/filter/prefix semantics).
-func (v *versionResolver) Latest(ctx context.Context, source string, aq *AquaPackage) (string, error) {
-	latest, err := v.resolve(ctx, source, aq)
+// aqua: (for version_source/filter/prefix semantics). Where the engine
+// picks the highest of a version list, a prerelease counts only when the
+// tool's recorded version is itself a prerelease.
+func (v *versionResolver) Latest(ctx context.Context, t *Tool, aq *AquaPackage) (string, error) {
+	key := toolLatestKey(t, aq)
+	// apt's index refresh runs under aptUpdateBudget, which is longer than
+	// this budget.
+	if !strings.HasPrefix(t.Source, SourceApt+":") {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, latestResolutionBudget)
+		defer cancel()
+	}
+	latest, err := v.resolve(ctx, t.Source, key.allowPre, aq)
 	if err != nil {
 		return "", err
 	}
-	if !validVersion(source, latest) {
-		return "", fmt.Errorf("upstream %s: %v", source, versionRejected(source, latest))
+	if !validVersion(t.Source, latest) {
+		return "", fmt.Errorf("upstream %s: %v", t.Source, versionRejected(t.Source, latest))
 	}
 	v.mu.Lock()
-	v.cache[source] = latest
+	v.cache[key] = latest
 	v.mu.Unlock()
 	return latest, nil
 }
 
-func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPackage) (string, error) {
+func recordedPrerelease(t *Tool, aq *AquaPackage) bool {
+	prefix := ""
+	if aq != nil {
+		prefix = aq.VersionPrefix
+	}
+	return isPrereleaseTag(t.Version, prefix)
+}
+
+func (v *versionResolver) resolve(ctx context.Context, source string, allowPre bool, aq *AquaPackage) (string, error) {
 	kind, ref, _ := strings.Cut(source, ":")
 	switch kind {
 	case SourceAqua:
-		return v.latestAqua(ctx, ref, aq)
+		return v.latestAqua(ctx, ref, aq, allowPre)
 	case SourceNpm:
 		return v.latestNpm(ctx, ref)
 	case SourcePip:
@@ -77,9 +153,9 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 	case SourceCargo:
 		return v.latestCrate(ctx, ref)
 	case SourceGo:
-		return v.latestGoModule(ctx, ref)
+		return v.latestGoModule(ctx, ref, allowPre)
 	case SourceRelease:
-		return v.latestRelease(ctx, ref)
+		return v.latestRelease(ctx, ref, allowPre)
 	case SourceApt:
 		return v.latestApt(ctx, ref)
 	default:
@@ -93,14 +169,14 @@ func (v *versionResolver) resolve(ctx context.Context, source string, aq *AquaPa
 // GitHub paths the aqua source already uses. The registry's version_prefix
 // hint is not applied here: the tag is what the download URL needs, and
 // stripping a prefix would produce a version that names no release.
-func (v *versionResolver) latestRelease(ctx context.Context, ref string) (string, error) {
+func (v *versionResolver) latestRelease(ctx context.Context, ref string, allowPre bool) (string, error) {
 	rr, err := parseReleaseRef(ref)
 	if err != nil {
 		return "", err
 	}
 	switch rr.Host {
 	case releaseHostGitLab:
-		return v.latestGitLabRelease(ctx, rr)
+		return v.latestGitLabRelease(ctx, rr, allowPre)
 	default:
 		return v.latestGitHubRelease(ctx, rr)
 	}
@@ -120,14 +196,33 @@ func (v *versionResolver) latestGitHubRelease(ctx context.Context, rr releaseRef
 	return rel.TagName, nil
 }
 
-func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef) (string, error) {
-	var rels []struct {
+// latestGitLabRelease picks by version across every release, because GitLab
+// marks no release as a prerelease and orders by release date
+// (https://docs.gitlab.com/api/releases/#list-releases), so a back-branch
+// patch released last would otherwise read as latest. A list with no
+// version-shaped tag keeps GitLab's newest.
+func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef, allowPre bool) (string, error) {
+	type release struct {
 		TagName string `json:"tag_name"`
 	}
 	project := url.PathEscape(rr.Owner + "/" + rr.Repo)
-	api := "https://gitlab.com/api/v4/projects/" + project + "/releases?per_page=1"
-	if err := v.getJSON(ctx, api, &rels); err != nil {
-		return "", err
+	rels, err := walkPages[release](ctx, v, func(page int) string {
+		return fmt.Sprintf("https://gitlab.com/api/v4/projects/%s/releases?per_page=%d&page=%d", project, listPageSize, page)
+	})
+	if err != nil {
+		return "", fmt.Errorf("%s/%s on gitlab: %w", rr.Owner, rr.Repo, err)
+	}
+	var tags []string
+	for _, r := range rels {
+		if parseTagVersion(r.TagName, "") != nil {
+			tags = append(tags, r.TagName)
+		}
+	}
+	if len(tags) > 0 {
+		if pick := latestTag(tags, "", allowPre); pick != "" {
+			return pick, nil
+		}
+		return "", fmt.Errorf("%s/%s on gitlab: %w", rr.Owner, rr.Repo, errOnlyPrereleases)
 	}
 	if len(rels) == 0 || rels[0].TagName == "" {
 		return "", fmt.Errorf("%s/%s has no releases", rr.Owner, rr.Repo)
@@ -150,16 +245,16 @@ func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, er
 // release index when it publishes one; the tag list (filtered by
 // version_filter/version_prefix) for github_tag versioning and for http
 // and github_content types; else the GitHub releases/latest endpoint.
-func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPackage) (string, error) {
+func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPackage, allowPre bool) (string, error) {
 	owner, repo, ok := strings.Cut(ref, "/")
 	if !ok {
 		return "", fmt.Errorf("bad aqua ref %q", ref)
 	}
 	if feed, ok := runtimeVersionFeeds[ref]; ok {
-		return v.latestFromFeed(ctx, feed, aq)
+		return v.latestFromFeed(ctx, feed, aq, allowPre)
 	}
 	if aq != nil && (aq.VersionSource == "github_tag" || aq.Type == aquaTypeHTTP || aq.Type == "github_content") {
-		return v.latestGitHubTag(ctx, owner, repo, aq)
+		return v.latestGitHubTag(ctx, owner, repo, aq, allowPre)
 	}
 	var rel struct {
 		TagName string `json:"tag_name"`
@@ -173,7 +268,7 @@ func (v *versionResolver) latestAqua(ctx context.Context, ref string, aq *AquaPa
 	if aq != nil && !evalVersionFilter(aq.VersionFilter, rel.TagName, aq.VersionPrefix) {
 		// Latest release fails the filter (e.g. a "latest"-named tag);
 		// fall back to scanning the tag list.
-		return v.latestGitHubTag(ctx, owner, repo, aq)
+		return v.latestGitHubTag(ctx, owner, repo, aq, allowPre)
 	}
 	return rel.TagName, nil
 }
@@ -187,7 +282,7 @@ var runtimeVersionFeeds = map[string]string{
 	"golang/go":   "https://go.dev/dl/?mode=json",
 }
 
-func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq *AquaPackage) (string, error) {
+func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq *AquaPackage, allowPre bool) (string, error) {
 	prefix, filter := "", ""
 	if aq != nil {
 		prefix, filter = aq.VersionPrefix, aq.VersionFilter
@@ -207,49 +302,74 @@ func (v *versionResolver) latestFromFeed(ctx context.Context, feedURL string, aq
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no version in %s passes the version filter", feedURL)
 	}
-	return maxVersionTag(candidates, prefix), nil
+	if pick := latestTag(candidates, prefix, allowPre); pick != "" {
+		return pick, nil
+	}
+	return "", fmt.Errorf("%s: %w", feedURL, errOnlyPrereleases)
 }
 
-// tagPageCap bounds the GitHub tag pagination walk. golang/go needs
-// ~6 pages before go1* tags appear; 20 covers pathological repos while
+// listPageCap bounds a paginated version-list walk. golang/go's tag list
+// needs ~6 pages before go1* tags appear; 20 covers pathological repos while
 // keeping the worst-case API cost bounded.
-const tagPageCap = 20
+const listPageCap = 20
+
+// listPageSize is the largest page both GitHub and GitLab serve
+// (https://docs.gitlab.com/api/rest/#pagination).
+const listPageSize = 100
+
+// walkPages decodes pages 1 to listPageCap of pageURL until a short page.
+// Neither forge orders these lists by version, so a cap page still full is
+// errIncompleteWalk rather than a truncated answer.
+func walkPages[T any](ctx context.Context, v *versionResolver, pageURL func(page int) string) ([]T, error) {
+	var all []T
+	for page := 1; page <= listPageCap; page++ {
+		var items []T
+		if err := v.getJSON(ctx, pageURL(page), &items); err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		if len(items) < listPageSize {
+			return all, nil
+		}
+	}
+	return nil, errIncompleteWalk
+}
 
 // latestGitHubTag returns the newest repo tag passing the package's
 // version_filter and version_prefix. The GitHub tags endpoint has NO
 // documented ordering (golang/go's first page is 2012-era weekly.*
 // tags), so — like aqua's own version getter — this paginates,
-// collects every filter-passing candidate, and picks the maximum by
-// version comparison, never trusting response order.
-func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo string, aq *AquaPackage) (string, error) {
+// collects every filter-passing candidate, and picks the maximum with
+// latestTag, never trusting response order.
+func (v *versionResolver) latestGitHubTag(ctx context.Context, owner, repo string, aq *AquaPackage, allowPre bool) (string, error) {
 	prefix := ""
 	filter := ""
 	if aq != nil {
 		prefix = aq.VersionPrefix
 		filter = aq.VersionFilter
 	}
+	type tag struct {
+		Name string `json:"name"`
+	}
+	tags, err := walkPages[tag](ctx, v, func(page int) string {
+		return fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=%d&page=%d", owner, repo, listPageSize, page)
+	})
+	if err != nil {
+		return "", fmt.Errorf("tags of %s/%s: %w", owner, repo, err)
+	}
 	var candidates []string
-	for page := 1; page <= tagPageCap; page++ {
-		tagURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/tags?per_page=100&page=%d", owner, repo, page)
-		var tags []struct {
-			Name string `json:"name"`
-		}
-		if err := v.getJSON(ctx, tagURL, &tags); err != nil {
-			return "", err
-		}
-		for _, t := range tags {
-			if tagPasses(t.Name, prefix, filter) {
-				candidates = append(candidates, t.Name)
-			}
-		}
-		if len(tags) < 100 {
-			break
+	for _, t := range tags {
+		if tagPasses(t.Name, prefix, filter) {
+			candidates = append(candidates, t.Name)
 		}
 	}
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("no tag of %s/%s passes the version filter", owner, repo)
 	}
-	return maxVersionTag(candidates, prefix), nil
+	if pick := latestTag(candidates, prefix, allowPre); pick != "" {
+		return pick, nil
+	}
+	return "", fmt.Errorf("tags of %s/%s: %w", owner, repo, errOnlyPrereleases)
 }
 
 // tagPasses reports whether a tag satisfies the package's version prefix
@@ -259,6 +379,53 @@ func tagPasses(name, prefix, filter string) bool {
 		return false
 	}
 	return evalVersionFilter(filter, name, prefix)
+}
+
+// latestTag picks the highest candidate as maxVersionTag does, leaving out
+// prereleases unless allowPre is set. Tags that parse as no version count
+// only when none does. Empty means no candidate is eligible.
+func latestTag(candidates []string, prefix string, allowPre bool) string {
+	var versioned []string
+	parsed := false
+	for _, c := range candidates {
+		ver := parseTagVersion(c, prefix)
+		if ver == nil {
+			continue
+		}
+		parsed = true
+		if allowPre || !isPrerelease(c, prefix, ver) {
+			versioned = append(versioned, c)
+		}
+	}
+	switch {
+	case len(versioned) > 0:
+		return maxVersionTag(versioned, prefix)
+	case parsed || len(candidates) == 0:
+		return ""
+	default:
+		return maxVersionTag(candidates, prefix)
+	}
+}
+
+// isPrereleaseTag reports whether tag parses as a version with a prerelease
+// part (v27.0.0-alpha.0, go1.28rc1, a Go pseudo-version).
+func isPrereleaseTag(tag, prefix string) bool {
+	ver := parseTagVersion(tag, prefix)
+	return ver != nil && isPrerelease(tag, prefix, ver)
+}
+
+// isoDateVersion matches a date tag, which go-version reads as a year with a
+// prerelease part ("2025-01-06" is 2025 with prerelease "01-06").
+var isoDateVersion = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+
+// isPrerelease decides from the tag, not ver.Original(): parseTagVersion
+// parses nightly-2025-01-06 from its first digit, and that suffix is a date.
+func isPrerelease(tag, prefix string, ver *goversion.Version) bool {
+	return ver.Prerelease() != "" && !isoDateVersion.MatchString(trimTagPrefix(tag, prefix))
+}
+
+func trimTagPrefix(tag, prefix string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(tag, prefix), "v")
 }
 
 // maxVersionTag picks the highest candidate by go-version comparison
@@ -286,14 +453,12 @@ func maxVersionTag(candidates []string, prefix string) string {
 }
 
 func parseTagVersion(tag, prefix string) *goversion.Version {
-	s := strings.TrimPrefix(strings.TrimPrefix(tag, prefix), "v")
+	s := trimTagPrefix(tag, prefix)
 	if ver, err := goversion.NewVersion(s); err == nil {
 		return ver
 	}
-	// Tags like "go1.24.0" or "jq-1.8.2" carry a non-numeric prefix the
-	// definition doesn't declare (the version_filter does the matching
-	// instead). Parse from the first digit so version comparison still
-	// works — a lexicographic fallback would rank go1.9 above go1.24.
+	// "go1.24.0" or "jq-1.8.2" carry an undeclared prefix; parse from the
+	// first digit, since a lexicographic fallback ranks go1.9 above go1.24.
 	if i := strings.IndexFunc(s, func(r rune) bool { return r >= '0' && r <= '9' }); i > 0 {
 		if ver, err := goversion.NewVersion(s[i:]); err == nil {
 			return ver
@@ -303,10 +468,8 @@ func parseTagVersion(tag, prefix string) *goversion.Version {
 }
 
 func (v *versionResolver) latestNpm(ctx context.Context, pkg string) (string, error) {
-	// The dist-tag endpoint returns just the tagged version manifest.
-	// Never fetch the full packument (/{pkg}): it carries every version
-	// ever published and blows the response-size cap on big packages
-	// (typescript's is >4 MiB — found enabling the seed template).
+	// The dist-tag endpoint, never the full packument (/{pkg}), which lists
+	// every version and overflows the response cap (typescript's is >4 MiB).
 	var doc struct {
 		Version string `json:"version"`
 	}
@@ -353,29 +516,263 @@ func (v *versionResolver) latestCrate(ctx context.Context, name string) (string,
 	return "", fmt.Errorf("crate %q has no versions", name)
 }
 
-func (v *versionResolver) latestGoModule(ctx context.Context, modPath string) (string, error) {
-	// The module proxy requires case-escaped paths; x/mod validates the
-	// path shape as a side effect.
+// latestGoModule resolves a go: package path to the latest version of the
+// module that owns it, as the go command does: the longest path prefix the
+// proxy knows as a module, read from its version list.
+func (v *versionResolver) latestGoModule(ctx context.Context, pkgPath string, allowPre bool) (string, error) {
+	if len(pkgPath) >= maxGoPackagePathLen {
+		return "", fmt.Errorf("go package path of %d bytes reaches the %d-byte limit", len(pkgPath), maxGoPackagePathLen)
+	}
+	if n := strings.Count(pkgPath, "/") + 1; n > maxGoModulePrefixes {
+		return "", fmt.Errorf("go package path %q has %d elements, more than the %d the engine looks up", pkgPath, n, maxGoModulePrefixes)
+	}
+	if err := module.CheckImportPath(pkgPath); err != nil {
+		return "", fmt.Errorf("invalid go package path %q: %w", pkgPath, err)
+	}
+	for _, mod := range goModulePrefixes(pkgPath) {
+		ver, found, err := v.latestModuleVersion(ctx, mod, allowPre)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			return ver, nil
+		}
+	}
+	return "", fmt.Errorf("no module on the Go module proxy provides package %q", pkgPath)
+}
+
+// goModulePrefixes lists the module paths that could own pkgPath, longest
+// first, so a nested module wins over its parent.
+func goModulePrefixes(pkgPath string) []string {
+	var out []string
+	for p := pkgPath; p != "." && p != "/"; p = path.Dir(p) {
+		if module.CheckPath(p) == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// latestModuleVersion reads one module's latest version from the proxy;
+// found is false when the proxy has no such module. The list is read rather
+// than @latest because @latest is the go command's fallback for an empty
+// list and can lag it (https://go.dev/ref/mod#goproxy-protocol).
+func (v *versionResolver) latestModuleVersion(ctx context.Context, modPath string, allowPre bool) (version string, found bool, err error) {
 	esc, err := module.EscapePath(modPath)
 	if err != nil {
-		return "", fmt.Errorf("invalid module path %q: %w", modPath, err)
+		return "", false, fmt.Errorf("invalid module path %q: %w", modPath, err)
 	}
+	mp := &moduleProxy{v: v, path: modPath, base: "https://proxy.golang.org/" + esc + "/@", mods: map[string]proxyFile{}}
+	body, err := v.getBytes(ctx, mp.base+"v/list")
+	if isNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	listed := moduleCandidates(strings.Fields(string(body)))
+	if len(listed) == 0 {
+		return v.moduleLatestQuery(ctx, mp.base, modPath, allowPre)
+	}
+	kept, err := mp.unretracted(ctx, listed)
+	if err != nil {
+		return "", false, err
+	}
+	if len(kept) == 0 {
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errAllRetracted)
+	}
+	eligible, err := mp.withoutShadowedIncompatible(ctx, kept)
+	if err != nil {
+		return "", false, err
+	}
+	pick := highestModuleVersion(eligible, allowPre)
+	if pick == "" {
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
+	}
+	return pick, true, nil
+}
+
+// moduleProxy reads one module's go.mod files from the proxy during a single
+// lookup, each at most once.
+type moduleProxy struct {
+	v    *versionResolver
+	mods map[string]proxyFile
+	path string
+	base string
+}
+
+type proxyFile struct {
+	body  []byte
+	found bool
+}
+
+// unretracted drops the versions retracted by the go.mod of the version the
+// go command's "latest" names with retractions ignored
+// (https://go.dev/ref/mod#go-mod-file-retract).
+func (mp *moduleProxy) unretracted(ctx context.Context, listed []string) ([]string, error) {
+	eligible, err := mp.withoutShadowedIncompatible(ctx, listed)
+	if err != nil {
+		return nil, err
+	}
+	retracted, err := mp.retractions(ctx, retractionSource(eligible))
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(slices.Clone(listed), func(ver string) bool {
+		return slices.ContainsFunc(retracted, func(r modfile.VersionInterval) bool {
+			return semver.Compare(r.Low, ver) <= 0 && semver.Compare(ver, r.High) <= 0
+		})
+	}), nil
+}
+
+// withoutShadowedIncompatible drops the +incompatible versions when the
+// highest compatible version has a go.mod of its own, as the go command's
+// filterVersions does: the module then supports modules at that major, and a
+// legacy v2+ tag is no upgrade. A compatible prerelease decides too.
+func (mp *moduleProxy) withoutShadowedIncompatible(ctx context.Context, versions []string) ([]string, error) {
+	compatible := slices.DeleteFunc(slices.Clone(versions), isIncompatible)
+	if len(compatible) == 0 || len(compatible) == len(versions) {
+		return versions, nil
+	}
+	last := slices.MaxFunc(compatible, semver.Compare)
+	mod, found, err := mp.goMod(ctx, last)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("go module %q: go.mod at %s is not on the proxy", mp.path, last)
+	}
+	if bytes.Equal(mod, legacyGoMod(mp.path)) {
+		return versions, nil
+	}
+	return compatible, nil
+}
+
+// legacyGoMod is the go.mod the proxy synthesizes for a version without one
+// (cmd/go/internal/modfetch LegacyGoMod).
+func legacyGoMod(modPath string) []byte {
+	return []byte("module " + modfile.AutoQuote(modPath) + "\n")
+}
+
+func isIncompatible(ver string) bool {
+	return strings.HasSuffix(ver, "+incompatible")
+}
+
+// retractionSource is the version whose go.mod carries the retractions the go
+// command applies: its "latest" with retractions ignored, the highest release
+// or else the highest prerelease, whatever the row is recorded at.
+func retractionSource(eligible []string) string {
+	if rel := highestModuleVersion(eligible, false); rel != "" {
+		return rel
+	}
+	return highestModuleVersion(eligible, true)
+}
+
+// moduleLatestQuery reads @latest, which for a module with no tagged version
+// is a pseudo-version of its newest commit, so it counts as a prerelease.
+func (v *versionResolver) moduleLatestQuery(ctx context.Context, base, modPath string, allowPre bool) (version string, found bool, err error) {
 	var doc struct {
 		Version string `json:"Version"`
 	}
-	if err := v.getJSON(ctx, "https://proxy.golang.org/"+esc+"/@latest", &doc); err != nil {
-		return "", err
+	err = v.getJSON(ctx, base+"latest", &doc)
+	if isNotFound(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
 	}
 	if doc.Version == "" {
-		return "", fmt.Errorf("go module %q has no latest version", modPath)
+		return "", false, fmt.Errorf("go module %q has no latest version", modPath)
 	}
-	return doc.Version, nil
+	if !allowPre && semver.Prerelease(doc.Version) != "" {
+		return "", false, fmt.Errorf("go module %q: %w", modPath, errOnlyPrereleases)
+	}
+	return doc.Version, true, nil
+}
+
+// goMod reads the module's go.mod at version; found is false when the proxy
+// has none.
+func (mp *moduleProxy) goMod(ctx context.Context, version string) (body []byte, found bool, err error) {
+	if f, ok := mp.mods[version]; ok {
+		return f.body, f.found, nil
+	}
+	escVer, err := module.EscapeVersion(version)
+	if err != nil {
+		return nil, false, fmt.Errorf("invalid module version %q: %w", version, err)
+	}
+	body, err = mp.v.getBytes(ctx, mp.base+"v/"+escVer+".mod")
+	if isNotFound(err) {
+		mp.mods[version] = proxyFile{}
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	mp.mods[version] = proxyFile{body: body, found: true}
+	return body, true, nil
+}
+
+// retractions reads the retract directives of the module's go.mod at
+// version, which the go command applies to every listed version.
+func (mp *moduleProxy) retractions(ctx context.Context, version string) ([]modfile.VersionInterval, error) {
+	body, found, err := mp.goMod(ctx, version)
+	if err != nil || !found {
+		return nil, err
+	}
+	f, err := modfile.ParseLax("go.mod", body, nil)
+	if err != nil {
+		return nil, fmt.Errorf("go.mod at %s: %w", version, err)
+	}
+	out := make([]modfile.VersionInterval, 0, len(f.Retract))
+	for _, r := range f.Retract {
+		out = append(out, r.VersionInterval)
+	}
+	return out, nil
+}
+
+// highestModuleVersion picks the highest version, leaving out prereleases
+// unless allowPre is set. Empty means none is eligible.
+func highestModuleVersion(candidates []string, allowPre bool) string {
+	if !allowPre {
+		candidates = slices.DeleteFunc(slices.Clone(candidates), func(ver string) bool {
+			return semver.Prerelease(ver) != ""
+		})
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return slices.MaxFunc(candidates, semver.Compare)
+}
+
+// moduleCandidates keeps the versions the go command can select from a list:
+// canonical semver, with or without +incompatible.
+func moduleCandidates(listed []string) []string {
+	return slices.DeleteFunc(slices.Clone(listed), func(ver string) bool {
+		canon := semver.Canonical(ver)
+		return ver != canon && ver != canon+"+incompatible"
+	})
+}
+
+// isNotFound reports whether err is the proxy saying it has no such module
+// or version: 404 or 410, per https://go.dev/ref/mod#goproxy-protocol.
+func isNotFound(err error) bool {
+	se, ok := errors.AsType[*httpx.StatusError](err)
+	return ok && (se.Code == http.StatusNotFound || se.Code == http.StatusGone)
 }
 
 func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
 	defer cancel()
-	return fetchJSON(ctx, v.client, rawURL, 4<<20, out)
+	return fetchJSON(ctx, v.client, rawURL, versionResponseCap, out)
+}
+
+func (v *versionResolver) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
+	defer cancel()
+	return httpx.GetBytes(ctx, v.client, rawURL,
+		httpx.WithMaxAttempts(3),
+		httpx.WithMaxBodyBytes(versionResponseCap),
+	)
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, rawURL string, maxBytes int64, out any) error {

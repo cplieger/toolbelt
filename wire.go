@@ -182,8 +182,9 @@ type ReconcileMode int
 
 const (
 	// ReconcileMissing converges intent without network: installs
-	// missing enabled entries, uninstalls the engine-owned footprint of
-	// disabled ones. Zero fetches when already converged.
+	// missing enabled entries, sets each apt: entry's dpkg hold to its
+	// pin, uninstalls the engine-owned footprint of disabled entries and
+	// orphaned state rows. Zero fetches when already converged.
 	ReconcileMissing ReconcileMode = iota
 	// ReconcileFull is ReconcileMissing plus an update pass over
 	// unpinned entries (enqueued as a separate update job).

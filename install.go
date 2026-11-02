@@ -192,7 +192,7 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 	case SourceNpm:
 		out.pmBins, err = in.installNpm(ctx, ref, t.Version, prev.PMBins)
 	case SourcePip:
-		out.pmBins, err = in.installPip(ctx, ref, t.Version, prev.PMBins)
+		out.pmBins, err = in.installPip(ctx, ref, t, prev.PMBins)
 	case SourceCargo:
 		out.bins, err = in.installCargo(ctx, ref, t.Version, prev.Bins, fallback)
 	case SourceGo:
@@ -833,39 +833,51 @@ func (in *installer) linkBin(name, target string) error {
 
 // --- package-manager backends ---
 
+// pmEnvDropped are ambient uv settings that would pick a pip: venv's
+// interpreter over the managed one pmEnv requests.
+var pmEnvDropped = []string{"UV_PYTHON", "UV_PYTHON_PREFERENCE", "UV_NO_MANAGED_PYTHON"}
+
 // pmEnv builds the environment for package-manager subprocesses: the
 // engine's bin dir leads PATH so freshly installed runtimes resolve.
 func (in *installer) pmEnv() []string {
-	env := os.Environ()
-	pathValue := in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH")
-	out := env[:0]
-	for _, e := range env {
-		if strings.HasPrefix(e, "PATH=") {
-			continue
-		}
-		out = append(out, e)
+	set := []string{
+		"PATH=" + in.binDir() + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"GOBIN=" + in.binDir(),
+		"GOPATH=" + filepath.Join(in.toolsDir, "go"),
+		"NPM_CONFIG_PREFIX=" + in.npmDir(),
+		"UV_TOOL_DIR=" + pythonToolDir(in.toolsDir),
+		"UV_TOOL_BIN_DIR=" + pythonBinDir(in.toolsDir),
+		// A tool venv breaks when its interpreter is removed, and uv's
+		// discovery otherwise takes a PATH python3, which the engine does not
+		// manage (https://docs.astral.sh/uv/concepts/tools/#python-versions).
+		"UV_MANAGED_PYTHON=1",
+		"UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(in.toolsDir),
 	}
-	return append(out,
-		"PATH="+pathValue,
-		"GOBIN="+in.binDir(),
-		"GOPATH="+filepath.Join(in.toolsDir, "go"),
-		"NPM_CONFIG_PREFIX="+in.npmDir(),
-		// uv tool install: per-tool venvs + launcher dir on the
-		// persistent tools tree (the managed interpreter lands under
-		// $HOME/.local/share/uv, which is also on the volume).
-		"UV_TOOL_DIR="+filepath.Join(in.pythonDir(), "tools"),
-		"UV_TOOL_BIN_DIR="+pythonBinDir(in.toolsDir),
-	)
+	drop := slices.Clone(pmEnvDropped)
+	for _, kv := range set {
+		k, _, _ := strings.Cut(kv, "=")
+		drop = append(drop, k)
+	}
+	out := slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		k, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(drop, k)
+	})
+	return append(out, set...)
 }
 
 // runPM runs a package-manager command, streaming its combined output
 // line by line into the job log.
 //
-// Bare names on purpose: this engine installs these runtimes, so resolving them
-// through bin/ is the feature and a systemCommand pin would break every backend
-// install. pmEnv puts bin/ first for that reason.
+// Not a systemCommand pin: this engine installs these runtimes, so bin/<name>
+// is the feature, and the server's PATH is the fallback for one it has not
+// installed. exec resolves a bare name against this process's PATH, not
+// cmd.Env's, so bin/ is tried explicitly first.
 func (in *installer) runPM(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	prog := name
+	if managed, err := exec.LookPath(filepath.Join(in.binDir(), name)); err == nil {
+		prog = managed
+	}
+	cmd := exec.CommandContext(ctx, prog, args...)
 	cmd.Env = in.pmEnv()
 	return in.streamCmd(cmd, name)
 }
@@ -988,7 +1000,7 @@ func binDiff(dir string, fn func() error) ([]string, error) {
 // installNpm installs one npm package globally under the engine's npm
 // prefix and symlinks its new bins into the bin dir.
 func (in *installer) installNpm(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.npmDir(), npmBinDir(in.toolsDir)); err != nil {
+	if err := ensureManagedDirs(in.npmDir(), npmBinDir(in.toolsDir), npmLibDir(in.toolsDir), npmModulesDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
 	pmBin := npmBinDir(in.toolsDir)
@@ -1001,18 +1013,30 @@ func (in *installer) installNpm(ctx context.Context, pkg, version string, prev [
 	return in.linkPMBins(pmBin, added, prev, pkg)
 }
 
+// anyManagedPython is the uv request for a pip: entry without one: uv takes
+// the newest managed interpreter it matches, and downloads one only when none
+// does (https://docs.astral.sh/uv/concepts/python-versions/#discovery-of-python-versions).
+const anyManagedPython = "3"
+
 // installPip installs one PyPI CLI tool via `uv tool install` (the
 // pipx-equivalent primitive: isolated per-tool venv, self-contained
 // launcher). `uv pip install --prefix` was tried first and rejected —
 // its launcher points at the managed interpreter without the prefix's
 // site-packages, so every entry point dies with ModuleNotFoundError.
-func (in *installer) installPip(ctx context.Context, pkg, version string, prev []string) ([]string, error) {
-	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir)); err != nil {
+func (in *installer) installPip(ctx context.Context, pkg string, t *Tool, prev []string) ([]string, error) {
+	if err := ensureManagedDirs(in.pythonDir(), pythonBinDir(in.toolsDir), pythonToolDir(in.toolsDir), pythonInterpreterDir(in.toolsDir)); err != nil {
 		return nil, err
 	}
+	python := cmp.Or(t.Python, anyManagedPython)
+	// The interpreter is named on every install: uv rebuilds a venv not on it
+	// but keeps one whose receipt pins a request when none is passed
+	// (https://github.com/astral-sh/uv/blob/0.13.6/crates/uv-tool-commands/src/install.rs#L1113),
+	// and resolves before replacing the venv (#L924 there). --force would
+	// also overwrite another tool's launcher of the same name.
+	args := []string{"tool", "install", "--reinstall", "--python", python, pkg + "==" + t.Version}
 	pmBin := pythonBinDir(in.toolsDir)
 	added, err := binDiff(pmBin, func() error {
-		return in.runPM(ctx, "uv", "tool", "install", "--reinstall", pkg+"=="+version)
+		return in.runPM(ctx, "uv", args...)
 	})
 	if err != nil {
 		return nil, err

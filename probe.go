@@ -3,15 +3,20 @@ package toolbelt
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cplieger/keyenc"
@@ -63,6 +68,9 @@ const (
 	// a regular executable file), so only presence was checked. Logged,
 	// never presented as verified.
 	probeModePresence = "presence"
+	// probeModePackage: an npm package that ships no bin, checked
+	// against the version in its installed package.json.
+	probeModePackage = "package"
 )
 
 // probeVerdict is what one probe established.
@@ -72,25 +80,17 @@ type probeVerdict struct {
 	// Reason explains a failure or a downgrade, for the log line.
 	Reason string
 	// OK is the install-detection answer: true = installed, false =
-	// reinstall. A failed probe is never fatal.
+	// reinstall.
 	OK bool
-	// CannotExec marks the one failure an install may not record as a
-	// success: the binary is present but the OS refused to run it (a
-	// missing shared library, a wrong-architecture image, an
-	// unresolvable interpreter). Distinct from a version-banner
-	// mismatch, which an install tolerates because a banner this engine
-	// cannot parse is a knowledge gap rather than a broken tool.
-	CannotExec bool
 }
 
-// probeCache memoizes exec probes so the read path (Inventory, which a
-// settings UI polls) does not spawn a subprocess per tool per call.
-//
-// Presence is re-checked on every probe — it is a stat, and a deleted
-// binary must be noticed immediately. Only the EXEC verdict is cached,
-// keyed by a fingerprint of the probe target (resolved path, size,
-// mtime), the recorded version, and the declared version args, so any
-// reinstall, relink or version bump invalidates it without a TTL.
+// probeCache memoizes exec probes so Inventory, which a settings UI polls,
+// does not spawn a subprocess per tool per call. Presence and a pip: venv's
+// interpreter are re-checked on every probe, so a deleted file shows at once.
+// The exec verdict is keyed by the probe target's fileIdentity, the recorded
+// version, the declared version args and, for a pip: venv, its resolved
+// interpreter's fileIdentity, so a reinstall, relink, version bump or
+// interpreter change invalidates it without a TTL.
 type probeCache struct {
 	entries map[string]probeCacheEntry
 	mu      sync.Mutex
@@ -133,28 +133,54 @@ func (c *probeCache) forget(name string) {
 // binDir is the single PATH dir the engine publishes into.
 func (e *Engine) binDir() string { return binDir(e.toolsDir) }
 
-// probeInstalled reports whether the tool is installed. Presence of
-// bin/<name> is necessary but not sufficient: the recorded bin must
-// exist AND execute, and when the definition declares its
-// version-reporting shape the answer must contain the recorded version
-// — so a truncated download, a wrong-architecture binary, a dangling
-// symlink, or the wrong version all read as NOT installed and route to
-// a reinstall. A bin the engine cannot execute at all falls back to
-// presence only and says so at Warn.
+// probeInstalled reports whether the tool is installed. The recorded bin
+// must exist AND execute, and with declared version args the answer must
+// contain the recorded version, so a truncated download, a wrong-arch
+// binary, a dangling symlink, a dead venv interpreter, or the wrong version
+// all read as NOT installed. A present non-executable file falls back to
+// presence, at Warn; a file the OS refuses to start is not installed. An apt
+// package, and an npm package that ships no bin, are proven by their
+// package manager's record instead.
 func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeTool(name, t, s).OK
 }
 
-// probeTool is probeInstalled's full verdict (mode + reason), cached per
-// tool and logged once per fingerprint change.
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
-	if kind, ref, _ := strings.Cut(t.Source, ":"); kind == SourceApt {
+	kind, ref, _ := strings.Cut(t.Source, ":")
+	if kind == SourceApt {
 		return probeApt(ref)
 	}
+	var pkgReason string
+	if kind == SourceNpm && len(s.Bins)+len(s.PMBins) == 0 {
+		v, ok := e.probeNpmPackage(ref, s.InstalledVersion)
+		if ok {
+			return v
+		}
+		pkgReason = v.Reason
+	}
+	v := e.probeBins(name, t, s)
+	if !v.OK && pkgReason != "" {
+		v.Reason = pkgReason + "; " + v.Reason
+	}
+	return v
+}
+
+// probeBins executes the tool's probe bin, cached per tool and logged once
+// per fingerprint change.
+func (e *Engine) probeBins(name string, t *Tool, s *ToolStatus) probeVerdict {
+	kind, ref, _ := strings.Cut(t.Source, ":")
 	bins := recordedBins(name, t, s)
 	for _, b := range bins {
 		if _, err := os.Stat(filepath.Join(e.binDir(), b)); err != nil {
 			return probeVerdict{OK: false, Mode: probeModePresence, Reason: "bin " + b + " is missing"}
+		}
+	}
+	var interpreter string
+	if kind == SourcePip {
+		var failed probeVerdict
+		var ok bool
+		if interpreter, failed, ok = e.probePipInterpreter(ref); !ok {
+			return failed
 		}
 	}
 	target := filepath.Join(e.binDir(), probeBin(name, t, bins))
@@ -163,9 +189,12 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 		args = defaultVersionArgs
 	}
 	want := s.InstalledVersion
-	fingerprint, err := probeFingerprint(target, want, args)
+	fingerprint, err := probeFingerprint(target, want, t.VersionArgs)
 	if err != nil {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "probe target unusable: " + err.Error()}
+	}
+	if interpreter != "" {
+		fingerprint = keyenc.Join(fingerprint, interpreter)
 	}
 	if v, ok := e.probes.lookup(name, fingerprint); ok {
 		return v
@@ -174,6 +203,26 @@ func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	e.probes.store(name, fingerprint, v)
 	e.logVerdict(name, v)
 	return v
+}
+
+// probePipInterpreter checks a pip: venv's interpreter before its launcher
+// runs. ok is false with the failed verdict when the interpreter is missing
+// or unmanaged; otherwise identity is pipInterpreter's.
+func (e *Engine) probePipInterpreter(ref string) (identity string, failed probeVerdict, ok bool) {
+	identity, missing, foreign := pipInterpreter(e.toolsDir, ref)
+	switch {
+	case missing != "":
+		return "", probeVerdict{
+			OK: false, Mode: probeModePresence,
+			Reason: "venv interpreter " + missing + " is missing",
+		}, false
+	case foreign != "":
+		return "", probeVerdict{
+			OK: false, Mode: probeModePresence,
+			Reason: "venv interpreter " + foreign + " is outside " + pythonInterpreterDir(e.toolsDir),
+		}, false
+	}
+	return identity, probeVerdict{}, true
 }
 
 // probeApt asks dpkg, because an apt package may ship no executable at
@@ -187,13 +236,202 @@ func probeApt(pkg string) probeVerdict {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
-	version, installed := aptInstalled(ctx, pkg)
-	if !installed {
+	st, err := aptQuery(ctx, pkg)
+	if err != nil {
+		return probeVerdict{OK: false, Mode: probeModePresence, Reason: err.Error()}
+	}
+	if !st.installed {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "dpkg reports " + pkg + " is not installed"}
 	}
 	// The dpkg status IS the version, so this is the one source whose
 	// probe verifies the answer without executing anything.
-	return probeVerdict{OK: true, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + version}
+	return probeVerdict{OK: true, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + st.version}
+}
+
+// npmPackageCap bounds a package.json read; a real one is a few KiB.
+const npmPackageCap = 1 << 20
+
+// probeNpmPackage checks an npm package that ships no bin against the
+// version in its installed package.json. ok is false when the bin probe
+// must decide instead: the package declares a bin, or its package.json is
+// missing or unreadable, which the verdict's Reason then names. The read
+// goes through os.Root because npm refs are not validated, so a ".." ref
+// must not reach outside node_modules. Like probeApt it is not cached: a
+// file read notices a removal at once.
+func (e *Engine) probeNpmPackage(ref, want string) (probeVerdict, bool) {
+	unread := func(cause string) (probeVerdict, bool) {
+		return probeVerdict{Reason: "the package.json of " + ref + " " + cause}, false
+	}
+	root, err := os.OpenRoot(npmModulesDir(e.toolsDir))
+	if err != nil {
+		return unread("cannot be read: " + err.Error())
+	}
+	defer func() { _ = root.Close() }()
+	f, err := root.Open(filepath.Join(ref, "package.json"))
+	if err != nil {
+		return unread("cannot be read: " + err.Error())
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, npmPackageCap+1))
+	switch {
+	case err != nil:
+		return unread("cannot be read: " + err.Error())
+	case len(data) > npmPackageCap:
+		return unread("exceeds " + strconv.Itoa(npmPackageCap) + " bytes")
+	}
+	// npm links a bin from "bin" (a path or a name-to-path map) or from
+	// every file in "directories.bin":
+	// https://docs.npmjs.com/cli/v11/configuring-npm/package-json#bin
+	var pkg struct {
+		Bin         any    `json:"bin"`
+		Version     string `json:"version"`
+		Directories struct {
+			Bin string `json:"bin"`
+		} `json:"directories"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return unread("is not valid JSON: " + err.Error())
+	}
+	if pkg.Version == "" {
+		return unread("carries no version")
+	}
+	if declaresBin(pkg.Bin) || pkg.Directories.Bin != "" {
+		return probeVerdict{}, false
+	}
+	if want != "" && strings.TrimPrefix(pkg.Version, "v") != strings.TrimPrefix(want, "v") {
+		return probeVerdict{
+			OK: false, Mode: probeModePackage,
+			Reason: fmt.Sprintf("package.json reports %q, recorded version is %q", pkg.Version, want),
+		}, true
+	}
+	return probeVerdict{OK: true, Mode: probeModePackage}, true
+}
+
+// pyvenvCap bounds a pyvenv.cfg read; uv writes a few lines.
+const pyvenvCap = 64 << 10
+
+// pipVenvSeparators are the runs PEP 503 folds to one "-"
+// (https://packaging.python.org/en/latest/specifications/name-normalization/).
+var pipVenvSeparators = regexp.MustCompile(`[-_.]+`)
+
+// pipVenvName is the venv dir uv names after a pip: ref: the normalized
+// package name, extras dropped.
+func pipVenvName(ref string) string {
+	name, _, _ := strings.Cut(ref, "[")
+	return strings.ToLower(pipVenvSeparators.ReplaceAllString(name, "-"))
+}
+
+// pipInterpreter inspects the interpreter of the uv venv behind a pip: ref:
+// the pyvenv.cfg home directory and the file bin/python resolves to. Both
+// live outside the venv, so the launcher's fingerprint cannot see them
+// change. missing names the first one gone; else foreign is the resolved
+// interpreter when it lies outside pythonInterpreterDir, a tree the engine
+// does not manage and so cannot keep alive; otherwise identity is the
+// resolved interpreter's fileIdentity. All are empty when
+// there is no pyvenv.cfg or a venv path leaves the tool dir.
+func pipInterpreter(toolsDir, ref string) (identity, missing, foreign string) {
+	toolDir := pythonToolDir(toolsDir)
+	root, err := os.OpenRoot(toolDir)
+	if err != nil {
+		return "", "", ""
+	}
+	defer func() { _ = root.Close() }()
+	venv := pipVenvName(ref)
+	f, err := root.Open(filepath.Join(venv, "pyvenv.cfg"))
+	if err != nil {
+		return "", "", ""
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, pyvenvCap))
+	if err != nil {
+		return "", "", ""
+	}
+	if home := pyvenvHome(string(data)); home != "" {
+		if _, statErr := os.Stat(home); errors.Is(statErr, fs.ErrNotExist) {
+			return "", home, ""
+		}
+	}
+	python := filepath.Join(venv, "bin", "python")
+	full := filepath.Join(toolDir, python)
+	// The root confines every component but the last, which uv links to an
+	// interpreter outside the tool dir.
+	if _, err = root.Lstat(python); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", full, ""
+		}
+		return "", "", ""
+	}
+	resolved, err := filepath.EvalSymlinks(full)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", full, ""
+		}
+		return "", "", ""
+	}
+	if !underDir(resolved, pythonInterpreterDir(toolsDir)) {
+		return "", "", resolved
+	}
+	parts, err := fileIdentity(resolved)
+	if err != nil {
+		return "", "", ""
+	}
+	return keyenc.Join(parts...), "", ""
+}
+
+// fileIdentity is the stat identity of the file at resolved, as key parts.
+// Device, inode and ctime catch a replacement that keeps mode, size and
+// mtime (a rename over it, or a rewrite with its mtime put back): setting an
+// mtime stamps ctime with the current time (utimensat(2)).
+func fileIdentity(resolved string) ([]string, error) {
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil, fmt.Errorf("stat %s: no device, inode or ctime", resolved)
+	}
+	return []string{
+		resolved,
+		fi.Mode().String(),
+		strconv.FormatInt(fi.Size(), 10),
+		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
+		strconv.FormatUint(st.Dev, 10),
+		strconv.FormatUint(st.Ino, 10),
+		strconv.FormatInt(st.Ctim.Nano(), 10),
+	}, nil
+}
+
+// underDir reports whether the resolved path lies below dir, compared with
+// dir's links resolved too.
+func underDir(resolved, dir string) bool {
+	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolvedDir
+	}
+	rel, err := filepath.Rel(dir, resolved)
+	return err == nil && rel != "." && filepath.IsLocal(rel)
+}
+
+// pyvenvHome reads the home key, parsed as CPython's site module does
+// (https://docs.python.org/3/library/site.html).
+func pyvenvHome(cfg string) string {
+	for line := range strings.Lines(cfg) {
+		key, value, ok := strings.Cut(line, "=")
+		if ok && strings.EqualFold(strings.TrimSpace(key), "home") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func declaresBin(bin any) bool {
+	switch b := bin.(type) {
+	case string:
+		return b != ""
+	case map[string]any:
+		return len(b) > 0
+	}
+	return false
 }
 
 // logVerdict reports a FRESH verdict (cache hits stay quiet, so a stable
@@ -231,10 +469,7 @@ func (e *Engine) runProbe(target string, args []string, want string, declared bo
 	}
 	out, runErr := e.execProbe(target, args)
 	if runErr != nil {
-		return probeVerdict{
-			OK: false, Mode: probeModeExec, Reason: runErr.Error(),
-			CannotExec: errors.Is(runErr, errCannotExecute),
-		}
+		return probeVerdict{OK: false, Mode: probeModeExec, Reason: runErr.Error()}
 	}
 	if !declared || want == "" {
 		return probeVerdict{OK: true, Mode: probeModeExec}
@@ -247,11 +482,6 @@ func (e *Engine) runProbe(target string, args []string, want string, declared bo
 	}
 	return probeVerdict{OK: true, Mode: probeModeVersion}
 }
-
-// errCannotExecute marks a probe failure where the binary was never
-// entered, so a caller can tell it apart from a timeout or an
-// unparseable version banner (errors.Is).
-var errCannotExecute = errors.New("cannot execute")
 
 // execProbe runs the probe command with the engine's PATH (so a
 // launcher's `#!/usr/bin/env node` shebang resolves against the engine's
@@ -273,12 +503,12 @@ func (e *Engine) execProbe(target string, args []string) (string, error) {
 	}
 	exit, isExit := errors.AsType[*exec.ExitError](err)
 	if err != nil && !isExit {
-		return out.String(), fmt.Errorf("%w: %w", errCannotExecute, err)
+		return out.String(), fmt.Errorf("cannot execute: %w", err)
 	}
 	// The loader's own diagnostic (stderr) is the only description of
 	// why the binary would not run.
 	if isExit && exit.ExitCode() == exitCouldNotExecute {
-		return out.String(), fmt.Errorf("%w: %s", errCannotExecute, probeFailureDetail(out.String()))
+		return out.String(), fmt.Errorf("cannot execute: %s", probeFailureDetail(out.String()))
 	}
 	return out.String(), nil
 }
@@ -326,40 +556,57 @@ func derivedProbeName(name string, t *Tool) string {
 
 // probeFingerprint identifies what is about to be probed, so a cached
 // verdict is only reused for the exact same binary, recorded version and
-// probe shape. Assembled with keyenc rather than concatenated: the
-// resolved path and the wanted version can both contain a separator, so
-// a raw join lets one tool's fingerprint collide with another's; the
-// arg list nests for the same reason (["--version"] vs ["--","version"]
-// must not share a joined form).
-func probeFingerprint(target, want string, args []string) (string, error) {
+// probe shape. declaredArgs is the definition's list before defaulting:
+// declaring the default ["--version"] runs the same argv but grades the
+// version, so it must not reuse an undeclared verdict. Assembled with
+// keyenc because the path, version and args can each hold a separator
+// (["--version"] vs ["--","version"] must not share a joined form).
+func probeFingerprint(target, want string, declaredArgs []string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(target)
 	if err != nil {
 		return "", err
 	}
-	fi, err := os.Stat(resolved)
+	parts, err := fileIdentity(resolved)
 	if err != nil {
 		return "", err
 	}
-	return keyenc.Join(
-		resolved,
-		strconv.FormatInt(fi.Size(), 10),
-		strconv.FormatInt(fi.ModTime().UnixNano(), 10),
-		want,
-		keyenc.Join(args...),
-	), nil
+	return keyenc.Join(append(parts, want, keyenc.Join(declaredArgs...))...), nil
 }
 
 // versionAnswered reports whether a probe's output claims the recorded
 // version. Upstream banners are inconsistent about the v prefix and case
-// ("jq-1.8.1", "go version go1.26.5", "v24.18.0"), so the comparison is
-// a case-insensitive containment check on the version with any leading v
-// trimmed from both sides.
+// ("jq-1.8.1", "go version go1.26.5", "v24.18.0"), so the version, any
+// leading v trimmed, is found case-insensitively as a whole number: one
+// inside a longer number (11.2.3 or 1.2.30 for 1.2.3) does not count, and
+// text after it (a label, commit hash or platform) is not read, because
+// the check catches a different binary and no suffix grammar is total.
 func versionAnswered(out, want string) bool {
 	needle := strings.ToLower(strings.TrimPrefix(want, "v"))
 	if needle == "" {
 		return true
 	}
-	return strings.Contains(strings.ToLower(out), needle)
+	hay := strings.ToLower(out)
+	for from := 0; ; {
+		i := strings.Index(hay[from:], needle)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(needle)
+		if !versionContinues(hay[:start], true) && !versionContinues(hay[end:], false) {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+func versionContinues(side string, before bool) bool {
+	digitAt := func(i int) bool { return i >= 0 && i < len(side) && side[i] >= '0' && side[i] <= '9' }
+	if before {
+		n := len(side)
+		return digitAt(n-1) || n >= 2 && side[n-1] == '.' && digitAt(n-2)
+	}
+	return digitAt(0) || len(side) >= 2 && side[0] == '.' && digitAt(1)
 }
 
 // firstLine is the reportable head of a probe answer (bounded, so a

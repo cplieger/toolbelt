@@ -79,9 +79,8 @@ func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string) error {
 }
 
 // inspectRoots judges every managed root: ConfigDir, ToolsDir, and the
-// launcher/ecosystem dirs beneath it (bin, opt, npm, python). The npm
-// and python PARENTS are judged too, since either can redirect the
-// launcher directory beneath it. ConfigDir is exempt from the
+// managedDirs beneath it. Each parent is judged too, since it can redirect
+// the directory beneath it. ConfigDir is exempt from the
 // containment leg alone (it is legitimately outside ToolsDir), not from
 // the symlink, type or mode legs.
 func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {

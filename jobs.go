@@ -67,6 +67,10 @@ type job struct {
 	ring  []string
 	start int // ring read index
 	count int
+
+	// reserved marks a job holding its place in pending before publish:
+	// it is not runnable, and no view, lookup or cancel can see it.
+	reserved bool
 }
 
 func (j *job) appendLine(line string) {
@@ -156,53 +160,111 @@ func newJobQueue(onChanged func(*Job), onOutput func(string, []string), log *slo
 	return q
 }
 
-// Enqueue adds a job. Returns an error on shutdown, or when the queue is
-// full and the job is not a reconcile.
+// Enqueue adds a runnable job. A queued reconcile reads the manifest when it
+// starts, so it is returned instead of a second one; that bounds reconciles
+// to one queued job, so they are exempt from jobQueueCap and fail only on
+// shutdown. Any other kind also fails on a full queue.
 func (q *jobQueue) Enqueue(kind string, names []string) (*Job, error) {
-	return q.enqueue(kind, names, nil)
-}
-
-// EnqueueRemoval adds an uninstall job carrying the just-deleted
-// manifest entries for source-specific cleanup.
-func (q *jobQueue) EnqueueRemoval(names []string, removed map[string]Tool) (*Job, error) {
-	return q.enqueue(JobKindUninstall, names, removed)
-}
-
-// enqueue admits a job. A reconcile reads the manifest when it starts, so a queued one already
-// covers every later request and is returned instead of a second job; that bounds reconciles to
-// one queued job, so they are exempt from jobQueueCap and a converge request fails only on
-// shutdown.
-func (q *jobQueue) enqueue(kind string, names []string, removed map[string]Tool) (*Job, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if q.stopped {
-		return nil, errors.New("engine shutting down")
-	}
-	if kind == JobKindReconcile {
+	if kind == JobKindReconcile && !q.stopped {
 		for _, j := range q.pending {
-			if j.kind == JobKindReconcile {
+			if j.kind == JobKindReconcile && !j.reserved {
 				return j.view(false), nil
 			}
 		}
-	} else if len(q.pending) >= jobQueueCap {
-		return nil, errors.New("too many queued tool jobs")
+	}
+	j, err := q.reserveLocked(kind, names, nil)
+	if err != nil {
+		return nil, err
+	}
+	return q.publishLocked(j), nil
+}
+
+// reserve admits a job and holds its place in the run order without
+// making it runnable or visible, so a caller can commit the state the job
+// acts on before the worker may start it. Every reservation ends in
+// exactly one publish or release; until then the worker waits behind it.
+func (q *jobQueue) reserve(kind string, names []string, removed map[string]Tool) (*job, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.reserveLocked(kind, names, removed)
+}
+
+func (q *jobQueue) reserveLocked(kind string, names []string, removed map[string]Tool) (*job, error) {
+	if q.stopped {
+		return nil, ErrShuttingDown
+	}
+	if kind != JobKindReconcile && len(q.pending) >= jobQueueCap {
+		return nil, ErrQueueFull
 	}
 	q.nextID++
 	j := &job{
-		id:      fmt.Sprintf("tj-%d-%d", time.Now().UnixMilli(), q.nextID),
-		kind:    kind,
-		names:   append([]string{}, names...),
-		state:   JobQueued,
-		created: time.Now(),
-		removed: removed,
+		id:       fmt.Sprintf("tj-%d-%d", time.Now().UnixMilli(), q.nextID),
+		kind:     kind,
+		names:    append([]string{}, names...),
+		state:    JobQueued,
+		created:  time.Now(),
+		removed:  removed,
+		reserved: true,
 	}
 	q.pending = append(q.pending, j)
+	return j, nil
+}
+
+// publish makes a reserved job runnable and visible. After Close it
+// returns the job cancelled by shutdown, as if queued and drained.
+func (q *jobQueue) publish(j *job) *Job {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.publishLocked(j)
+}
+
+func (q *jobQueue) publishLocked(j *job) *Job {
+	j.reserved = false
+	q.notifyLocked(j)
+	if q.stopped {
+		q.removePendingLocked(j)
+		q.dropQueuedLocked(j, CancelShutdown)
+		return j.view(false)
+	}
+	q.wakeWorker()
+	return j.view(false)
+}
+
+// release abandons a reservation without trace; nil is a no-op so a caller
+// can release whatever its failed transaction reserved.
+func (q *jobQueue) release(j *job) {
+	if j == nil {
+		return
+	}
+	q.mu.Lock()
+	q.removePendingLocked(j)
+	q.mu.Unlock()
+	q.wakeWorker()
+}
+
+func (q *jobQueue) removePendingLocked(j *job) {
+	if i := slices.Index(q.pending, j); i >= 0 {
+		q.pending = slices.Delete(q.pending, i, i+1)
+	}
+}
+
+func (q *jobQueue) wakeWorker() {
 	select {
 	case q.wake <- struct{}{}:
 	default:
 	}
-	q.notifyLocked(j)
-	return j.view(false), nil
+}
+
+// firstQueuedLocked returns the oldest published queued job, or nil.
+func (q *jobQueue) firstQueuedLocked() *job {
+	for _, j := range q.pending {
+		if !j.reserved {
+			return j
+		}
+	}
+	return nil
 }
 
 // noteCancelLocked attributes a cancellation to cause. Caller holds the
@@ -231,7 +293,7 @@ func (q *jobQueue) Cancel(id string) bool {
 		return true
 	}
 	for i, j := range q.pending {
-		if j.id != id {
+		if j.id != id || j.reserved {
 			continue
 		}
 		q.pending = append(q.pending[:i], q.pending[i+1:]...)
@@ -258,8 +320,8 @@ func (q *jobQueue) Active() *Job {
 	if q.active != nil {
 		return q.active.view(false)
 	}
-	if len(q.pending) > 0 {
-		return q.pending[0].view(false)
+	if j := q.firstQueuedLocked(); j != nil {
+		return j.view(false)
 	}
 	return nil
 }
@@ -270,8 +332,8 @@ func (q *jobQueue) Snapshot() (active *Job, recent []*Job) {
 	defer q.mu.Unlock()
 	if q.active != nil {
 		active = q.active.view(true)
-	} else if len(q.pending) > 0 {
-		active = q.pending[0].view(true)
+	} else if j := q.firstQueuedLocked(); j != nil {
+		active = j.view(true)
 	}
 	for _, r := range slices.Backward(q.recent) {
 		recent = append(recent, r.view(true))
@@ -289,7 +351,7 @@ func (q *jobQueue) InstallingSet() map[string]bool {
 	defer q.mu.Unlock()
 	out := map[string]bool{}
 	add := func(j *job) {
-		if j.kind == JobKindUninstall || j.kind == JobKindDisable {
+		if j.reserved || j.kind == JobKindUninstall || j.kind == JobKindDisable {
 			return
 		}
 		names := j.names
@@ -356,7 +418,7 @@ func (q *jobQueue) lookup(id string) (*Job, bool) {
 		return nil, true
 	}
 	for _, j := range q.pending {
-		if j.id == id {
+		if j.id == id && !j.reserved {
 			return nil, true
 		}
 	}
@@ -375,10 +437,7 @@ func (q *jobQueue) Close() {
 		q.active.cancel()
 	}
 	q.mu.Unlock()
-	select {
-	case q.wake <- struct{}{}:
-	default:
-	}
+	q.wakeWorker()
 	q.wg.Wait()
 }
 
@@ -386,15 +445,18 @@ func (q *jobQueue) worker() {
 	for {
 		q.mu.Lock()
 		if q.stopped {
-			// Drain queued jobs as cancelled so waiters unblock.
+			// Drain queued jobs as cancelled so waiters unblock; publish
+			// settles a reservation.
 			for _, j := range q.pending {
-				q.dropQueuedLocked(j, CancelShutdown)
+				if !j.reserved {
+					q.dropQueuedLocked(j, CancelShutdown)
+				}
 			}
 			q.pending = nil
 			q.mu.Unlock()
 			return
 		}
-		if len(q.pending) == 0 {
+		if len(q.pending) == 0 || q.pending[0].reserved {
 			q.mu.Unlock()
 			<-q.wake
 			continue

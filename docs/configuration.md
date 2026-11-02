@@ -28,9 +28,9 @@ An overlay patch carries display fields and `essential`, which makes the engine 
 
 ### Root integrity check
 
-With `VerifyRootIntegrity` set, `New` refuses to start when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `python/` and `python/bin` exists and fails a check. Every listed path must be a directory that is not a symlink, that only its owner can write and that the engine can inspect. `ConfigDir` may live outside `ToolsDir`, and `ToolsDir`'s managed subdirectories must resolve inside the tools tree. A path that does not exist yet is skipped.
+With `VerifyRootIntegrity` set, `New` refuses to start when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `npm/lib`, `npm/lib/node_modules`, `python/`, `python/bin`, `python/tools` and `python/interpreters` exists and fails a check. Every listed path must be a directory that is not a symlink, that only its owner can write and that the engine can inspect. `ConfigDir` may live outside `ToolsDir`, and `ToolsDir`'s managed subdirectories must resolve inside the tools tree. A path that does not exist yet is skipped. `New` checks again after it has created `ConfigDir`, `ToolsDir` and `bin/`, so a root it created and the filesystem stored as writable by another account refuses to start as well, leaving what it created in place.
 
-The check only reports. It changes no mode and creates or repairs nothing. The error matches `ErrRootIntegrity` with `errors.Is`, and `errors.As` gives a `*RootIntegrityError` naming every path that failed. Turn it on when the tools tree lives on a volume someone else controls and your server runs privileged.
+The check only reports. It changes no mode and creates or repairs nothing. It judges those directories, not the files beneath them. The error matches `ErrRootIntegrity` with `errors.Is`, and `errors.As` gives a `*RootIntegrityError` naming every path that failed. Turn it on when the tools tree lives on a volume someone else controls and your server runs privileged.
 
 ## Catalog refresh helpers
 
@@ -49,7 +49,8 @@ Every field except the name is optional, and the catalog fills in the rest.
 | `pin` | Keep this version. Updates skip the entry |
 | `disabled` | Make the entry a template that installs nothing |
 | `requires` | Other tools this one needs, installed first |
-| `version_args` | The arguments that make the tool print its version, for example `["--version"]`. The install check then compares the printed version |
+| `python` | For a `pip:` entry, the Python version uv builds the tool on, such as `3.14`. Empty takes the newest. A change through `Patch` reinstalls an enabled tool, and a hand edit applies at its next install or reconcile |
+| `version_args` | The arguments that make the tool print its version, for example `["--version"]`. The install check then compares the printed version. When unset, an entry the catalog completes takes the catalog's, and otherwise the check runs `--version` and only requires an answer. An argument may not contain a NUL byte |
 | `install`, `uninstall`, `probe` | The bash scripts for a `manual` source |
 
 A `_comment` array at the top of `tools.json` survives the engine's rewrites.

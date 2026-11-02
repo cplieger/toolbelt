@@ -10,12 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -259,8 +262,8 @@ func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	if final.State != JobFailed {
 		t.Errorf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
 	}
-	if !strings.Contains(final.Error, "cannot run") {
-		t.Errorf("job error = %q, want it to say the tool cannot run", final.Error)
+	if !strings.Contains(final.Error, "cannot execute") {
+		t.Errorf("job error = %q, want it to say the tool cannot execute", final.Error)
 	}
 	inv, _ := e.Inventory()
 	row := inv.Tools[0]
@@ -277,6 +280,173 @@ func TestInstall_UnrunnableBinaryFailsTheInstall(t *testing.T) {
 	// also report that it could not record it.
 	if logs.has("not recorded") {
 		t.Errorf("the recorded verdict was reported as unrecordable: %v", logs.lines)
+	}
+}
+
+// TestInstall_LibraryOnlyNpmPackageIsAlreadyInstalled pins convergence for an
+// npm package that ships no bin (a preset or shared config): its installed
+// package.json is the proof, so neither an install nor a reconcile reruns npm,
+// and the inventory reads it as installed.
+func TestInstall_LibraryOnlyNpmPackageIsAlreadyInstalled(t *testing.T) {
+	const pkg = "@size-limit/preset-app"
+	fake := t.TempDir()
+	marker := filepath.Join(fake, "npm-ran")
+	if err := os.WriteFile(filepath.Join(fake, "npm"),
+		[]byte("#!/bin/sh\ntouch "+marker+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourceNpm: ""}})
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools[pkg] = Tool{Source: "npm:" + pkg, Version: "14.3.0"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.setToolStatus(pkg, func(s *ToolStatus) { s.InstalledVersion = "14.3.0" }); err != nil {
+		t.Fatal(err)
+	}
+	writeNpmPackage(t, e, pkg, `{"name":"@size-limit/preset-app","version":"14.3.0"}`)
+
+	job, err := e.Install(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if final.State != JobDone {
+		t.Errorf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if out := strings.Join(final.OutputTail, "\n"); !strings.Contains(out, pkg+" 14.3.0 already installed") {
+		t.Errorf("install output = %q, want it to report the package already installed", out)
+	}
+	if out := reconcileOutput(t, e); strings.Contains(out, "installing missing tools") {
+		t.Errorf("reconcile output = %q, want nothing missing", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("npm ran for a package that is already installed")
+	}
+	if row := inventoryByName(t, e)[pkg]; !row.Installed {
+		t.Errorf("inventory row = %+v, want installed", row)
+	}
+}
+
+// TestInstall_NoBinNpmPackageProofDecidesTheJob pins that an npm install
+// exiting 0 ends done only when the installed package.json proves the
+// requested version, the same proof the inventory reads, so a done job is
+// never followed by a reconcile that reruns npm.
+func TestInstall_NoBinNpmPackageProofDecidesTheJob(t *testing.T) {
+	const pkg = "stylelint-config-standard"
+	cases := []struct {
+		name       string
+		manifest   string // written by the fake npm; empty writes no package.json
+		wantDone   bool
+		wantReason string
+	}{
+		{name: "requested version installed", manifest: `{"name":"stylelint-config-standard","version":"1.0.0"}`, wantDone: true},
+		{name: "another version left in place", manifest: `{"name":"stylelint-config-standard","version":"0.9.0"}`, wantReason: `"0.9.0"`},
+		{name: "no package.json", wantReason: "package.json"},
+		{name: "malformed package.json", manifest: `{"version":`, wantReason: "package.json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourceNpm: ""}})
+			captureLogs(e)
+			dir := filepath.Join(e.toolsDir, "npm", "lib", "node_modules", pkg)
+			script := "#!/bin/sh\nexit 0\n"
+			if tc.manifest != "" {
+				script = fmt.Sprintf("#!/bin/sh\nmkdir -p '%s' && printf '%%s' '%s' > '%s/package.json'\n", dir, tc.manifest, dir)
+			}
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools[pkg] = Tool{Source: "npm:" + pkg, Version: "1.0.0"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install(pkg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+
+			row := inventoryByName(t, e)[pkg]
+			if tc.wantDone {
+				if final.State != JobDone || !row.Installed {
+					t.Errorf("job = %s (%q), installed = %v; want done and installed", final.State, final.Error, row.Installed)
+				}
+				return
+			}
+			if final.State != JobFailed {
+				t.Errorf("job state = %s, want failed (tail %v)", final.State, final.OutputTail)
+			}
+			if !strings.Contains(final.Error, tc.wantReason) || !strings.Contains(row.LastError, tc.wantReason) {
+				t.Errorf("job error = %q, last_error = %q, want both to carry %q", final.Error, row.LastError, tc.wantReason)
+			}
+			if row.Installed {
+				t.Error("the package reads as installed")
+			}
+		})
+	}
+}
+
+// TestInstall_ProbeVerdictDecidesThePipJob pins that an install whose venv
+// uv built on an interpreter outside the managed dir fails, as the inventory
+// reads that venv as not installed.
+func TestInstall_ProbeVerdictDecidesThePipJob(t *testing.T) {
+	foreign := newInterpreterHome(t, t.TempDir())
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"mkdir -p \"$UV_TOOL_DIR/x/bin\"\n" +
+		"echo \"home = " + foreign + "\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
+		"ln -sf \"" + foreign + "/python3\" \"$UV_TOOL_DIR/x/bin/python\"\n" +
+		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
+		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	e := pipEngine(t, "")
+	captureLogs(e)
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	final := waitJob(t, e, job.ID)
+	if final.State != JobFailed {
+		t.Errorf("install job = %s, want failed (tail %v)", final.State, final.OutputTail)
+	}
+	if row := inventoryRow(t, e, "x"); row.Installed || !strings.Contains(row.LastError, "is outside") {
+		t.Errorf("inventory row = %+v, want not installed with the probe's reason", row)
+	}
+}
+
+// TestInstall_VersionBannerMismatchFailsTheInstall pins that a bin answering
+// its declared version_args with another version fails the install, as the
+// inventory reads it as not installed and Reconcile would install it again.
+func TestInstall_VersionBannerMismatchFailsTheInstall(t *testing.T) {
+	e := newTestEngine(t, nil)
+	captureLogs(e)
+	job, err := e.Add(t.Context(), &AddRequest{
+		Name: "banner", Source: SourceManual, Version: "1.0.0", VersionArgs: []string{"--version"},
+		Install: `printf '#!/bin/sh\necho banner 9.9.9\n' > "$BIN/banner" && chmod 755 "$BIN/banner"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	final := waitJob(t, e, job.ID)
+	if final.State != JobFailed || !strings.Contains(final.Error, "9.9.9") {
+		t.Errorf("job = %s (%q), want failed naming the reported version", final.State, final.Error)
+	}
+	if row := inventoryRow(t, e, "banner"); row.Installed || !strings.Contains(row.LastError, "9.9.9") {
+		t.Errorf("inventory row = %+v, want not installed with the probe's reason", row)
 	}
 }
 
@@ -1352,9 +1522,9 @@ func TestInventory_LatestFromCacheAndSystem(t *testing.T) {
 	}
 	// Seed the version cache as an update job would.
 	e.versions.mu.Lock()
-	e.versions.cache[SourceManual] = "" // manual: never cached
-	e.versions.cache["npm:x"] = "9.9.9"
-	e.versions.cache["npm:y"] = "9.9.9"
+	e.versions.cache[latestKey{source: SourceManual}] = "" // manual: never cached
+	e.versions.cache[latestKey{source: "npm:x"}] = "9.9.9"
+	e.versions.cache[latestKey{source: "npm:y"}] = "9.9.9"
 	e.versions.mu.Unlock()
 
 	inv, err := e.Inventory()
@@ -1422,42 +1592,114 @@ func TestChecksumConfigured_FailsClosed(t *testing.T) {
 	}
 }
 
-// TestAdd_QueueFullRollsBackManifest: an add rejected by a full queue
-// must not leave a phantom manifest row.
-func TestAdd_QueueFullRollsBackManifest(t *testing.T) {
-	e := newTestEngine(t, nil)
+func saturateQueue(t *testing.T, e *Engine) {
+	t.Helper()
 	slow, err := e.Add(t.Context(), &AddRequest{
 		Name: "slow", Source: SourceManual, Version: "1",
-		Install: `sleep 3 && ` + binStub("slow"),
+		Install: "exec sleep 30",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Wait until the worker picks the slow job up (drains it from
-	// pending) so the cap-filling below is deterministic.
+	// The worker must drain the slow job from pending before the cap is
+	// counted, or one Update below lands in its slot.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if a := e.queue.Active(); a != nil && a.ID == slow.ID && a.State == JobRunning {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("slow job never started")
+			t.Fatal("Setup: slow job never started")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	for range jobQueueCap {
 		if _, err := e.Update(); err != nil {
-			t.Fatal(err) // filling to cap must succeed
+			t.Fatalf("Setup: filling the queue to its cap: %v", err)
 		}
 	}
+}
+
+func TestAdd_QueueFullLeavesNoRow(t *testing.T) {
+	e := newTestEngine(t, nil)
+	saturateQueue(t, e)
 	if _, err := e.Add(t.Context(), &AddRequest{
 		Name: "phantom", Source: SourceManual, Version: "1", Install: "true",
-	}); err == nil {
-		t.Error("expected queue-full error")
+	}); !errors.Is(err, ErrQueueFull) {
+		t.Errorf("Add on a full queue = %v, want ErrQueueFull", err)
 	}
 	m, _ := e.store.LoadManifest()
 	if _, exists := m.Tools["phantom"]; exists {
 		t.Error("rejected add left a manifest row")
+	}
+}
+
+// TestQueueRefusal_WritesNoManifest: a write the queue refuses is refused
+// before the manifest is written, so no undo write exists to clobber a
+// concurrent caller's accepted edit of the same field.
+func TestQueueRefusal_WritesNoManifest(t *testing.T) {
+	yes := true
+	python := "3.14"
+	dependent := Tool{Source: SourceManual, Version: "1", Install: "true", Requires: []string{"x"}}
+	cases := []struct {
+		call func(e *Engine) error
+		name string
+	}{
+		{name: "add", call: func(e *Engine) error {
+			_, err := e.Add(t.Context(), &AddRequest{Name: "new", Source: SourceManual, Version: "1", Install: "true"})
+			return err
+		}},
+		{name: "patch reinstalling the row", call: func(e *Engine) error {
+			_, err := e.Patch("x", PatchRequest{Python: &python})
+			return err
+		}},
+		{name: "forced disable cascading to a dependent", call: func(e *Engine) error {
+			_, err := e.Patch("x", PatchRequest{Disabled: &yes, Force: true})
+			return err
+		}},
+		{name: "remove with its dependents", call: func(e *Engine) error {
+			_, _, err := e.RemoveWithDependents("x")
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := pipEngine(t, "3.13")
+			saturateQueue(t, e)
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["x"] = Tool{Source: "pip:x", Version: "1.0.0", Python: "3.13"}
+				m.Tools["app"] = dependent
+				return nil
+			}); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			before, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			writes := 0
+			write := atomicWrite
+			swapBarriers(t, nil, nil, func(path string, data []byte) (bool, error) {
+				if path == e.store.manifestPath {
+					writes++
+				}
+				return write(path, data)
+			})
+
+			if err := tc.call(e); !errors.Is(err, ErrQueueFull) {
+				t.Errorf("call on a full queue = %v, want ErrQueueFull", err)
+			}
+			if writes != 0 {
+				t.Errorf("the refused call wrote the manifest %d times, want none", writes)
+			}
+			after, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !maps.EqualFunc(after.Tools, before.Tools, func(a, b Tool) bool { return reflect.DeepEqual(a, b) }) {
+				t.Errorf("manifest after the refusal = %+v, want %+v", after.Tools, before.Tools)
+			}
+		})
 	}
 }
 
@@ -2062,35 +2304,6 @@ func TestPruneOldVersions_Retention(t *testing.T) {
 	}
 }
 
-// TestMergeCatalogDefaults_ClonesSliceFields pins the one place catalog data
-// crosses into mutable state. The catalog lives in an atomic.Pointer and is
-// swapped whole on refresh, so every reader shares one copy; a manifest row is
-// mutated by Add, Patch and remove. Sharing a backing array between the two
-// means a row that ever grows or sorts its Requires rewrites what every other
-// reader of the live catalog sees.
-func TestMergeCatalogDefaults_ClonesSliceFields(t *testing.T) {
-	cat := CatalogEntry{
-		Name:        "widget",
-		Source:      SourceManual,
-		Requires:    []string{"node"},
-		VersionArgs: []string{"--version"},
-	}
-	tool := Tool{Source: SourceManual}
-	mergeCatalogDefaults(&tool, &cat)
-
-	// Write through the row the way a future edit would, in place rather than
-	// by replacing the slice header.
-	tool.Requires[0] = "CLOBBERED"
-	tool.VersionArgs[0] = "CLOBBERED"
-
-	if cat.Requires[0] != "node" {
-		t.Errorf("catalog Requires[0] = %q after the row was written through, want %q", cat.Requires[0], "node")
-	}
-	if cat.VersionArgs[0] != "--version" {
-		t.Errorf("catalog VersionArgs[0] = %q after the row was written through, want %q", cat.VersionArgs[0], "--version")
-	}
-}
-
 // TestMergeCatalogDefaults_KeepsFieldsTheRowAlreadySets pins the direction of
 // the merge: the catalog fills what a row LEFT unset and never overwrites what
 // the user wrote. Every field here is one an operator sets deliberately to
@@ -2610,4 +2823,1154 @@ func TestResolve_HydratesEssentialFromTheCatalog(t *testing.T) {
 	if _, _, err := e.Remove("gh"); err != nil {
 		t.Errorf("Remove(gh) after the selection released it = %v, want nil", err)
 	}
+}
+
+// pipEngine is an engine whose catalog implies no backend for pip:, holding
+// the enabled row x at 1.0.0 with the given python request.
+func pipEngine(t *testing.T, python string) *Engine {
+	t.Helper()
+	e := newTestEngine(t, &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourcePip: ""}})
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["x"] = Tool{Source: "pip:x", Version: "1.0.0", Python: python}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+// TestInstallTool_ReinstallsWhenThePythonRequestChanged pins that a venv
+// built on another interpreter request is rebuilt even though the version
+// matches and the launcher runs, and that the rebuilt row then converges.
+func TestInstallTool_ReinstallsWhenThePythonRequestChanged(t *testing.T) {
+	argv := fakeUV(t)
+	e := pipEngine(t, "3.14")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if got, want := readArgv(t, argv), []string{"tool install --reinstall --python 3.14 x==1.0.0"}; !slices.Equal(got, want) {
+		t.Errorf("uv argv = %q, want %q", got, want)
+	}
+	if got := e.store.State().Tools["x"].Python; got != "3.14" {
+		t.Errorf("recorded python = %q, want 3.14", got)
+	}
+
+	job, err = e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, job.ID)
+	if out := strings.Join(final.OutputTail, "\n"); !strings.Contains(out, "x 1.0.0 already installed") {
+		t.Errorf("second install output = %q, want already installed", out)
+	}
+	if got := readArgv(t, argv); len(got) != 1 {
+		t.Errorf("uv ran %d times, want once (argv %q)", len(got), got)
+	}
+}
+
+// venvUV puts a uv on PATH that appends its argv and interpreter env to the
+// returned file, modelling uv 0.13.6's venv handling. `tool uninstall` drops
+// the x venv and launcher. `tool install` exits 1 when failInstall is set,
+// before touching anything, as uv does when resolution fails. --python R
+// targets the newest UV_PYTHON_INSTALL_DIR entry cpython-R or cpython-R.*
+// (cpython-R.0 standing for a download) and rebuilds a venv not on it.
+// Without --python, as for a receipt that pins a request, a venv with a
+// resolvable bin/python is kept. --force drops the venv.
+func venvUV(t *testing.T, failInstall bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	argv := filepath.Join(dir, "argv")
+	fail := ""
+	if failInstall {
+		fail = "exit 1\n"
+	}
+	script := "#!/bin/sh\n" +
+		"echo \"$* UV_MANAGED_PYTHON=$UV_MANAGED_PYTHON UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR\" >> " + argv + "\n" +
+		"if [ \"$2\" = uninstall ]; then rm -rf \"$UV_TOOL_DIR/x\" \"$UV_TOOL_BIN_DIR/x\"; exit 0; fi\n" +
+		fail +
+		"case \" $* \" in *\" --force \"*) rm -rf \"$UV_TOOL_DIR/x\";; esac\n" +
+		"req=; prev=\n" +
+		"for a in \"$@\"; do [ \"$prev\" = --python ] && req=\"$a\"; prev=\"$a\"; done\n" +
+		"home=\"$UV_PYTHON_INSTALL_DIR/cpython-3.15.2/bin\"\n" +
+		"if [ -n \"$req\" ]; then\n" +
+		"target=$(ls -d \"$UV_PYTHON_INSTALL_DIR/cpython-$req\" \"$UV_PYTHON_INSTALL_DIR/cpython-$req\".* 2>/dev/null | sort -V | tail -n 1)\n" +
+		"home=\"${target:-$UV_PYTHON_INSTALL_DIR/cpython-$req.0}/bin\"\n" +
+		"grep -qxF \"home = $home\" \"$UV_TOOL_DIR/x/pyvenv.cfg\" 2>/dev/null || rm -rf \"$UV_TOOL_DIR/x\"\n" +
+		"fi\n" +
+		"if [ ! -e \"$UV_TOOL_DIR/x/bin/python\" ]; then\n" +
+		"mkdir -p \"$home\" \"$UV_TOOL_DIR/x/bin\"\n" +
+		"touch \"$home/python3\"\n" +
+		"echo \"home = $home\" > \"$UV_TOOL_DIR/x/pyvenv.cfg\"\n" +
+		"ln -sf \"$home/python3\" \"$UV_TOOL_DIR/x/bin/python\"\n" +
+		"fi\n" +
+		"printf '#!/bin/sh\\necho x 1.0.0\\n' > \"$UV_TOOL_BIN_DIR/x\"\n" +
+		"chmod +x \"$UV_TOOL_BIN_DIR/x\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "uv"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argv
+}
+
+// TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter pins the migration of a
+// venv built before the engine managed interpreters: it reads as not
+// installed, and an install names the interpreter, so uv builds a new venv on
+// a managed one. A venv already on the newest managed one is reinstalled in
+// place.
+func TestInstall_RebuildsAVenvOnAnUnmanagedInterpreter(t *testing.T) {
+	cases := []struct {
+		name      string
+		recorded  string
+		home      func(e *Engine) string
+		installed bool
+	}{
+		{
+			name: "unmanaged interpreter", recorded: "1.0.0",
+			home:      func(*Engine) string { return newInterpreterHome(t, t.TempDir()) },
+			installed: false,
+		},
+		{
+			name: "managed interpreter with an outdated version", recorded: "0.9.0",
+			home:      func(e *Engine) string { return newInterpreterHome(t, pythonInterpreterDir(e.toolsDir)) },
+			installed: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			argv := venvUV(t, false)
+			e := pipEngine(t, "")
+			writeStub(t, e, "x", "echo x 1.0.0")
+			if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+				s.InstalledVersion = tc.recorded
+				s.PMBins = []string{"x"}
+			}); err != nil {
+				t.Fatal(err)
+			}
+			writeVenv(t, e, "x", tc.home(e))
+			if got := inventoryRow(t, e, "x").Installed; got != tc.installed {
+				t.Errorf("inventory before the install: installed = %v, want %v", got, tc.installed)
+			}
+
+			job, err := e.Install("x")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if final := waitJob(t, e, job.ID); final.State != JobDone {
+				t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+			}
+			interpreters := pythonInterpreterDir(e.toolsDir)
+			want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+			if got := readArgv(t, argv); !slices.Equal(got, want) {
+				t.Errorf("uv runs = %q, want %q", got, want)
+			}
+			if !inventoryRow(t, e, "x").Installed {
+				t.Error("inventory after the install: x not installed")
+			}
+			cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(cfg), "home = "+interpreters+string(os.PathSeparator)) {
+				t.Errorf("pyvenv.cfg = %q, want home under %s", cfg, interpreters)
+			}
+		})
+	}
+}
+
+// TestInstall_UnresolvableRebuildKeepsTheVenv pins that rebuilding a venv on
+// an unmanaged interpreter never removes it first: when uv cannot resolve the
+// new one, the old venv and its launcher still run the tool.
+func TestInstall_UnresolvableRebuildKeepsTheVenv(t *testing.T) {
+	argv := venvUV(t, true)
+	e := pipEngine(t, "")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	home := newInterpreterHome(t, t.TempDir())
+	writeVenv(t, e, "x", home)
+	launcher := filepath.Join(pythonBinDir(e.toolsDir), "x")
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(launcher, []byte("#!/bin/sh\necho x 1.0.0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if final := waitJob(t, e, job.ID); final.State != JobFailed {
+		t.Fatalf("install job = %s, want failed (tail %v)", final.State, final.OutputTail)
+	}
+	want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + pythonInterpreterDir(e.toolsDir)}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("uv runs = %q, want %q", got, want)
+	}
+	cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+	if err != nil {
+		t.Errorf("venv after the failed rebuild: %v", err)
+	} else if !strings.Contains(string(cfg), "home = "+home+"\n") {
+		t.Errorf("pyvenv.cfg = %q, want the old home %s", cfg, home)
+	}
+	if _, err := os.Stat(launcher); err != nil {
+		t.Errorf("launcher after the failed rebuild: %v", err)
+	}
+}
+
+// TestInstall_RebuildsAVenvWhoseInterpreterIsGone pins the recovery path:
+// after an inventory read cached the launcher as working, its venv's
+// interpreter is deleted; an explicit install must then rebuild the venv
+// through uv on the engine-managed interpreters instead of reporting
+// "already installed".
+func TestInstall_RebuildsAVenvWhoseInterpreterIsGone(t *testing.T) {
+	argv := venvUV(t, false)
+	e := pipEngine(t, "")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dead := newInterpreterHome(t, pythonInterpreterDir(e.toolsDir))
+	writeVenv(t, e, "x", dead)
+	if !inventoryRow(t, e, "x").Installed {
+		t.Fatal("inventory before the interpreter died: x not installed")
+	}
+	if err := os.RemoveAll(filepath.Dir(dead)); err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	interpreters := filepath.Join(e.toolsDir, "python", "interpreters")
+	want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("uv runs = %q, want %q", got, want)
+	}
+	cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), "home = "+interpreters+string(os.PathSeparator)) {
+		t.Errorf("rebuilt pyvenv.cfg = %q, want home under %s", cfg, interpreters)
+	}
+}
+
+// TestInstall_ClearingThePythonRequestRebuildsOnTheNewest pins that removing
+// an entry's python request moves its venv to the newest managed interpreter:
+// uv keeps a venv whose receipt pins a request unless the install names an
+// interpreter (uv 0.13.6 install.rs#L1113).
+func TestInstall_ClearingThePythonRequestRebuildsOnTheNewest(t *testing.T) {
+	argv := venvUV(t, false)
+	e := pipEngine(t, "")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.Python = "3.14"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	interpreters := pythonInterpreterDir(e.toolsDir)
+	writeVenv(t, e, "x", interpreterHomeAt(t, interpreters, "cpython-3.14.10"))
+	newest := interpreterHomeAt(t, interpreters, "cpython-3.15.2")
+
+	job, err := e.Install("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if final := waitJob(t, e, job.ID); final.State != JobDone {
+		t.Fatalf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	want := []string{"tool install --reinstall --python 3 x==1.0.0 UV_MANAGED_PYTHON=1 UV_PYTHON_INSTALL_DIR=" + interpreters}
+	if got := readArgv(t, argv); !slices.Equal(got, want) {
+		t.Errorf("uv runs = %q, want %q", got, want)
+	}
+	cfg, err := os.ReadFile(filepath.Join(e.toolsDir, "python", "tools", "x", "pyvenv.cfg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), "home = "+newest+"\n") {
+		t.Errorf("pyvenv.cfg = %q, want home %s", cfg, newest)
+	}
+	if got := e.store.State().Tools["x"].Python; got != "" {
+		t.Errorf("recorded python = %q, want empty", got)
+	}
+}
+
+func TestPatch_PythonRequest(t *testing.T) {
+	t.Run("a change on an enabled row reinstalls with the request", func(t *testing.T) {
+		argv := fakeUV(t)
+		e := pipEngine(t, "")
+		py := "3.13"
+
+		job, err := e.Patch("x", PatchRequest{Python: &py})
+
+		if err != nil || job == nil {
+			t.Fatalf("Patch(python) = %v, %v, want an install job", job, err)
+		}
+		if final := waitJob(t, e, job.ID); final.State != JobDone {
+			t.Errorf("install job = %s, want done (tail %v)", final.State, final.OutputTail)
+		}
+		if got, want := readArgv(t, argv), []string{"tool install --reinstall --python 3.13 x==1.0.0"}; !slices.Equal(got, want) {
+			t.Errorf("uv argv = %q, want %q", got, want)
+		}
+	})
+	t.Run("the same value enqueues nothing", func(t *testing.T) {
+		e := pipEngine(t, "3.13")
+		py := "3.13"
+		if job, err := e.Patch("x", PatchRequest{Python: &py}); err != nil || job != nil {
+			t.Errorf("Patch(same python) = %v, %v, want nil, nil", job, err)
+		}
+	})
+	t.Run("a template stores the request without a job", func(t *testing.T) {
+		e := pipEngine(t, "")
+		disabled := true
+		if _, err := e.Patch("x", PatchRequest{Disabled: &disabled}); err != nil {
+			t.Fatal(err)
+		}
+		py := "3.13"
+
+		job, err := e.Patch("x", PatchRequest{Python: &py})
+
+		if err != nil || job != nil {
+			t.Errorf("Patch(python) on a template = %v, %v, want nil, nil", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
+			t.Errorf("stored python = %q, want 3.13", m.Tools["x"].Python)
+		}
+	})
+	t.Run("a path is refused and nothing changes", func(t *testing.T) {
+		e := pipEngine(t, "3.13")
+		py := "/usr/bin/python3"
+
+		job, err := e.Patch("x", PatchRequest{Python: &py})
+
+		if err == nil || job != nil {
+			t.Errorf("Patch(python path) = %v, %v, want an error", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); m.Tools["x"].Python != "3.13" {
+			t.Errorf("stored python = %q, want 3.13 unchanged", m.Tools["x"].Python)
+		}
+	})
+	t.Run("a non-pip row is refused", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		py := "3.13"
+		if _, err := e.Patch("m", PatchRequest{Python: &py}); err == nil || !strings.Contains(err.Error(), "only to pip:") {
+			t.Errorf("Patch(python) on a manual row error = %v, want the pip-only refusal", err)
+		}
+	})
+}
+
+func TestAdd_RefusesAPythonRequestOnANonPipSource(t *testing.T) {
+	e := newTestEngine(t, nil)
+
+	_, err := e.Add(t.Context(), &AddRequest{Name: "pyright", Source: "npm:pyright", Version: "1.1.0", Python: "3.14"})
+
+	if err == nil || !strings.Contains(err.Error(), "only to pip:") {
+		t.Errorf("Add error = %v, want the pip-only refusal", err)
+	}
+	if m, _ := e.store.LoadManifest(); len(m.Tools) != 0 {
+		t.Errorf("manifest = %v, want no row", m.Tools)
+	}
+}
+
+// TestInstall_RefusesARowTheHydratedSourceCannotTake: a source-less row's
+// version and python pass ParseManifest on the union grammar alone, so
+// hydration must not persist a source that makes the document unreadable;
+// the row stays source-less and its own install names the refusal.
+func TestInstall_RefusesARowTheHydratedSourceCannotTake(t *testing.T) {
+	cases := []struct {
+		name string
+		row  Tool
+		want string
+	}{
+		{name: "python on an npm source", row: Tool{Python: "3.14"}, want: `x: the catalog's source npm:x refuses this entry: python applies only to pip: sources`},
+		{name: "a Debian epoch on an npm source", row: Tool{Version: "1:2.3"}, want: `x: the catalog's source npm:x refuses this entry: version "1:2.3" is not a release tag`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, &Catalog{
+				Entries:  map[string]CatalogEntry{"x": {Source: "npm:x", Version: "1.0.0"}},
+				Backends: map[string]string{SourceNpm: ""},
+			})
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["x"] = tc.row
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			job, err := e.Install("x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			final := waitJob(t, e, job.ID)
+
+			if final.State != JobFailed || !strings.Contains(final.Error, tc.want) {
+				t.Errorf("install job = %s %q, want failed containing %q", final.State, final.Error, tc.want)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatalf("manifest unreadable after the job: %v", err)
+			}
+			if got := m.Tools["x"].Source; got != "" {
+				t.Errorf("source = %q, want the row left source-less", got)
+			}
+		})
+	}
+}
+
+// TestMutateManifest_RefusesADocumentItsReaderRefuses: the reader refuses
+// the whole document over one bad row, so a write of one would fail every
+// later read and New.
+func TestMutateManifest_RefusesADocumentItsReaderRefuses(t *testing.T) {
+	e := newTestEngine(t, nil)
+
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["jq"] = Tool{Source: "aqua:jqlang/jq", Version: "../x"}
+		return nil
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "jq:") {
+		t.Errorf("MutateManifest error = %v, want one naming jq", err)
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatalf("manifest unreadable after the refused write: %v", err)
+	}
+	if _, ok := m.Tools["jq"]; ok {
+		t.Error("the refused row was written")
+	}
+}
+
+// TestPatch_QueueFullLeavesEveryField: a patch whose job the queue
+// refuses is refused whole, so the manifest never records a request no job
+// will realise (a disabled row at a new version, an enabled one whose old
+// install stays on disk).
+func TestPatch_QueueFullLeavesEveryField(t *testing.T) {
+	str := func(s string) *string { return &s }
+	yes, no := true, false
+	pipRow := Tool{Source: "pip:x", Version: "1.0.0", Python: "3.13"}
+	manualRow := Tool{
+		Source: SourceManual, Version: "1", Description: "d", Install: "true",
+		Uninstall: "true", VersionArgs: []string{"-V"},
+	}
+	disabledRow := manualRow
+	disabledRow.Disabled = true
+	cases := []struct {
+		name string
+		row  Tool
+		req  PatchRequest
+	}{
+		{name: "python on an enabled row", row: pipRow, req: PatchRequest{Python: str("3.14")}},
+		{name: "disable with a python change", row: pipRow, req: PatchRequest{Disabled: &yes, Python: str("3.14")}},
+		{name: "disable with a version change", row: manualRow, req: PatchRequest{Disabled: &yes, Version: str("2")}},
+		{name: "enable with a version change", row: disabledRow, req: PatchRequest{Disabled: &no, Version: str("2")}},
+		{name: "every field in one request", row: manualRow, req: PatchRequest{
+			Version: str("2"), Pin: &yes, Description: str("e"), Requires: &[]string{"slow"},
+			Install: str("exit 0"), Uninstall: str("exit 0"), VersionArgs: &[]string{"--version"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := pipEngine(t, "3.13")
+			saturateQueue(t, e)
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["x"] = tc.row
+				return nil
+			}); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			if _, err := e.Patch("x", tc.req); !errors.Is(err, ErrQueueFull) {
+				t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPatchFields(t, m.Tools["x"], tc.row)
+		})
+	}
+	t.Run("a forced disable leaves its dependents enabled", func(t *testing.T) {
+		e := pipEngine(t, "3.13")
+		saturateQueue(t, e)
+		dependent := manualRow
+		dependent.Requires = []string{"x"}
+		if err := e.store.MutateManifest(func(m *Manifest) error {
+			m.Tools["app"] = dependent
+			return nil
+		}); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+
+		if _, err := e.Patch("x", PatchRequest{Disabled: &yes, Force: true, Version: str("2.0.0")}); !errors.Is(err, ErrQueueFull) {
+			t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
+		}
+		m, err := e.store.LoadManifest()
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertPatchFields(t, m.Tools["x"], pipRow)
+		assertPatchFields(t, m.Tools["app"], dependent)
+	})
+}
+
+func assertPatchFields(t *testing.T, got, want Tool) {
+	t.Helper()
+	if got.Version != want.Version || got.Python != want.Python || got.Disabled != want.Disabled ||
+		got.Pin != want.Pin || got.Description != want.Description || got.Install != want.Install ||
+		got.Uninstall != want.Uninstall {
+		t.Errorf("row = {version %q python %q disabled %v pin %v description %q install %q uninstall %q}, "+
+			"want {version %q python %q disabled %v pin %v description %q install %q uninstall %q}",
+			got.Version, got.Python, got.Disabled, got.Pin, got.Description, got.Install, got.Uninstall,
+			want.Version, want.Python, want.Disabled, want.Pin, want.Description, want.Install, want.Uninstall)
+	}
+	if !slices.Equal(got.Requires, want.Requires) {
+		t.Errorf("requires = %q, want %q", got.Requires, want.Requires)
+	}
+	if !slices.Equal(got.VersionArgs, want.VersionArgs) {
+		t.Errorf("version_args = %q, want %q", got.VersionArgs, want.VersionArgs)
+	}
+}
+
+// fakeRoot makes AptAvailable answer as it does for root, so the apt paths
+// run against stubs unprivileged. Call it before newTestEngine: cleanups run
+// last in, first out, so the engine's worker stops before geteuid is restored.
+func fakeRoot(t *testing.T) {
+	t.Helper()
+	prev := geteuid
+	geteuid = func() int { return 0 }
+	t.Cleanup(func() { geteuid = prev })
+}
+
+// aptStub models dpkg for one amd64 package with logging apt-mark, apt-get,
+// dpkg-query and apt-cache stubs and an amd64 dpkg. The files installed and
+// held in its dir are dpkg's record, which dpkg-query prints in the -f format
+// it is given (held but not installed reads "hold not-installed", no record
+// answers as unknown); a call whose first argument has a gate waits until
+// open(that argument). apt-get refuses a held package, as apt-get -y does
+// (apt-get(8)); mark-fail, get-fail and failQueriesAfter make apt-mark,
+// apt-get and dpkg-query fail.
+type aptStub struct {
+	dir, log string
+}
+
+// stubApt puts the stubs ahead of the real trusted dirs rather than
+// replacing them: the stubs and the queue's jobs still resolve sh, touch and
+// rm there, and the set must be in place before the engine's worker starts
+// reading it.
+func stubApt(t *testing.T, gated ...string) *aptStub {
+	t.Helper()
+	s := &aptStub{dir: t.TempDir()}
+	s.log = filepath.Join(s.dir, "apt.log")
+	d := s.dir + "/"
+	gate := ""
+	for _, g := range gated {
+		gate += g + ") while [ ! -e " + d + g + " ]; do sleep 0.02; done;;\n"
+	}
+	wait := "case \"$1\" in\n" + gate + "esac\n"
+	scripts := map[string]string{
+		"apt-mark": "echo \"mark $*\" >> " + s.log + "\n" + wait +
+			"[ -e " + d + "mark-fail ] && { echo 'E: apt-mark failed' >&2; exit 1; }\n" +
+			"case \"$1\" in hold) touch " + d + "held;; unhold) rm -f " + d + "held;; esac\n" +
+			"echo \"mark-end $1\" >> " + s.log + "\n",
+		"apt-get": "echo \"apt-get $*\" >> " + s.log + "\n" + wait +
+			"if [ -e " + d + "held ]; then case \" $* \" in *' --allow-change-held-packages '*) ;; *)\n" +
+			"echo 'E: Held packages were changed and -y was used without --allow-change-held-packages.' >&2; exit 100;; esac; fi\n" +
+			"[ -e " + d + "get-fail ] && { echo 'E: install failed' >&2; exit 100; }\n" +
+			"touch " + d + "installed\n" +
+			"echo \"apt-get-end $1\" >> " + s.log + "\n",
+		"dpkg-query": "if [ -e " + d + "query-budget ]; then read n < " + d + "query-budget\n" +
+			"[ \"$n\" -gt 0 ] || { echo 'dpkg-query: error: parsing file /var/lib/dpkg/status' >&2; exit 2; }\n" +
+			"echo $((n - 1)) > " + d + "query-budget; fi\n" +
+			"want=install; [ -e " + d + "held ] && want=hold\n" +
+			"status=installed; version=1.7.1-1; [ -e " + d + "installed ] || { status=not-installed; version=; }\n" +
+			"[ $status = installed ] || [ $want = hold ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
+			"case \"$2\" in *Status-Want*) printf 'amd64\\t%s\\t%s\\t%s\\n' $want $status \"$version\";; *) echo \"$status $version\";; esac\n",
+		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: 1.7.1-1\\n'\n",
+		"dpkg":      "[ \"$1\" = --print-architecture ] && echo amd64\n",
+	}
+	for name, body := range scripts {
+		if err := os.WriteFile(filepath.Join(s.dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+	prev := systemBinDirs
+	systemBinDirs = append([]string{s.dir}, prev...)
+	t.Cleanup(func() { systemBinDirs = prev })
+	return s
+}
+
+// set creates the named state files (installed, held, mark-fail, get-fail).
+func (s *aptStub) set(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(s.dir, n), nil, 0o600); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+}
+
+// failQueriesAfter lets n more dpkg-query calls answer, then fails each
+// later one with exit 2, dpkg-query's fatal-error status.
+func (s *aptStub) failQueriesAfter(t *testing.T, n int) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.dir, "query-budget"), []byte(strconv.Itoa(n)+"\n"), 0o600); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+}
+
+// clear removes a state file.
+func (s *aptStub) clear(t *testing.T, name string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(s.dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+}
+
+// held reports dpkg's hold in the model.
+func (s *aptStub) held(t *testing.T) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(s.dir, "held"))
+	return err == nil
+}
+
+// open releases the calls waiting on gate; safe from another goroutine.
+func (s *aptStub) open(t *testing.T, gate string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.dir, gate), nil, 0o600); err != nil {
+		t.Errorf("open gate %s: %v", gate, err)
+	}
+}
+
+func (s *aptStub) lines(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(s.log)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// ran reports whether any logged call starts with prefix.
+func (s *aptStub) ran(t *testing.T, prefix string) bool {
+	t.Helper()
+	return slices.ContainsFunc(s.lines(t), func(l string) bool { return strings.HasPrefix(l, prefix) })
+}
+
+// await reports whether a call logged line within d.
+func (s *aptStub) await(t *testing.T, line string, d time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		if slices.Contains(s.lines(t), line) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// setAptRow writes a jq apt: row at 1.6-1; recorded also writes a state row
+// at that version, so the install fast path takes it as already installed.
+func setAptRow(t *testing.T, e *Engine, pin, recorded bool) {
+	t.Helper()
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		m.Tools["jq"] = Tool{Source: "apt:jq", Version: "1.6-1", Pin: pin}
+		return nil
+	}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if !recorded {
+		return
+	}
+	if err := e.store.setToolStatus("jq", func(st *ToolStatus) { st.InstalledVersion = "1.6-1" }); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+}
+
+// wantJobState waits for the job and checks its terminal state.
+func wantJobState(t *testing.T, e *Engine, jv *Job, want string) {
+	t.Helper()
+	if jv == nil {
+		t.Fatalf("job = nil, want one ending %s", want)
+	}
+	if got := waitJob(t, e, jv.ID); got.State != want {
+		t.Errorf("job %s = %s (%s), want %s; output %q", jv.Kind, got.State, got.Error, want, got.OutputTail)
+	}
+}
+
+// TestAptHold_FollowsThePin: the manifest pin is the dpkg hold the engine
+// wants, so every job that installs an apt: row ends with the hold equal to
+// the row's pin as it stands then, a hold failure fails the job, and
+// Reconcile repairs a hold that disagrees with the pin.
+func TestAptHold_FollowsThePin(t *testing.T) {
+	yes, no, v := true, false, "1.7.1-1"
+	patch := func(t *testing.T, e *Engine, req *PatchRequest) *Job {
+		t.Helper()
+		jv, err := e.Patch("jq", *req)
+		if err != nil {
+			t.Fatalf("Patch = %v", err)
+		}
+		return jv
+	}
+	install := func(t *testing.T, e *Engine) *Job {
+		t.Helper()
+		jv, err := e.Install("jq")
+		if err != nil {
+			t.Fatalf("Install(jq) = %v", err)
+		}
+		return jv
+	}
+	reconcile := func(t *testing.T, e *Engine) *Job {
+		t.Helper()
+		jv, _, err := e.Reconcile(ReconcileMissing)
+		if err != nil {
+			t.Fatalf("Reconcile = %v", err)
+		}
+		return jv
+	}
+	const aptGetLine = "apt-get -o DPkg::Lock::Timeout=60 -y --no-install-recommends install -- jq"
+
+	t.Run("a refused patch runs no apt call", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed")
+		e := newTestEngine(t, nil)
+		saturateQueue(t, e)
+		setAptRow(t, e, false, true)
+
+		if _, err := e.Patch("jq", PatchRequest{Pin: &yes, Version: &v}); !errors.Is(err, ErrQueueFull) {
+			t.Errorf("Patch on a full queue = %v, want ErrQueueFull", err)
+		}
+		if got := s.lines(t); got != nil {
+			t.Errorf("apt calls = %q for a refused patch, want none", got)
+		}
+	})
+	t.Run("a pin holds the installed package without reinstalling it", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Pin: &yes}), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after a pin; calls %q", s.lines(t))
+		}
+		if s.ran(t, "apt-get") {
+			t.Errorf("calls = %q, want no apt-get for an installed package", s.lines(t))
+		}
+	})
+	t.Run("an unpin releases the hold", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Pin: &no}), JobDone)
+
+		if s.held(t) {
+			t.Errorf("held = true after an unpin; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a pin where apt is unavailable queues no job", func(t *testing.T) {
+		prev := geteuid
+		geteuid = func() int { return 1000 }
+		t.Cleanup(func() { geteuid = prev })
+		s := stubApt(t)
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+
+		if jv := patch(t, e, &PatchRequest{Pin: &yes}); jv != nil {
+			t.Errorf("Patch(pin) job = %+v, want none without apt", jv)
+		}
+		if m, _ := e.store.LoadManifest(); !m.Tools["jq"].Pin {
+			t.Error("manifest pin = false, want the pin stored")
+		}
+		if got := s.lines(t); got != nil {
+			t.Errorf("apt calls = %q, want none", got)
+		}
+	})
+	t.Run("a patch after a remove runs no apt call", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, false)
+		if _, _, err := e.Remove("jq"); err != nil {
+			t.Fatalf("Remove = %v", err)
+		}
+
+		if _, err := e.Patch("jq", PatchRequest{Pin: &yes}); !errors.Is(err, ErrNotFound) {
+			t.Errorf("Patch after Remove = %v, want ErrNotFound", err)
+		}
+		if got := s.lines(t); got != nil {
+			t.Errorf("apt calls = %q for a removed row, want none", got)
+		}
+	})
+	t.Run("a version patch on a held pinned row installs and stays held", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Version: &v, Pin: &yes}), JobDone)
+
+		if !s.ran(t, "apt-get-end") {
+			t.Errorf("calls = %q, want apt-get to install the new version", s.lines(t))
+		}
+		if !s.held(t) {
+			t.Errorf("held = false, want the pinned row held after its install; calls %q", s.lines(t))
+		}
+	})
+	t.Run("an explicit update of a held pinned row installs and stays held", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		jv, err := e.Update("jq")
+		if err != nil {
+			t.Fatalf("Update(jq) = %v", err)
+		}
+		wantJobState(t, e, jv, JobDone)
+
+		if m, _ := e.store.LoadManifest(); m.Tools["jq"].Version != v {
+			t.Errorf("manifest version = %q, want the candidate %s", m.Tools["jq"].Version, v)
+		}
+		if !s.held(t) {
+			t.Errorf("held = false, want the pinned row held after its update; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a failed install restores the hold it lifted", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held", "get-fail")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Version: &v}), JobFailed)
+
+		if !s.held(t) {
+			t.Errorf("held = false after a failed install of a pinned row; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a failed apt-mark fails the install and reconcile repairs it", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "mark-fail")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, false)
+
+		wantJobState(t, e, install(t, e), JobFailed)
+		if got := e.store.State().Tools["jq"].LastError; !strings.Contains(got, "apt-mark hold jq") {
+			t.Errorf("recorded error = %q, want the apt-mark failure", got)
+		}
+		s.clear(t, "mark-fail")
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after the reconcile; calls %q", s.lines(t))
+		}
+		if got := e.store.State().Tools["jq"].LastError; got != "" {
+			t.Errorf("recorded error = %q after the repair, want none", got)
+		}
+	})
+	t.Run("an install releases the hold on a package that is not installed", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, false)
+
+		wantJobState(t, e, install(t, e), JobDone)
+
+		if s.held(t) || !s.ran(t, "apt-get-end") {
+			t.Errorf("held = %v, calls %q; want the hold released and apt-get to install", s.held(t), s.lines(t))
+		}
+	})
+	t.Run("a failed hold query fails the pin and reconcile repairs it", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+		// The fast path's probe answers; the hold sync's query is the one
+		// that fails.
+		s.failQueriesAfter(t, 1)
+
+		wantJobState(t, e, patch(t, e, &PatchRequest{Pin: &yes}), JobFailed)
+		if got := e.store.State().Tools["jq"].LastError; !strings.Contains(got, "parsing file") {
+			t.Errorf("recorded error = %q, want the dpkg-query failure", got)
+		}
+		if s.ran(t, "mark") {
+			t.Errorf("calls = %q, want no apt-mark over an unread record", s.lines(t))
+		}
+		s.clear(t, "query-budget")
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after the reconcile; calls %q", s.lines(t))
+		}
+		if got := e.store.State().Tools["jq"].LastError; got != "" {
+			t.Errorf("recorded error = %q after the repair, want none", got)
+		}
+	})
+	t.Run("reconcile holds a pinned package the image already ships", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if !s.held(t) {
+			t.Errorf("held = false after the reconcile; calls %q", s.lines(t))
+		}
+		if s.ran(t, "apt-get") {
+			t.Errorf("calls = %q, want no apt-get for an installed package", s.lines(t))
+		}
+	})
+	t.Run("reconcile releases a hold on an unpinned row", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, true)
+
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if s.held(t) {
+			t.Errorf("held = true after the reconcile of an unpinned row; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a converged row reconciles without apt-get or apt-mark", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		wantJobState(t, e, reconcile(t, e), JobDone)
+
+		if s.ran(t, "mark") || s.ran(t, "apt-get") {
+			t.Errorf("calls = %q, want none for a converged row", s.lines(t))
+		}
+	})
+	t.Run("overlapping pin patches end with the hold equal to the last pin", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t, "unhold")
+		s.set(t, "installed", "held")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, true)
+
+		unpin := patch(t, e, &PatchRequest{Pin: &no})
+		if !s.await(t, "mark unhold -- jq", 5*time.Second) {
+			t.Fatalf("Setup: the unpin never ran apt-mark: %q", s.lines(t))
+		}
+		pin := patch(t, e, &PatchRequest{Pin: &yes})
+		s.open(t, "unhold")
+		wantJobState(t, e, unpin, JobDone)
+		wantJobState(t, e, pin, JobDone)
+
+		if m, _ := e.store.LoadManifest(); !m.Tools["jq"].Pin {
+			t.Errorf("manifest pin = false, want the later patch's true")
+		}
+		if !s.held(t) {
+			t.Errorf("held = false, want the last patch's pin; calls %q", s.lines(t))
+		}
+	})
+	t.Run("an install of an unpinned row runs no apt-mark", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t)
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, false, false)
+
+		wantJobState(t, e, install(t, e), JobDone)
+
+		if s.ran(t, "mark") || s.held(t) {
+			t.Errorf("calls = %q, want no apt-mark", s.lines(t))
+		}
+	})
+	t.Run("an unpin during the install stands", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t, "-o")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, false)
+		jv := install(t, e)
+		if !s.await(t, aptGetLine, 5*time.Second) {
+			t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
+		}
+
+		unpin := patch(t, e, &PatchRequest{Pin: &no})
+		s.open(t, "-o")
+		wantJobState(t, e, jv, JobDone)
+		wantJobState(t, e, unpin, JobDone)
+
+		if s.held(t) {
+			t.Errorf("held = true, want the unpin to stand; calls %q", s.lines(t))
+		}
+	})
+	t.Run("a remove during the install adds no hold", func(t *testing.T) {
+		fakeRoot(t)
+		s := stubApt(t, "-o")
+		e := newTestEngine(t, nil)
+		setAptRow(t, e, true, false)
+		jv := install(t, e)
+		if !s.await(t, aptGetLine, 5*time.Second) {
+			t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
+		}
+
+		if _, _, err := e.Remove("jq"); err != nil {
+			t.Fatalf("Remove = %v", err)
+		}
+		s.open(t, "-o")
+		waitJob(t, e, jv.ID)
+
+		if s.held(t) || s.ran(t, "mark hold") {
+			t.Errorf("calls = %q, want no hold for a removed row", s.lines(t))
+		}
+	})
+}
+
+// TestPatch_VersionArgs: version_args is probe input only, so a patch stores
+// it without a job and the next probe grades the version it declares
+// (Tool.VersionArgs); execve(2) arguments are NUL-terminated, so a NUL
+// element is refused rather than stored as a tool that can never execute.
+func TestPatch_VersionArgs(t *testing.T) {
+	t.Run("declaring args stores them and the next probe grades the version", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		writeStub(t, e, "m", "echo m 9.9.9")
+		if !inventoryRow(t, e, "m").Installed {
+			t.Fatal("Setup: undeclared args should only require an answer")
+		}
+		args := []string{"--version"}
+
+		job, err := e.Patch("m", PatchRequest{VersionArgs: &args})
+
+		if err != nil || job != nil {
+			t.Fatalf("Patch(version_args) = %v, %v, want nil, nil", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); !slices.Equal(m.Tools["m"].VersionArgs, args) {
+			t.Errorf("stored version_args = %q, want %q", m.Tools["m"].VersionArgs, args)
+		}
+		if inventoryRow(t, e, "m").Installed {
+			t.Error("row prints 9.9.9 against recorded 1 under declared args, want not installed")
+		}
+	})
+	t.Run("an empty list clears them", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		declared := []string{"version"}
+		if _, err := e.Patch("m", PatchRequest{VersionArgs: &declared}); err != nil {
+			t.Fatal(err)
+		}
+		empty := []string{}
+
+		if _, err := e.Patch("m", PatchRequest{VersionArgs: &empty}); err != nil {
+			t.Fatal(err)
+		}
+
+		if m, _ := e.store.LoadManifest(); m.Tools["m"].VersionArgs != nil {
+			t.Errorf("stored version_args = %q, want nil", m.Tools["m"].VersionArgs)
+		}
+	})
+	t.Run("a NUL element is refused and nothing changes", func(t *testing.T) {
+		e := newTestEngine(t, nil)
+		addManual(t, e, "m", nil)
+		bad := []string{"--version\x00"}
+
+		job, err := e.Patch("m", PatchRequest{VersionArgs: &bad})
+
+		if err == nil || job != nil || !strings.Contains(err.Error(), "NUL") {
+			t.Errorf("Patch(NUL version_args) = %v, %v, want the NUL refusal", job, err)
+		}
+		if m, _ := e.store.LoadManifest(); m.Tools["m"].VersionArgs != nil {
+			t.Errorf("stored version_args = %q, want nil unchanged", m.Tools["m"].VersionArgs)
+		}
+	})
+}
+
+// TestAdd_VersionArgs: an Add may declare the probe's args like every other
+// manifest field; an empty list is the same as none, so the catalog's apply.
+func TestAdd_VersionArgs(t *testing.T) {
+	cat := &Catalog{Entries: map[string]CatalogEntry{
+		"c": {Source: SourceManual, Version: "1", VersionArgs: []string{"version"}},
+	}}
+	cases := []struct {
+		name string
+		req  AddRequest
+		want []string
+	}{
+		{name: "declared on the request", req: AddRequest{Name: "m", Source: SourceManual, Version: "1", VersionArgs: []string{"-V"}}, want: []string{"-V"}},
+		{name: "the request wins over the catalog", req: AddRequest{Name: "c", VersionArgs: []string{"-V"}}, want: []string{"-V"}},
+		{name: "an empty list takes the catalog's", req: AddRequest{Name: "c", VersionArgs: []string{}}, want: []string{"version"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, cat)
+			tc.req.Disabled = true
+
+			if _, err := e.Add(t.Context(), &tc.req); err != nil {
+				t.Fatal(err)
+			}
+
+			if m, _ := e.store.LoadManifest(); !slices.Equal(m.Tools[tc.req.Name].VersionArgs, tc.want) {
+				t.Errorf("stored version_args = %q, want %q", m.Tools[tc.req.Name].VersionArgs, tc.want)
+			}
+		})
+	}
+	t.Run("a NUL element is refused before the latest version is resolved", func(t *testing.T) {
+		e := newTestEngineClient(t, nil, offlineClient(), nil)
+
+		_, err := e.Add(t.Context(), &AddRequest{Name: "m", Source: "npm:m", VersionArgs: []string{"a\x00b"}})
+
+		if err == nil || err.Error() != "version_args[0] contains a NUL byte" {
+			t.Errorf("Add error = %v, want the NUL refusal", err)
+		}
+		if m, _ := e.store.LoadManifest(); len(m.Tools) != 0 {
+			t.Errorf("manifest = %v, want no row", m.Tools)
+		}
+	})
 }
