@@ -1112,6 +1112,58 @@ func TestLatestGoModule_PrefixCap(t *testing.T) {
 			t.Errorf("asked %d paths, want %d", len(*asked), maxGoModulePrefixes)
 		}
 	})
+	t.Run("a path past the cap whose prefixes are not module paths is refused", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := "example.com" + strings.Repeat("/v1", maxGoModulePrefixes)
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoModulePrefixes)) {
+			t.Errorf("Latest = %v, want an error naming the cap of %d", err, maxGoModulePrefixes)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+	})
+}
+
+func TestLatestGoModule_PathLengthLimit(t *testing.T) {
+	t.Run("a path of the limit is refused before any request", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := "example.com/" + strings.Repeat("a", maxGoPackagePathLen-len("example.com/"))
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoPackagePathLen)) {
+			t.Errorf("Latest = %v, want an error naming the limit of %d", err, maxGoPackagePathLen)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+	})
+	t.Run("a path one byte under the limit is looked up", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := "example.com/" + strings.Repeat("a", maxGoPackagePathLen-1-len("example.com/"))
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		if err == nil || !strings.Contains(err.Error(), "no module") {
+			t.Errorf("Latest = %v, want no module found", err)
+		}
+		if len(*asked) != 2 {
+			t.Errorf("asked %d paths, want 2", len(*asked))
+		}
+	})
+	t.Run("a 32 KB path is refused at once", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		pkg := deepGoPath(16000)
+		start := time.Now()
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + pkg}, nil)
+		elapsed := time.Since(start)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoPackagePathLen)) {
+			t.Errorf("Latest = %v, want an error naming the limit of %d", err, maxGoPackagePathLen)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+		if elapsed > 500*time.Millisecond {
+			t.Errorf("refusing a %d-byte path took %v, want under 500ms", len(pkg), elapsed)
+		}
+	})
 }
 
 // slowly delays every answer of h, so a walk of many requests outlasts a

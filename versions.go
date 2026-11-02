@@ -32,10 +32,16 @@ const versionLookupBudget = 45 * time.Second
 // versionLookupBudget per request. A var so a test can shorten it.
 var latestResolutionBudget = 2 * time.Minute
 
-// maxGoModulePrefixes caps the candidate module paths of one go: package
-// path, each costing a proxy request. The go command sets no limit; the
-// deepest common command path, golang.org/x/tools's fieldalignment, has 9.
+// maxGoModulePrefixes caps the elements of one go: package path, and so the
+// prefixes walked, each costing a proxy request when it is a module path. The
+// go command sets no limit; the deepest common command path, golang.org/x/tools's
+// fieldalignment, has 9.
 const maxGoModulePrefixes = 16
+
+// maxGoPackagePathLen refuses a go: package path that cannot be built: go
+// install extracts it under GOMODCACHE, and Linux refuses a path of PATH_MAX
+// (4096) bytes or more with ENAMETOOLONG. Go itself sets no length limit.
+const maxGoPackagePathLen = 4096
 
 // versionResponseCap bounds one version-lookup response body.
 const versionResponseCap = 4 << 20
@@ -107,8 +113,8 @@ func (v *versionResolver) Cached(t *Tool, aq *AquaPackage) string {
 // tool's recorded version is itself a prerelease.
 func (v *versionResolver) Latest(ctx context.Context, t *Tool, aq *AquaPackage) (string, error) {
 	key := toolLatestKey(t, aq)
-	// apt resolves through local commands under aptUpdateBudget, which is
-	// longer than this budget.
+	// apt's index refresh runs under aptUpdateBudget, which is longer than
+	// this budget.
 	if !strings.HasPrefix(t.Source, SourceApt+":") {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, latestResolutionBudget)
@@ -514,14 +520,16 @@ func (v *versionResolver) latestCrate(ctx context.Context, name string) (string,
 // module that owns it, as the go command does: the longest path prefix the
 // proxy knows as a module, read from its version list.
 func (v *versionResolver) latestGoModule(ctx context.Context, pkgPath string, allowPre bool) (string, error) {
+	if len(pkgPath) >= maxGoPackagePathLen {
+		return "", fmt.Errorf("go package path of %d bytes reaches the %d-byte limit", len(pkgPath), maxGoPackagePathLen)
+	}
+	if n := strings.Count(pkgPath, "/") + 1; n > maxGoModulePrefixes {
+		return "", fmt.Errorf("go package path %q has %d elements, more than the %d the engine looks up", pkgPath, n, maxGoModulePrefixes)
+	}
 	if err := module.CheckImportPath(pkgPath); err != nil {
 		return "", fmt.Errorf("invalid go package path %q: %w", pkgPath, err)
 	}
-	prefixes := goModulePrefixes(pkgPath)
-	if len(prefixes) > maxGoModulePrefixes {
-		return "", fmt.Errorf("go package path %q has %d candidate module paths, more than the %d the engine looks up", pkgPath, len(prefixes), maxGoModulePrefixes)
-	}
-	for _, mod := range prefixes {
+	for _, mod := range goModulePrefixes(pkgPath) {
 		ver, found, err := v.latestModuleVersion(ctx, mod, allowPre)
 		if err != nil {
 			return "", err
