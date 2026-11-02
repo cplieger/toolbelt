@@ -1941,11 +1941,15 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 	return missing, extras, orphans
 }
 
-// converged is probeInstalled, and for an apt: row also a dpkg hold equal to
-// its pin, so Reconcile repairs a hold that a failed apt-mark, a recreated
-// container or a hand-run apt-mark left wrong. An unreadable dpkg record is
-// not converged, so the install that follows records why.
+// converged is probeInstalled on a venv built for the row's Python request,
+// and for an apt: row also a dpkg hold equal to its pin, so Reconcile repairs
+// a hold that a failed apt-mark, a recreated container or a hand-run apt-mark
+// left wrong. An unreadable dpkg record is not converged, so the install that
+// follows records why.
 func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
+	if s.Python != t.Python {
+		return false
+	}
 	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")
 	if !ok || !AptAvailable() {
 		return e.probeInstalled(name, t, s)

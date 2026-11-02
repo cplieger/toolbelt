@@ -177,6 +177,45 @@ func TestReconcile_ConvergesBothWays(t *testing.T) {
 	}
 }
 
+// TestReconcile_RebuildsAVenvOnAnotherPythonRequest: a pip: row whose venv
+// was built for another Python request than the manifest's is not converged,
+// though its version matches and its launcher runs, so a hand-edited python
+// field reaches the venv (uv tool install --python).
+func TestReconcile_RebuildsAVenvOnAnotherPythonRequest(t *testing.T) {
+	argv := fakeUV(t)
+	e := pipEngine(t, "3.14")
+	writeStub(t, e, "x", "echo x 1.0.0")
+	if err := e.store.setToolStatus("x", func(s *ToolStatus) {
+		s.InstalledVersion = "1.0.0"
+		s.Python = "3.13"
+		s.PMBins = []string{"x"}
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("reconcile job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if got, want := readArgv(t, argv), []string{"tool install --reinstall --python 3.14 x==1.0.0"}; !slices.Equal(got, want) {
+		t.Errorf("uv argv = %q, want %q", got, want)
+	}
+	if got := e.store.State().Tools["x"].Python; got != "3.14" {
+		t.Errorf("recorded python = %q, want 3.14", got)
+	}
+
+	jv, _, err = e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := strings.Join(waitJob(t, e, jv.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
+		t.Errorf("second reconcile output = %q, want everything converged", out)
+	}
+}
+
 func TestReconcile_EmptyManifestNoJob(t *testing.T) {
 	e := newTestEngine(t, nil)
 	// The C15 no-job answer: enqueued false, a nil job and a NIL error,
