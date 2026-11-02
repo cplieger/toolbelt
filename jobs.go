@@ -45,6 +45,11 @@ type job struct {
 	// failure is the error a failed job ended on: nil for a cancellation
 	// or a timeout, which err alone describes.
 	failure error
+	// done closes when the job's terminal view is published in final,
+	// both by pushRecentLocked under mu; a Wait holding the job reads
+	// final after <-done, so the history cap cannot take its answer.
+	done  chan struct{}
+	final *Job
 	// cause records WHO cancelled the job. It is written at the
 	// cancellation site BEFORE the job's context is cancelled, so the
 	// finalizer in runOne can attribute a cancellation it only observes
@@ -69,7 +74,7 @@ type job struct {
 	count int
 
 	// reserved marks a job holding its place in pending before publish:
-	// it is not runnable, and no view, lookup or cancel can see it.
+	// it is not runnable, and no view, Wait or cancel can see it.
 	reserved bool
 }
 
@@ -131,9 +136,9 @@ type jobQueue struct {
 	onOutput  func(jobID string, lines []string)
 	log       *slog.Logger
 	active    *job
-	// terminal records every finished job's final view by id so Wait
-	// can't be starved by the recent ring's cap (a >10-job burst
-	// between polls would otherwise strand a waiter).
+	// terminal keeps finished jobs' final views by id, past the recent
+	// ring, for a Wait that starts after its job ended. Its cap bounds
+	// memory only: a Wait already blocked holds the job itself.
 	terminal map[string]*Job
 	wake     chan struct{}
 	run      func(ctx context.Context, j *job, output func(string)) error
@@ -206,6 +211,7 @@ func (q *jobQueue) reserveLocked(kind string, names []string, removed map[string
 		state:    JobQueued,
 		created:  time.Now(),
 		removed:  removed,
+		done:     make(chan struct{}),
 		reserved: true,
 	}
 	q.pending = append(q.pending, j)
@@ -382,47 +388,52 @@ func (q *jobQueue) setCovers(j *job, names []string) {
 	q.notifyLocked(j)
 }
 
-// Wait blocks until the given job leaves the queue/active slot, then
-// returns its terminal view. A job the queue doesn't know (never
-// enqueued, or evicted from terminal history) returns ErrUnknownJob
-// instead of polling to the ctx deadline. Used by the synchronous
-// EnsureInstalled path and boot gates.
+// Wait blocks until the job ends and returns its terminal view, or
+// ctx.Err() when ctx ends first; a job that has already ended wins over a
+// cancelled ctx. An id the queue does not know (never enqueued, still
+// reserved, or ended and dropped from terminal before this call) returns
+// ErrUnknownJob.
 func (q *jobQueue) Wait(ctx context.Context, id string) (*Job, error) {
-	tick := time.NewTicker(200 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		v, known := q.lookup(id)
-		if v != nil {
-			return v, nil
-		}
-		if !known {
-			return nil, fmt.Errorf("%w: %s", ErrUnknownJob, id)
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-tick.C:
-		}
+	final, live := q.waitTarget(id)
+	if final != nil {
+		return final, nil
+	}
+	if live == nil {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownJob, id)
+	}
+	// The job may have ended since waitTarget; a two-way select would
+	// pick at random when ctx is also done.
+	select {
+	case <-live.done:
+		return live.final, nil
+	default:
+	}
+	select {
+	case <-live.done:
+		return live.final, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
-// lookup returns the terminal view when the job has finished, and
-// whether the queue knows the id at all (terminal, active, or pending).
-func (q *jobQueue) lookup(id string) (*Job, bool) {
+// waitTarget resolves id to a finished job's terminal view or to the
+// published job, active or queued, to block on; both nil when Wait must
+// not see the id.
+func (q *jobQueue) waitTarget(id string) (final *Job, live *job) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if s, ok := q.terminal[id]; ok {
-		return s, true
+	if v, ok := q.terminal[id]; ok {
+		return v, nil
 	}
 	if q.active != nil && q.active.id == id {
-		return nil, true
+		return nil, q.active
 	}
 	for _, j := range q.pending {
 		if j.id == id && !j.reserved {
-			return nil, true
+			return nil, j
 		}
 	}
-	return nil, false
+	return nil, nil
 }
 
 // Close stops the worker after the current job (its context is
@@ -565,8 +576,9 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 	q.mu.Unlock()
 }
 
-// pushRecentLocked appends to history with the cap applied and records
-// the terminal view for waiters. Caller holds mu.
+// pushRecentLocked is a job's one terminal publication: it appends to
+// history with the cap applied, records the terminal view and releases
+// the job's waiters. Caller holds mu.
 func (q *jobQueue) pushRecentLocked(j *job) {
 	q.recent = append(q.recent, j)
 	if len(q.recent) > jobHistory {
@@ -577,7 +589,9 @@ func (q *jobQueue) pushRecentLocked(j *job) {
 	}
 	// Terminal views keep the output tail: Wait consumers (boot gates,
 	// EnsureInstalled) want the lines for logs and error context.
-	q.terminal[j.id] = j.view(true)
+	j.final = j.view(true)
+	q.terminal[j.id] = j.final
+	close(j.done)
 	// Bound the map: keep terminal states for at most 4x the history
 	// window by evicting ids that fell out of recent long ago.
 	if len(q.terminal) > 4*jobHistory {

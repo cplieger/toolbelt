@@ -30,10 +30,9 @@ var (
 	// Enabling is an explicit state change (Patch Disabled=false), never
 	// a side effect of a retry.
 	ErrDisabled = errors.New("tool is disabled")
-	// ErrUnknownJob marks a Wait on a job id the queue no longer knows:
-	// never enqueued, or its terminal view was evicted by the history
-	// cap. Without it a Wait on an evicted id would poll to ctx
-	// deadline.
+	// ErrUnknownJob marks a Wait on a job id the queue does not know:
+	// never enqueued, or the job ended before the Wait began and its
+	// result has since been dropped from the retained history.
 	ErrUnknownJob = errors.New("unknown job")
 	// ErrRootIntegrity marks a New refused by the opt-in root-integrity
 	// check (Config.VerifyRootIntegrity): a managed root is a symlink,
@@ -427,7 +426,9 @@ func (e *Engine) Jobs() (active *Job, recent []*Job) { return e.queue.Snapshot()
 func (e *Engine) CancelJob(id string) bool { return e.queue.Cancel(id) }
 
 // Wait blocks until the job reaches a terminal state and returns its
-// final view.
+// final view, or ctx.Err() when ctx ends first; a job that has already
+// ended is returned even when ctx is done. A Wait in progress always
+// receives its job's result, however many jobs finish meanwhile.
 func (e *Engine) Wait(ctx context.Context, jobID string) (*Job, error) {
 	return e.queue.Wait(ctx, jobID)
 }
