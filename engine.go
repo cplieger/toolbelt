@@ -1528,9 +1528,12 @@ func depsSatisfied(m *Manifest, name string, t *Tool, backends map[string]string
 	return true
 }
 
-// installClosure is names and every row their install plan walks through
-// depsOf, transitively.
-func installClosure(m *Manifest, names []string, backends map[string]string) map[string]bool {
+// installClosure is names and every name their install plan walks through
+// depsOf, transitively: a row's edges, and for a name with no row the edges
+// of the catalog entry the plan would adopt (an unknown name has none, as its
+// adopt fails). It reads no network.
+func (e *Engine) installClosure(m *Manifest, names []string, backends map[string]string) map[string]bool {
+	cat := e.cat()
 	seen := map[string]bool{}
 	stack := slices.Clone(names)
 	for len(stack) > 0 {
@@ -1540,9 +1543,15 @@ func installClosure(m *Manifest, names []string, backends map[string]string) map
 			continue
 		}
 		seen[n] = true
-		if t, ok := m.Tools[n]; ok {
-			stack = append(stack, depsOf(n, &t, backends)...)
+		t, ok := m.Tools[n]
+		if !ok {
+			ce, known := cat.Lookup(n)
+			if !known {
+				continue
+			}
+			mergeCatalogDefaults(&t, &ce)
 		}
+		stack = append(stack, depsOf(n, &t, backends)...)
 	}
 	return seen
 }
@@ -1991,8 +2000,9 @@ func (e *Engine) runReconcile(ctx context.Context, j *job, output func(string)) 
 // reconcilePlan classifies the manifest and state rows into the
 // reconcile work sets: enabled-but-missing installs, disabled-but-owned
 // footprints, and orphaned state rows (owned footprint, no manifest
-// row). A disabled row the missing installs depend on is not an extra:
-// their plan enables it, and uninstalling it first would only reinstall it.
+// row). A disabled row or an orphan the missing installs depend on is
+// neither: their plan enables or adopts it, and uninstalling it first would
+// only reinstall it.
 func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) {
 	st := e.store.State()
 	backends := e.backends()
@@ -2006,11 +2016,11 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 			missing = append(missing, n)
 		}
 	}
-	needed := installClosure(m, missing, backends)
+	needed := e.installClosure(m, missing, backends)
 	extras = slices.DeleteFunc(extras, func(n string) bool { return needed[n] })
 	for n := range st.Tools {
 		status := st.Tools[n]
-		if _, inManifest := m.Tools[n]; !inManifest && status.owned() {
+		if _, inManifest := m.Tools[n]; !inManifest && status.owned() && !needed[n] {
 			orphans = append(orphans, n)
 		}
 	}
@@ -2047,7 +2057,7 @@ func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, bac
 func (e *Engine) closureConverged(m *Manifest, name string) bool {
 	st := e.store.State()
 	backends := e.backends()
-	for n := range installClosure(m, []string{name}, backends) {
+	for n := range e.installClosure(m, []string{name}, backends) {
 		t, ok := m.Tools[n]
 		status := st.Tools[n]
 		if !ok || t.Disabled || !e.converged(m, n, &t, &status, backends) {

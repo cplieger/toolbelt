@@ -1050,6 +1050,76 @@ func TestReconcile_DisabledOwnedDependencyIsEnabledNotUninstalled(t *testing.T) 
 	}
 }
 
+// TestReconcile_KeepsWhatAnAdoptedDependencyNeeds: a dependency the install
+// plan adopts from the catalog brings its own edges, so a disabled, owned row
+// one of them names is enabled by that plan rather than uninstalled first.
+func TestReconcile_KeepsWhatAnAdoptedDependencyNeeds(t *testing.T) {
+	for _, tc := range []struct {
+		entry CatalogEntry
+		name  string
+	}{
+		{name: "requires", entry: CatalogEntry{
+			Name: "lsp", Source: SourceManual, Version: "1", Install: binStub("lsp"), Probe: "lsp", Requires: []string{"node"},
+		}},
+		{name: "source backend", entry: CatalogEntry{Name: "lsp", Source: "npm:lsp", Version: "1.0.0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := t.TempDir()
+			npm := "#!/bin/sh\nd=\"$NPM_CONFIG_PREFIX/lib/node_modules/lsp\"\n" +
+				"mkdir -p \"$d\" && printf '{\"name\":\"lsp\",\"version\":\"1.0.0\"}' > \"$d/package.json\"\n"
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte(npm), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cat := &Catalog{
+				Entries:  map[string]CatalogEntry{"lsp": tc.entry},
+				Backends: map[string]string{SourceNpm: "node"},
+			}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			addManual(t, e, "node", nil)
+			addManual(t, e, "tool", nil)
+			editManifest(t, e, func(m *Manifest) {
+				n := m.Tools["node"]
+				n.Disabled = true
+				m.Tools["node"] = n
+				tl := m.Tools["tool"]
+				tl.Requires = []string{"lsp"}
+				m.Tools["tool"] = tl
+			})
+			final := reconcileJob(t, e)
+			out := strings.Join(final.OutputTail, "\n")
+			if final.State != JobDone || strings.Contains(out, "uninstalling disabled tools") {
+				t.Errorf("reconcile = %s %q, want done with no uninstall", final.State, out)
+			}
+			requireInstalled(t, e, "node")
+			if got := e.store.State().Tools["lsp"].InstalledVersion; got != tc.entry.Version {
+				t.Errorf("lsp installed version = %q, want %s", got, tc.entry.Version)
+			}
+		})
+	}
+}
+
+// TestReconcile_KeepsTheOrphanedStateOfANeededDependency: an owned state row
+// with no manifest row, for a dependency the install plan is about to adopt,
+// is the adopted row's install, so Reconcile does not sweep it first.
+func TestReconcile_KeepsTheOrphanedStateOfANeededDependency(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	addManual(t, e, "dep", nil)
+	editManifest(t, e, func(m *Manifest) {
+		delete(m.Tools, "dep")
+		tl := m.Tools["tool"]
+		tl.Requires = []string{"dep"}
+		m.Tools["tool"] = tl
+	})
+	final := reconcileJob(t, e)
+	out := strings.Join(final.OutputTail, "\n")
+	if final.State != JobDone || strings.Contains(out, "sweeping orphaned install state") {
+		t.Errorf("reconcile = %s %q, want done with no sweep", final.State, out)
+	}
+	requireInstalled(t, e, "dep")
+}
+
 // TestReconcile_UnresolvableDependencyFailsTheDependent: a requirement no
 // catalog entry resolves fails the job naming it, and leaves the installed
 // dependent in place.

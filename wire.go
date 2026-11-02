@@ -187,7 +187,7 @@ const (
 	// the manifest names, pinned apt: entries dpkg reports at another
 	// version and dependencies with no enabled entry, sets each apt:
 	// entry's dpkg hold to its pin, uninstalls the engine-owned
-	// footprint of orphaned state rows and of disabled entries no install
+	// footprint of disabled entries and orphaned state rows no install
 	// needs. Zero fetches when already converged.
 	ReconcileMissing ReconcileMode = iota
 	// ReconcileFull is ReconcileMissing plus an update pass over
