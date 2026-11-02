@@ -239,7 +239,6 @@ func TestLatestAqua_RuntimeResolvesFromItsOwnIndex(t *testing.T) {
 	}
 }
 
-// A tag list's prereleases are skipped unless the recorded version is one.
 func TestLatestGitHubTag_SkipsPrereleases(t *testing.T) {
 	cases := []struct{ name, recorded, want string }{
 		{name: "stable line skips the release candidate", recorded: "v2.8.0", want: "v2.9.0"},
@@ -549,7 +548,6 @@ func TestLatest_OnlyPrereleasesListed(t *testing.T) {
 	}
 }
 
-// Two rows sharing a source but on different lines each read their own latest.
 func TestVersionCache_KeysThePrereleaseLine(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `[{"version":"v27.0.0-alpha.0.0.0"},{"version":"v26.13.0"}]`)

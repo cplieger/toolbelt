@@ -145,7 +145,6 @@ func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 	return e.probeTool(name, t, s).OK
 }
 
-// probeTool is probeInstalled's full verdict (mode + reason).
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	if kind == SourceApt {

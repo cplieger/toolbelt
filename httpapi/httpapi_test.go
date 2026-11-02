@@ -1159,8 +1159,6 @@ func TestAddRoute_RateLimitIsCoded(t *testing.T) {
 	}
 }
 
-// TestPatchRoute_VersionArgs: the PATCH body carries version_args through to
-// the manifest, and the engine's NUL refusal answers as a bad request.
 func TestPatchRoute_VersionArgs(t *testing.T) {
 	dir := t.TempDir()
 	e, err := toolbelt.New(&toolbelt.Config{ConfigDir: dir, ToolsDir: dir + "/tools", Logger: slog.Default()})
