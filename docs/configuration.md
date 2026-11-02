@@ -45,8 +45,8 @@ Every field except the name is optional, and the catalog fills in the rest.
 | Field | Purpose |
 | --- | --- |
 | `source` | Where the tool comes from, such as `aqua:cli/cli` or `npm:typescript` |
-| `version` | The version to install. Empty means the latest. A hand edit of an installed entry's version applies at its next install or reconcile |
-| `pin` | Keep this version. Updates skip the entry |
+| `version` | The version to install. Empty means the latest. A hand edit of an installed entry's version applies at its next install or reconcile. An unpinned `apt:` entry installs apt's candidate and takes its version |
+| `pin` | Keep this version. Updates skip the entry. A pinned `apt:` entry installs exactly its version, downgrading if needed, and also holds the package |
 | `disabled` | Make the entry a template that installs nothing |
 | `requires` | Other tools this one needs, installed first. A name with no enabled entry is added from the catalog or enabled at the entry's next install or reconcile, including after a hand edit |
 | `python` | For a `pip:` entry, the Python version uv builds the tool on, such as `3.14`. Empty takes the newest. A change through `Patch` reinstalls an enabled tool, and a hand edit applies at its next install or reconcile |

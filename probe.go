@@ -148,7 +148,7 @@ func (e *Engine) probeInstalled(name string, t *Tool, s *ToolStatus) bool {
 func (e *Engine) probeTool(name string, t *Tool, s *ToolStatus) probeVerdict {
 	kind, ref, _ := strings.Cut(t.Source, ":")
 	if kind == SourceApt {
-		return probeApt(ref)
+		return probeApt(ref, aptRequest(t))
 	}
 	var pkgReason string
 	if kind == SourceNpm && len(s.Bins)+len(s.PMBins) == 0 {
@@ -227,10 +227,11 @@ func (e *Engine) probePipInterpreter(ref string) (identity string, failed probeV
 
 // probeApt asks dpkg, because an apt package may ship no executable at
 // all (libc6-dev) and its files sit in /usr, not the engine's bin dir.
+// A non-empty want (aptRequest) must be the version dpkg reports.
 // The verdict is deliberately NOT cached: unlike the other sources, an
 // apt package can be removed from under the process by anyone with a
 // container shell, and dpkg-query is a cheap local read.
-func probeApt(pkg string) probeVerdict {
+func probeApt(pkg, want string) probeVerdict {
 	if !AptAvailable() {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "apt is unavailable on this host"}
 	}
@@ -242,6 +243,9 @@ func probeApt(pkg string) probeVerdict {
 	}
 	if !st.installed {
 		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "dpkg reports " + pkg + " is not installed"}
+	}
+	if want != "" && st.version != want {
+		return probeVerdict{OK: false, Mode: probeModeVersion, Reason: "dpkg reports " + pkg + " " + st.version + ", the entry pins " + want}
 	}
 	// The dpkg status IS the version, so this is the one source whose
 	// probe verifies the answer without executing anything.

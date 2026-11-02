@@ -2,6 +2,7 @@ package toolbelt
 
 import (
 	"archive/tar"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -3373,16 +3374,26 @@ func fakeRoot(t *testing.T) {
 	t.Cleanup(func() { geteuid = prev })
 }
 
-// aptStub models dpkg for one amd64 package with logging apt-mark, apt-get,
-// dpkg-query and apt-cache stubs and an amd64 dpkg. The files installed and
-// held in its dir are dpkg's record, which dpkg-query prints in the -f format
-// it is given (held but not installed reads "hold not-installed", no record
-// answers as unknown); a call whose first argument has a gate waits until
-// open(that argument). apt-get refuses a held package, as apt-get -y does
-// (apt-get(8)); mark-fail, get-fail and failQueriesAfter make apt-mark,
-// apt-get and dpkg-query fail.
+// aptStub models dpkg for one amd64 jq with logging apt-mark, apt-get,
+// dpkg-query and apt-cache stubs. Its dir's files are dpkg's record: installed
+// (the version, empty for setAptRow's 1.6-1) and held, so a held absent package
+// reads "hold not-installed" and neither file reads unknown. A call whose first
+// argument has a gate waits until open(that argument). apt-get installs its
+// `pkg=version` argument's version, else the candidate (always, with
+// ignore-pin), refusing a held package and an unflagged downgrade as apt-get
+// -y does (apt-get(8)); set and failQueriesAfter switch failures on.
 type aptStub struct {
 	dir, log string
+}
+
+// aptStubCandidate is the version the stub's apt-cache and apt-get install
+// for a bare package name.
+const aptStubCandidate = "1.7.1-1"
+
+// aptGetInstallLine is the apt-get call the stub logs for an install whose
+// arguments after the install verb are args.
+func aptGetInstallLine(args ...string) string {
+	return "apt-get -o DPkg::Lock::Timeout=60 -y --no-install-recommends install " + strings.Join(args, " ")
 }
 
 // stubApt puts the stubs ahead of the real trusted dirs rather than
@@ -3408,16 +3419,23 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 			"if [ -e " + d + "held ]; then case \" $* \" in *' --allow-change-held-packages '*) ;; *)\n" +
 			"echo 'E: Held packages were changed and -y was used without --allow-change-held-packages.' >&2; exit 100;; esac; fi\n" +
 			"[ -e " + d + "get-fail ] && { echo 'E: install failed' >&2; exit 100; }\n" +
-			"touch " + d + "installed\n" +
+			"[ -e " + d + "get-noop ] && exit 0\n" +
+			"allow=; for a; do [ \"$a\" = --allow-downgrades ] && allow=1; last=$a; done\n" +
+			"want=" + aptStubCandidate + "; case $last in *=*) [ -e " + d + "ignore-pin ] || want=${last#*=};; esac\n" +
+			"if [ -e " + d + "installed ]; then cur=$(cat " + d + "installed); cur=${cur:-1.6-1}\n" +
+			"[ \"$want\" != \"$cur\" ] && [ -z \"$allow\" ] && [ \"$(printf '%s\\n%s\\n' \"$want\" \"$cur\" | sort -V | head -n 1)\" = \"$want\" ] &&\n" +
+			"{ echo 'E: Packages were downgraded and -y was used without --allow-downgrades.' >&2; exit 100; }; fi\n" +
+			"echo \"$want\" > " + d + "installed\n" +
 			"echo \"apt-get-end $1\" >> " + s.log + "\n",
 		"dpkg-query": "if [ -e " + d + "query-budget ]; then read n < " + d + "query-budget\n" +
 			"[ \"$n\" -gt 0 ] || { echo 'dpkg-query: error: parsing file /var/lib/dpkg/status' >&2; exit 2; }\n" +
 			"echo $((n - 1)) > " + d + "query-budget; fi\n" +
 			"want=install; [ -e " + d + "held ] && want=hold\n" +
-			"status=installed; version=1.7.1-1; [ -e " + d + "installed ] || { status=not-installed; version=; }\n" +
+			"status=installed; version=$(cat " + d + "installed 2>/dev/null); version=${version:-1.6-1}\n" +
+			"[ -e " + d + "installed ] || { status=not-installed; version=; }\n" +
 			"[ $status = installed ] || [ $want = hold ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
 			"case \"$2\" in *Status-Want*) printf 'amd64\\t%s\\t%s\\t%s\\n' $want $status \"$version\";; *) echo \"$status $version\";; esac\n",
-		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: 1.7.1-1\\n'\n",
+		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: " + aptStubCandidate + "\\n'\n",
 		"dpkg":      "[ \"$1\" = --print-architecture ] && echo amd64\n",
 	}
 	for name, body := range scripts {
@@ -3431,7 +3449,9 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 	return s
 }
 
-// set creates the named state files (installed, held, mark-fail, get-fail).
+// set creates the named state files: installed and held, mark-fail and
+// get-fail to fail apt-mark and apt-get, get-noop for an apt-get that
+// installs nothing, and ignore-pin.
 func (s *aptStub) set(t *testing.T, names ...string) {
 	t.Helper()
 	for _, n := range names {
@@ -3439,6 +3459,27 @@ func (s *aptStub) set(t *testing.T, names ...string) {
 			t.Fatalf("Setup: %v", err)
 		}
 	}
+}
+
+// setInstalled records the package installed at version.
+func (s *aptStub) setInstalled(t *testing.T, version string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.dir, "installed"), []byte(version+"\n"), 0o600); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+}
+
+// installedVersion is the version dpkg reports, empty when not installed.
+func (s *aptStub) installedVersion(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(s.dir, "installed"))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cmp.Or(strings.TrimSpace(string(data)), "1.6-1")
 }
 
 // failQueriesAfter lets n more dpkg-query calls answer, then fails each
@@ -3565,7 +3606,7 @@ func TestAptHold_FollowsThePin(t *testing.T) {
 		}
 		return jv
 	}
-	const aptGetLine = "apt-get -o DPkg::Lock::Timeout=60 -y --no-install-recommends install -- jq"
+	pinnedInstall := aptGetInstallLine("--", "jq=1.6-1")
 
 	t.Run("a refused patch runs no apt call", func(t *testing.T) {
 		fakeRoot(t)
@@ -3838,7 +3879,7 @@ func TestAptHold_FollowsThePin(t *testing.T) {
 		e := newTestEngine(t, nil)
 		setAptRow(t, e, true, false)
 		jv := install(t, e)
-		if !s.await(t, aptGetLine, 5*time.Second) {
+		if !s.await(t, pinnedInstall, 5*time.Second) {
 			t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
 		}
 
@@ -3857,7 +3898,7 @@ func TestAptHold_FollowsThePin(t *testing.T) {
 		e := newTestEngine(t, nil)
 		setAptRow(t, e, true, false)
 		jv := install(t, e)
-		if !s.await(t, aptGetLine, 5*time.Second) {
+		if !s.await(t, pinnedInstall, 5*time.Second) {
 			t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
 		}
 
@@ -3871,6 +3912,263 @@ func TestAptHold_FollowsThePin(t *testing.T) {
 			t.Errorf("calls = %q, want no hold for a removed row", s.lines(t))
 		}
 	})
+}
+
+// TestAptInstall_PinnedRowInstallsTheExactVersion: a pin means this version,
+// so apt-get is asked for `pkg=version` (apt-get(8)) and the package ends at
+// it, held, with the state naming it.
+func TestAptInstall_PinnedRowInstallsTheExactVersion(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, true, false)
+
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	wantJobState(t, e, jv, JobDone)
+
+	if !slices.Contains(s.lines(t), aptGetInstallLine("--", "jq=1.6-1")) {
+		t.Errorf("calls = %q, want apt-get to install jq=1.6-1", s.lines(t))
+	}
+	if got := s.installedVersion(t); got != "1.6-1" {
+		t.Errorf("dpkg reports jq %q, want the pinned 1.6-1", got)
+	}
+	if got := e.store.State().Tools["jq"].InstalledVersion; got != "1.6-1" {
+		t.Errorf("installed version = %q, want 1.6-1", got)
+	}
+	if !s.held(t) {
+		t.Errorf("held = false, want the pinned row held; calls %q", s.lines(t))
+	}
+}
+
+// TestAptInstall_PinnedDowngradeCarriesTheFlag: apt-get -y refuses to
+// downgrade without --allow-downgrades (apt-get(8)), a flag that covers the
+// whole transaction, so only an install moving the package off another
+// installed version carries it.
+func TestAptInstall_PinnedDowngradeCarriesTheFlag(t *testing.T) {
+	cases := []struct {
+		name      string
+		installed string
+		want      string
+	}{
+		{name: "a downgrade from the candidate", installed: aptStubCandidate, want: aptGetInstallLine("--allow-downgrades", "--", "jq=1.6-1")},
+		{name: "a fresh install", want: aptGetInstallLine("--", "jq=1.6-1")},
+		{name: "a reinstall at the pinned version", installed: "1.6-1", want: aptGetInstallLine("--", "jq=1.6-1")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRoot(t)
+			s := stubApt(t)
+			if tc.installed != "" {
+				s.setInstalled(t, tc.installed)
+			}
+			e := newTestEngine(t, nil)
+			setAptRow(t, e, true, false)
+
+			jv, err := e.Install("jq")
+			if err != nil {
+				t.Fatalf("Install(jq) = %v", err)
+			}
+			wantJobState(t, e, jv, JobDone)
+
+			if !slices.Contains(s.lines(t), tc.want) {
+				t.Errorf("calls = %q, want %q", s.lines(t), tc.want)
+			}
+			if got := s.installedVersion(t); got != "1.6-1" {
+				t.Errorf("dpkg reports jq %q, want the pinned 1.6-1", got)
+			}
+		})
+	}
+}
+
+// TestAptInstall_PinnedVersionThatLandsElsewhereFailsTheJob: when apt-get
+// succeeds but dpkg reports another version than the pin, the job fails
+// naming both, and the state records what dpkg installed.
+func TestAptInstall_PinnedVersionThatLandsElsewhereFailsTheJob(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	s.set(t, "ignore-pin")
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, true, false)
+
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	wantJobState(t, e, jv, JobFailed)
+
+	st := e.store.State().Tools["jq"]
+	if want := "dpkg reports jq " + aptStubCandidate + ", the entry pins 1.6-1"; !strings.Contains(st.LastError, want) {
+		t.Errorf("recorded error = %q, want it to carry %q", st.LastError, want)
+	}
+	if st.InstalledVersion != aptStubCandidate {
+		t.Errorf("installed version = %q, want dpkg's %s", st.InstalledVersion, aptStubCandidate)
+	}
+}
+
+// TestAptInstall_NothingInstalledRecordsNoVersion: an apt-get that succeeds
+// while dpkg still reports the package absent fails the job and records no
+// installed version, since nothing landed.
+func TestAptInstall_NothingInstalledRecordsNoVersion(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	s.set(t, "get-noop")
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, false, false)
+
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	wantJobState(t, e, jv, JobFailed)
+
+	st := e.store.State().Tools["jq"]
+	if !strings.Contains(st.LastError, "dpkg reports jq is not installed") {
+		t.Errorf("recorded error = %q, want dpkg's absent package", st.LastError)
+	}
+	if st.InstalledVersion != "" {
+		t.Errorf("installed version = %q, want none recorded", st.InstalledVersion)
+	}
+}
+
+// TestAptInstall_UnpinnedRowRecordsWhatDpkgInstalled: an unpinned row's
+// version is the candidate it last saw, so apt-get gets the bare name, the
+// state and the manifest take the version dpkg reports, and the next
+// Reconcile has nothing to do.
+func TestAptInstall_UnpinnedRowRecordsWhatDpkgInstalled(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, false, false)
+
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	wantJobState(t, e, jv, JobDone)
+
+	if !slices.Contains(s.lines(t), aptGetInstallLine("--", "jq")) {
+		t.Errorf("calls = %q, want apt-get to install the bare jq", s.lines(t))
+	}
+	if got := e.store.State().Tools["jq"].InstalledVersion; got != aptStubCandidate {
+		t.Errorf("installed version = %q, want dpkg's %s", got, aptStubCandidate)
+	}
+	if m, _ := e.store.LoadManifest(); m.Tools["jq"].Version != aptStubCandidate {
+		t.Errorf("manifest version = %q, want dpkg's %s", m.Tools["jq"].Version, aptStubCandidate)
+	}
+	rj, _, err := e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	if out := strings.Join(waitJob(t, e, rj.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
+		t.Errorf("reconcile output = %q, want everything converged", out)
+	}
+}
+
+// TestAptInstall_CandidateRewriteKeepsAConcurrentEdit: the manifest takes
+// dpkg's version only while the row is still unpinned and at the version the
+// job read, so a Patch made during the install is not undone.
+func TestAptInstall_CandidateRewriteKeepsAConcurrentEdit(t *testing.T) {
+	yes, other := true, "1.5-1"
+	cases := []struct {
+		name  string
+		patch PatchRequest
+		// wantVersion is the manifest version once both jobs end, and
+		// wantInstalls the apt-get installs that took: the Patch's own job
+		// installs again only when it finds its edit standing.
+		wantVersion  string
+		wantInstalls int
+	}{
+		{name: "a pin", patch: PatchRequest{Pin: &yes}, wantVersion: "1.6-1", wantInstalls: 2},
+		{name: "a version", patch: PatchRequest{Version: &other}, wantVersion: aptStubCandidate, wantInstalls: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRoot(t)
+			s := stubApt(t, "-o")
+			e := newTestEngine(t, nil)
+			setAptRow(t, e, false, false)
+			jv, err := e.Install("jq")
+			if err != nil {
+				t.Fatalf("Install(jq) = %v", err)
+			}
+			if !s.await(t, aptGetInstallLine("--", "jq"), 5*time.Second) {
+				t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
+			}
+
+			pj, err := e.Patch("jq", tc.patch)
+			if err != nil || pj == nil {
+				t.Fatalf("Patch = %v, %v, want a job", pj, err)
+			}
+			s.open(t, "-o")
+			wantJobState(t, e, jv, JobDone)
+			wantJobState(t, e, pj, JobDone)
+
+			if m, _ := e.store.LoadManifest(); m.Tools["jq"].Version != tc.wantVersion {
+				t.Errorf("manifest version = %q, want %s", m.Tools["jq"].Version, tc.wantVersion)
+			}
+			if n := strings.Count(strings.Join(s.lines(t), "\n"), "apt-get-end"); n != tc.wantInstalls {
+				t.Errorf("apt-get installed %d times, want %d; calls %q", n, tc.wantInstalls, s.lines(t))
+			}
+		})
+	}
+}
+
+// TestAptInstall_FailedCandidateRewriteFailsTheJob: a manifest that cannot
+// take dpkg's version fails the job and records why on the row, rather than
+// a done job leaving the two files naming different versions.
+func TestAptInstall_FailedCandidateRewriteFailsTheJob(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t, "-o")
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, false, false)
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	if !s.await(t, aptGetInstallLine("--", "jq"), 5*time.Second) {
+		t.Fatalf("Setup: the install never ran apt-get: %q", s.lines(t))
+	}
+	// A directory where the manifest was fails every later read and write.
+	if err := os.Remove(e.store.manifestPath); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := os.Mkdir(e.store.manifestPath, 0o755); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	s.open(t, "-o")
+	wantJobState(t, e, jv, JobFailed)
+
+	if got := e.store.State().Tools["jq"].LastError; !strings.Contains(got, "record jq's installed version "+aptStubCandidate) {
+		t.Errorf("recorded error = %q, want the manifest write failure", got)
+	}
+}
+
+// TestReconcile_ReinstallsAPinnedAptRowAtAnotherVersion: a pinned row whose
+// package dpkg reports at another version is not converged, so Reconcile
+// installs the pinned version, downgrading, and holds it.
+func TestReconcile_ReinstallsAPinnedAptRowAtAnotherVersion(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	s.setInstalled(t, aptStubCandidate)
+	s.set(t, "held")
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, true, true)
+
+	jv, _, err := e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatalf("Reconcile = %v", err)
+	}
+	wantJobState(t, e, jv, JobDone)
+
+	if !slices.Contains(s.lines(t), aptGetInstallLine("--allow-downgrades", "--", "jq=1.6-1")) {
+		t.Errorf("calls = %q, want apt-get to downgrade to jq=1.6-1", s.lines(t))
+	}
+	if got := s.installedVersion(t); got != "1.6-1" || !s.held(t) {
+		t.Errorf("dpkg reports jq %q, held %v; want the pinned 1.6-1 held", got, s.held(t))
+	}
 }
 
 // TestPatch_VersionArgs: version_args is probe input only, so a patch stores

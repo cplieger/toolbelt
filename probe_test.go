@@ -971,3 +971,32 @@ func TestCappedBuffer_BoundsProbeOutput(t *testing.T) {
 		t.Fatalf("buffered %d bytes, want the %d cap", got, probeOutputCap)
 	}
 }
+
+// TestProbeApt_PinnedVersionIsTheInstallCheck: a pinned apt: row counts as
+// installed only while dpkg reports its version, and an unpinned row at any
+// version dpkg reports installed.
+func TestProbeApt_PinnedVersionIsTheInstallCheck(t *testing.T) {
+	cases := []struct {
+		name      string
+		pin       bool
+		installed string
+		want      bool
+	}{
+		{name: "pinned at another version", pin: true, installed: aptStubCandidate, want: false},
+		{name: "pinned at its version", pin: true, installed: "1.6-1", want: true},
+		{name: "unpinned at another version", installed: aptStubCandidate, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeRoot(t)
+			s := stubApt(t)
+			s.setInstalled(t, tc.installed)
+			e := newTestEngine(t, nil)
+			setAptRow(t, e, tc.pin, true)
+
+			if got := inventoryRow(t, e, "jq").Installed; got != tc.want {
+				t.Errorf("installed = %v with dpkg at %s, want %v", got, tc.installed, tc.want)
+			}
+		})
+	}
+}

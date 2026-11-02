@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -1578,13 +1579,48 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		}
 		return err
 	}
-	if serr := e.commitInstall(name, t, res); serr != nil {
+	if serr := e.commitInstall(name, t, &res); serr != nil {
 		return serr
 	}
 	if verr := e.verifyInstalled(name, t, output); verr != nil {
 		return verr
 	}
+	if res.version != "" && res.version != t.Version {
+		if merr := e.followInstalledVersion(name, t, res.version, output); merr != nil {
+			return merr
+		}
+	}
 	e.pruneSuperseded(name, t)
+	return nil
+}
+
+// followInstalledVersion writes the version an install landed on into the
+// row's Version, so the manifest and the state name one version and the
+// next Reconcile reads no drift. Only an unpinned apt: row gets here, since a
+// pinned one fails its install check. The row is left as it is when a Patch
+// pinned it or changed its version during the job, so that edit stands.
+func (e *Engine) followInstalledVersion(name string, t *Tool, installed string, output func(string)) error {
+	followed := false
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		cur, ok := m.Tools[name]
+		if !ok || cur.Pin || cur.Version != t.Version {
+			return nil
+		}
+		cur.Version = installed
+		m.Tools[name] = cur
+		followed = true
+		return nil
+	})
+	if err != nil {
+		err = fmt.Errorf("record %s's installed version %s: %w", name, installed, err)
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: manifest version failure not recorded", "tool", name, "error", serr)
+		}
+		return err
+	}
+	if followed {
+		output(fmt.Sprintf("%s installed at %s, not the recorded %s; an unpinned entry follows apt's candidate", name, installed, t.Version))
+	}
 	return nil
 }
 
@@ -1662,9 +1698,9 @@ func (e *Engine) unhydratedError(name string, t *Tool) error {
 // commitInstall records what landed. This write is the install's COMMIT
 // POINT, so a failure here fails the job with the PREVIOUS state intact
 // and nothing pruned, and a retry converges.
-func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
+func (e *Engine) commitInstall(name string, t *Tool, res *installOutcome) error {
 	if err := e.store.setToolStatus(name, func(s *ToolStatus) {
-		s.InstalledVersion = t.Version
+		s.InstalledVersion = cmp.Or(res.version, t.Version)
 		s.Python = t.Python
 		s.Bins = res.bins
 		s.PMBins = res.pmBins
@@ -1692,7 +1728,7 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
 	st := e.store.State().Tools[name]
 	if v := e.probeTool(name, t, &st); !v.OK {
-		err := fmt.Errorf("installed %s but its install check failed: %s", t.Version, v.Reason)
+		err := fmt.Errorf("installed %s but its install check failed: %s", st.InstalledVersion, v.Reason)
 		output(fmt.Sprintf("ERROR %s: %v", name, err))
 		if serr := e.recordFailure(name, err); serr != nil {
 			e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
@@ -1988,10 +2024,11 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 
 // converged is probeInstalled on a venv built for the row's Python request at
 // the row's version, with an enabled row for every dependency, and for an apt:
-// row also a dpkg hold equal to its pin, so Reconcile applies a hand-edited
-// version or requires and repairs a hold that a failed apt-mark, a recreated
-// container or a hand-run apt-mark left wrong. An unreadable dpkg record is not
-// converged, so the install that follows records why.
+// row also a dpkg hold equal to its pin and, when pinned, dpkg at its version,
+// so Reconcile applies a hand-edited version or requires and repairs a hold or
+// a version that a failed apt-mark, a recreated container or a hand-run apt
+// left wrong. An unreadable dpkg record is not converged, so the install that
+// follows records why.
 func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, backends map[string]string) bool {
 	if s.Python != t.Python || versionDrifted(t, s) || !depsSatisfied(m, name, t, backends) {
 		return false
@@ -2003,7 +2040,8 @@ func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, bac
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	st, err := aptQuery(ctx, pkg)
-	return err == nil && st.installed && st.held == t.Pin
+	want := aptRequest(t)
+	return err == nil && st.installed && st.held == t.Pin && (want == "" || st.version == want)
 }
 
 // versionDrifted reports a recorded install at another version than the

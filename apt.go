@@ -311,36 +311,71 @@ const (
 	aptArchivesLockBackoff = 3 * time.Second
 )
 
-// installApt installs one Debian package.
+// aptRequest is the version an apt: row asks apt for: its Version when
+// pinned, else none, because an unpinned row's Version is the candidate apt
+// offered when it was last checked and the install takes today's.
+func aptRequest(t *Tool) string {
+	if t.Pin && sourceKind(t.Source) == SourceApt {
+		return t.Version
+	}
+	return ""
+}
+
+// installApt installs one Debian package, at want when it is not empty, and
+// returns the version dpkg then reports, which is what the install recorded.
 //
 // It returns no bins. apt's files land in /usr, which this engine does
 // not own and must not link into its own bin dir: PATH already reaches
 // them, and a symlink would make an uninstall ambiguous between "drop
 // the entry" and "remove the package".
-func (in *installer) installApt(ctx context.Context, pkg string) error {
+func (in *installer) installApt(ctx context.Context, pkg, want string) (string, error) {
 	if !AptAvailable() {
-		return ErrAptUnavailable
+		return "", ErrAptUnavailable
 	}
 	if err := in.aptKnownName(ctx, pkg); err != nil {
-		return err
+		return "", err
+	}
+	st, err := aptQuery(ctx, pkg)
+	if err != nil {
+		return "", err
+	}
+	target, opts := pkg, []string(nil)
+	if want != "" {
+		target = pkg + "=" + want
+		// apt-get -y refuses a downgrade without this flag, which covers the
+		// whole transaction (apt-get(8)), so only a move off another
+		// installed version carries it.
+		if st.installed && st.version != want {
+			opts = []string{"--allow-downgrades"}
+		}
 	}
 	// apt-get -y refuses to change a held package. Lifting this package's
 	// hold, rather than passing --allow-change-held-packages, keeps every
 	// other held package fixed: that flag covers the whole transaction, so a
 	// dependency another pin holds could move (apt-get(8)). The job restores
 	// the hold as its last step (Engine.holdToPin).
-	if err := in.syncAptHold(ctx, pkg, false); err != nil {
-		return fmt.Errorf("lift the hold for the install: %w", err)
+	if herr := in.syncAptHold(ctx, pkg, false); herr != nil {
+		return "", fmt.Errorf("lift the hold for the install: %w", herr)
 	}
-	return in.aptGetInstall(ctx, []string{pkg})
+	if ierr := in.aptGetInstall(ctx, []string{target}, opts...); ierr != nil {
+		return "", ierr
+	}
+	if st, err = aptQuery(ctx, pkg); err != nil {
+		return "", err
+	}
+	if !st.installed {
+		return "", fmt.Errorf("apt-get succeeded but dpkg reports %s is not installed", pkg)
+	}
+	return st.version, nil
 }
 
-// aptGetInstall runs one apt-get install over a package set, retrying
-// the archives-lock failure the lock timeout cannot cover.
-func (in *installer) aptGetInstall(ctx context.Context, pkgs []string) error {
+// aptGetInstall runs one apt-get install over a package set, with opts
+// before the packages, retrying the archives-lock failure the lock timeout
+// cannot cover.
+func (in *installer) aptGetInstall(ctx context.Context, pkgs []string, opts ...string) error {
 	var lastErr error
 	for attempt := 1; attempt <= aptArchivesLockRetries; attempt++ {
-		args := aptGetArgs(append([]string{"install"}, append([]string{"--"}, pkgs...)...)...)
+		args := aptGetArgs(slices.Concat([]string{"install"}, opts, []string{"--"}, pkgs)...)
 		out, err := in.runCombined(ctx, "apt-get", args...)
 		if err == nil {
 			return nil
