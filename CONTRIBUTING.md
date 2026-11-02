@@ -12,6 +12,7 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 - A cached answer is keyed on every input that decides it: a probe verdict on the declared `version_args`, the probed file's identity and a `pip:` tool's resolved interpreter's identity (`fileIdentity`: device, inode and ctime besides path, mode, size and mtime, since a replacement can keep those four), a latest version on the prerelease line and the aqua definition's `type`, `version_source`, `version_filter` and `version_prefix`. A missing key part keeps serving the old answer after that input changes.
 - A directory under `ToolsDir` that holds code the engine runs joins `managedDirs`, and the install that writes into it creates it with `ensureManagedDirs`. A directory left out is neither created owner-writable nor judged by `VerifyRootIntegrity`.
 - A new sentinel error that an `httpapi` route returns needs a case in `writeEngineError`, or the route answers 400 `bad_request`. Add it under "Replies and refusals" in `docs/http-api.md` and to the README's API list too.
+- `converged` compares every manifest input an install decides on with the state record or the live check: the version, `python`, the dependency edges and an `apt:` row's pin, its version when pinned, and dpkg's version against the record a failed install left. A new install-deciding field needs a `Patch` transition, a `converged` comparison and a red `Reconcile` test, or `Reconcile` reports converged while the manifest asks for something else.
 
 ## Checks
 

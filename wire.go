@@ -127,11 +127,13 @@ type ToolInfo struct {
 	// checksum while the other 402 do.
 	Checksum string   `json:"checksum,omitempty"`
 	Requires []string `json:"requires,omitempty"`
-	// Dependents names the ENABLED entries that require this tool,
-	// directly or as the implied backend of their source kind: what a
-	// consumer needs BEFORE sending a disable/remove, instead of
-	// learning it from a 409. Advisory only — the engine re-derives the
-	// set under the manifest lock, so a stale inventory is still refused.
+	// Dependents names the ENABLED entries that need this tool, directly
+	// (Requires or the implied backend of their source kind) or through
+	// another entry, disabled or not, or a catalog tool their install would
+	// add: the set a 409 names and a forced disable or remove takes, for a
+	// consumer to show BEFORE sending one. Advisory
+	// only: the engine re-derives the set under the manifest lock, so a
+	// stale inventory is still refused.
 	Dependents []string `json:"dependents,omitempty"`
 	Pin        bool     `json:"pin,omitempty"`
 	Disabled   bool     `json:"disabled,omitempty"`
@@ -182,9 +184,12 @@ type ReconcileMode int
 
 const (
 	// ReconcileMissing converges intent without network: installs
-	// missing enabled entries, sets each apt: entry's dpkg hold to its
-	// pin, uninstalls the engine-owned footprint of disabled entries and
-	// orphaned state rows. Zero fetches when already converged.
+	// missing enabled entries, those installed at another version than
+	// the manifest names or, for apt:, than dpkg reports when pinned or
+	// after a failed install, and dependencies with no enabled entry,
+	// sets each apt: entry's dpkg hold to its pin, uninstalls the
+	// engine-owned footprint of disabled entries and orphaned state rows
+	// no install needs. Zero fetches when already converged.
 	ReconcileMissing ReconcileMode = iota
 	// ReconcileFull is ReconcileMissing plus an update pass over
 	// unpinned entries (enqueued as a separate update job).

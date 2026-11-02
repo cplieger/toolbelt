@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -91,11 +93,11 @@ func TestInstallingSet_ReportsAJobBeforeItHasResolvedAPlan(t *testing.T) {
 	}
 }
 
-// TestJobQueue_TerminalViewsSurviveTheRecentWindow pins what Wait stands
-// on. The recent ring is bounded for the jobs endpoint, so a burst longer
-// than it pushes early jobs out of history — and a caller blocked in
-// EnsureInstalled or a boot gate must still be able to collect its
-// result, not be told its job never existed.
+// TestJobQueue_TerminalViewsSurviveTheRecentWindow pins a late Wait. The
+// recent ring is bounded for the jobs endpoint, so a burst longer than it
+// pushes early jobs out of history, and a caller that starts Wait after
+// its job ended must still collect the result, not be told its job never
+// existed.
 func TestJobQueue_TerminalViewsSurviveTheRecentWindow(t *testing.T) {
 	// Exactly the terminal map's retention bound: the first job must
 	// still be there when the last one lands.
@@ -185,8 +187,8 @@ func TestJobQueue_ReservationHoldsItsPlaceUnseen(t *testing.T) {
 	if v, err := q.Wait(t.Context(), busy.ID); err != nil || v.State != JobDone {
 		t.Fatalf("Setup: Wait(busy) = %+v, %v", v, err)
 	}
-	if _, known := q.lookup(res.id); known {
-		t.Error("lookup knows the reserved job, want it unseen")
+	if _, err := q.Wait(t.Context(), res.id); !errors.Is(err, ErrUnknownJob) {
+		t.Errorf("Wait on the reserved job = %v, want ErrUnknownJob (unseen)", err)
 	}
 	if q.Cancel(res.id) {
 		t.Error("Cancel reached the reserved job, want it unseen")
@@ -259,4 +261,195 @@ func TestJobQueue_PublishAfterCloseIsCancelled(t *testing.T) {
 	if final, err := q.Wait(ctx, v.ID); err != nil || final.State != JobCancelled {
 		t.Errorf("Wait = %+v, %v, want the cancelled view", final, err)
 	}
+}
+
+// TestJobQueue_WaitKeepsItsJobThroughABurstPastTheHistory pins that a
+// caller already blocked in Wait (EnsureInstalled, a boot gate) receives
+// its job's result however many jobs finish after it: the bounded
+// terminal history may drop the job's id, never a live waiter's answer.
+func TestJobQueue_WaitKeepsItsJobThroughABurstPastTheHistory(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		// More than the terminal history keeps, so the waited job's id is
+		// gone from it by the time the burst ends.
+		const burst = 4*jobHistory + 5
+		gate := make(chan struct{})
+		finished := make(chan string, burst+1)
+		q := newJobQueue(
+			func(v *Job) {
+				if v.State == JobDone {
+					finished <- v.ID // buffered: the callback runs under the queue lock
+				}
+			},
+			nil, slog.New(&logCapture{}),
+			func(_ context.Context, j *job, _ func(string)) error {
+				if j.names[0] == "waited" {
+					<-gate
+				}
+				return nil
+			},
+		)
+		t.Cleanup(q.Close)
+
+		waited, err := q.Enqueue(JobKindInstall, []string{"waited"})
+		if err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		type result struct {
+			v   *Job
+			err error
+		}
+		got := make(chan result, 1)
+		go func() {
+			v, err := q.Wait(t.Context(), waited.ID)
+			got <- result{v, err}
+		}()
+		synctest.Wait() // the worker is parked on the gate, Wait on the job
+		close(gate)
+		<-finished
+		for range burst {
+			if _, err := q.Enqueue(JobKindInstall, []string{"burst"}); err != nil {
+				t.Fatalf("Enqueue: %v", err)
+			}
+			<-finished
+		}
+
+		r := <-got
+		if r.err != nil {
+			t.Fatalf("Wait after a %d-job burst: %v, want the waited job's result", burst, r.err)
+		}
+		if r.v.ID != waited.ID || r.v.State != JobDone {
+			t.Errorf("Wait = %s %s, want %s done", r.v.ID, r.v.State, waited.ID)
+		}
+	})
+}
+
+// TestJobQueue_WaitPrefersAFinishedJobToACancelledContext pins the order a
+// boot gate relies on: a job that already ended returns its result even
+// when the caller's context is gone.
+func TestJobQueue_WaitPrefersAFinishedJobToACancelledContext(t *testing.T) {
+	q := newLineQueue(t, func(*job, func(string)) error { return nil })
+	jv, err := q.Enqueue(JobKindInstall, []string{"tool"})
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if _, err := q.Wait(t.Context(), jv.ID); err != nil {
+		t.Fatalf("Setup: Wait: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	v, err := q.Wait(ctx, jv.ID)
+	if err != nil {
+		t.Fatalf("Wait with a cancelled context on a finished job: %v, want its result", err)
+	}
+	if v.State != JobDone {
+		t.Errorf("Wait = %s, want %s", v.State, JobDone)
+	}
+}
+
+// endsJobOnDone is a cancelled context whose Done call first ends the
+// waited job, so a Wait already past its first done check meets the job's
+// end and ctx's end in the same select.
+type endsJobOnDone struct {
+	context.Context
+	endJob func()
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *endsJobOnDone) Done() <-chan struct{} {
+	c.once.Do(func() {
+		c.endJob()
+		close(c.closed)
+	})
+	return c.closed
+}
+
+func (c *endsJobOnDone) Err() error {
+	select {
+	case <-c.closed:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// TestJobQueue_WaitPrefersAJobThatEndsAsItsContextDoes pins the same order
+// when the job ends while Wait is blocked and ctx is done by the time the
+// waiter runs: Go picks a ready select case at random, so the result must
+// not depend on which case won.
+func TestJobQueue_WaitPrefersAJobThatEndsAsItsContextDoes(t *testing.T) {
+	gate := make(chan struct{})
+	q := newLineQueue(t, func(*job, func(string)) error {
+		<-gate
+		return nil
+	})
+	// Each round is a fresh coin toss for a select that does not re-check
+	// done, so 64 rounds miss the bug with odds of 2^-64.
+	for i := range 64 {
+		jv, err := q.Enqueue(JobKindInstall, []string{"tool"})
+		if err != nil {
+			t.Fatalf("Setup: Enqueue: %v", err)
+		}
+		ctx := &endsJobOnDone{
+			Context: t.Context(),
+			closed:  make(chan struct{}),
+			endJob: func() {
+				gate <- struct{}{}
+				if _, err := q.Wait(t.Context(), jv.ID); err != nil {
+					t.Errorf("Setup: Wait for the job to end: %v", err)
+				}
+			},
+		}
+		v, err := q.Wait(ctx, jv.ID)
+		if err != nil {
+			t.Fatalf("round %d: Wait = %v, want the job's result", i, err)
+		}
+		if v.ID != jv.ID || v.State != JobDone {
+			t.Fatalf("round %d: Wait = %s %s, want %s done", i, v.ID, v.State, jv.ID)
+		}
+	}
+}
+
+// TestJobQueue_CloseReleasesAWaiterOnAQueuedJob pins that shutdown answers
+// a waiter whose job never ran: it gets the job cancelled by shutdown, not
+// a block until its own context expires.
+func TestJobQueue_CloseReleasesAWaiterOnAQueuedJob(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q := newJobQueue(nil, nil, slog.New(&logCapture{}),
+			func(ctx context.Context, j *job, _ func(string)) error {
+				if j.names[0] == "busy" {
+					<-ctx.Done() // runs until Close cancels it
+					return ctx.Err()
+				}
+				return nil
+			})
+		t.Cleanup(q.Close)
+		if _, err := q.Enqueue(JobKindInstall, []string{"busy"}); err != nil {
+			t.Fatalf("Setup: Enqueue: %v", err)
+		}
+		queued, err := q.Enqueue(JobKindInstall, []string{"queued"})
+		if err != nil {
+			t.Fatalf("Setup: Enqueue: %v", err)
+		}
+		type result struct {
+			v   *Job
+			err error
+		}
+		got := make(chan result, 1)
+		go func() {
+			v, err := q.Wait(t.Context(), queued.ID)
+			got <- result{v, err}
+		}()
+		synctest.Wait() // the worker runs busy, Wait is parked on queued
+
+		q.Close()
+		r := <-got
+		if r.err != nil {
+			t.Fatalf("Wait on a queued job across Close: %v, want its cancelled view", r.err)
+		}
+		if r.v.State != JobCancelled || r.v.CancelCause != CancelShutdown {
+			t.Errorf("Wait = state %s cause %v, want cancelled by shutdown", r.v.State, r.v.CancelCause)
+		}
+	})
 }
