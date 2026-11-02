@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestLatestGitHubTag_PaginatesAndVersionCompares reproduces the
@@ -1079,5 +1082,121 @@ func TestLatestGoModule_NoModuleOwnsThePath(t *testing.T) {
 	want := []string{"/example.com/a/b/@v/list", "/example.com/a/@v/list", "/example.com/@v/list"}
 	if !slices.Equal(*asked, want) {
 		t.Errorf("asked %q, want %q", *asked, want)
+	}
+}
+
+// deepGoPath is a valid package path with n candidate module paths:
+// example.com and each of its n-1 nested directories.
+func deepGoPath(n int) string {
+	return "example.com" + strings.Repeat("/d", n-1)
+}
+
+func TestLatestGoModule_PrefixCap(t *testing.T) {
+	t.Run("a path past the cap is refused before any request", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + deepGoPath(maxGoModulePrefixes+1)}, nil)
+		if err == nil || !strings.Contains(err.Error(), strconv.Itoa(maxGoModulePrefixes)) {
+			t.Errorf("Latest = %v, want an error naming the cap of %d", err, maxGoModulePrefixes)
+		}
+		if len(*asked) != 0 {
+			t.Errorf("asked %d paths, want none", len(*asked))
+		}
+	})
+	t.Run("a path at the cap walks every prefix", func(t *testing.T) {
+		v, asked := goProxy(t, map[string]string{})
+		_, err := v.Latest(t.Context(), &Tool{Source: "go:" + deepGoPath(maxGoModulePrefixes)}, nil)
+		if err == nil || !strings.Contains(err.Error(), "no module") {
+			t.Errorf("Latest = %v, want no module found", err)
+		}
+		if len(*asked) != maxGoModulePrefixes {
+			t.Errorf("asked %d paths, want %d", len(*asked), maxGoModulePrefixes)
+		}
+	})
+}
+
+// slowly delays every answer of h, so a walk of many requests outlasts a
+// shortened resolution budget while each request stays inside its own.
+func slowly(delay time.Duration, h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			h(w, r)
+		case <-r.Context().Done():
+		}
+	}
+}
+
+func shortenResolutionBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := latestResolutionBudget
+	latestResolutionBudget = d
+	t.Cleanup(func() { latestResolutionBudget = orig })
+}
+
+func TestLatest_OneDeadlineBoundsTheWholeResolution(t *testing.T) {
+	const delay = 40 * time.Millisecond
+	shortenResolutionBudget(t, 5*delay)
+
+	cases := []struct {
+		name    string
+		tool    *Tool
+		aq      *AquaPackage
+		handler http.HandlerFunc
+		walk    int // requests the walk makes when nothing stops it
+	}{
+		{
+			name:    "go module prefix walk",
+			tool:    &Tool{Source: "go:" + deepGoPath(maxGoModulePrefixes)},
+			handler: http.NotFound,
+			walk:    maxGoModulePrefixes,
+		},
+		{
+			name: "github tag pages",
+			tool: &Tool{Source: "aqua:o/r"},
+			aq:   &AquaPackage{VersionSource: "github_tag"},
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, fullPage("name", "v1.0.0"))
+			},
+			walk: listPageCap,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			asked := 0
+			srv := httptest.NewTestServer(t, slowly(delay, func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				asked++
+				mu.Unlock()
+				tc.handler(w, r)
+			}))
+			v := newTestVersionResolver(srv.Client())
+			start := time.Now()
+			_, err := v.Latest(t.Context(), tc.tool, tc.aq)
+			elapsed := time.Since(start)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Errorf("Latest = %v, want context.DeadlineExceeded", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if asked >= tc.walk {
+				t.Errorf("answered %d requests, want fewer than the %d of an unbounded walk", asked, tc.walk)
+			}
+			if limit := latestResolutionBudget + 3*delay; elapsed > limit {
+				t.Errorf("Latest returned after %s, want within %s", elapsed, limit)
+			}
+		})
+	}
+}
+
+func TestLatest_AptIsOutsideTheResolutionBudget(t *testing.T) {
+	fakeRoot(t)
+	stubApt(t)
+	shortenResolutionBudget(t, time.Nanosecond)
+	got, err := newTestVersionResolver(nil).Latest(t.Context(), &Tool{Source: "apt:jq"}, nil)
+	if err != nil || got != "1.7.1-1" {
+		t.Errorf("Latest = %q, %v; want the stub's candidate 1.7.1-1", got, err)
 	}
 }

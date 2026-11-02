@@ -27,6 +27,16 @@ import (
 // 429 Retry-After inside this window).
 const versionLookupBudget = 45 * time.Second
 
+// latestResolutionBudget bounds one whole resolution, so a walk of many
+// requests (tag pages, Go module prefixes, go.mod reads) cannot restart
+// versionLookupBudget per request. A var so a test can shorten it.
+var latestResolutionBudget = 2 * time.Minute
+
+// maxGoModulePrefixes caps the candidate module paths of one go: package
+// path, each costing a proxy request. The go command sets no limit; the
+// deepest common command path, golang.org/x/tools's fieldalignment, has 9.
+const maxGoModulePrefixes = 16
+
 // versionResponseCap bounds one version-lookup response body.
 const versionResponseCap = 4 << 20
 
@@ -97,6 +107,13 @@ func (v *versionResolver) Cached(t *Tool, aq *AquaPackage) string {
 // tool's recorded version is itself a prerelease.
 func (v *versionResolver) Latest(ctx context.Context, t *Tool, aq *AquaPackage) (string, error) {
 	key := toolLatestKey(t, aq)
+	// apt resolves through local commands under aptUpdateBudget, which is
+	// longer than this budget.
+	if !strings.HasPrefix(t.Source, SourceApt+":") {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, latestResolutionBudget)
+		defer cancel()
+	}
 	latest, err := v.resolve(ctx, t.Source, key.allowPre, aq)
 	if err != nil {
 		return "", err
@@ -500,7 +517,11 @@ func (v *versionResolver) latestGoModule(ctx context.Context, pkgPath string, al
 	if err := module.CheckImportPath(pkgPath); err != nil {
 		return "", fmt.Errorf("invalid go package path %q: %w", pkgPath, err)
 	}
-	for _, mod := range goModulePrefixes(pkgPath) {
+	prefixes := goModulePrefixes(pkgPath)
+	if len(prefixes) > maxGoModulePrefixes {
+		return "", fmt.Errorf("go package path %q has %d candidate module paths, more than the %d the engine looks up", pkgPath, len(prefixes), maxGoModulePrefixes)
+	}
+	for _, mod := range prefixes {
 		ver, found, err := v.latestModuleVersion(ctx, mod, allowPre)
 		if err != nil {
 			return "", err
