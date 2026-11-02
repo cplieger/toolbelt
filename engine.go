@@ -646,14 +646,19 @@ type patchOutcome struct {
 	disabledChanged bool
 	nowDisabled     bool
 	pinChanged      bool
+	requiresChanged bool
+	// unmetDeps is a requires change on an enabled row that names a
+	// dependency with no enabled row, which only an install provides.
+	unmetDeps bool
 }
 
 // Patch merges fields into an existing tool and enqueues the follow-up
 // job the transition needs: enable → install (when missing), disable →
 // footprint uninstall (template kept), version or python change on an
 // enabled tool → reinstall, pin change on an enabled apt: tool where apt is
-// available → install, which applies the dpkg hold. Returns nil when no job
-// is needed.
+// available → install, which applies the dpkg hold, requires change on an
+// enabled tool naming a dependency with no enabled row → install, which adopts
+// or enables it. Returns nil when no job is needed.
 //
 //nolint:gocritic // hugeParam: v3 takes a value; a pointer breaks the API.
 func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
@@ -725,6 +730,7 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	}
 	*out = applyPatch(&t, req)
 	m.Tools[name] = t
+	out.unmetDeps = out.requiresChanged && !t.Disabled && !depsSatisfied(m, name, &t, backends)
 	// A forced disable cascades to the enabled dependents (one level,
 	// mirroring RemoveWithDependents): a dependent left enabled would
 	// declare intent against a disabled prerequisite.
@@ -765,6 +771,7 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 		t.Description = *req.Description
 	}
 	if req.Requires != nil {
+		out.requiresChanged = !slices.Equal(*req.Requires, t.Requires)
 		t.Requires = *req.Requires
 	}
 	if req.Install != nil {
@@ -785,7 +792,8 @@ func (out *patchOutcome) job(name string) (kind string, names []string) {
 		return JobKindDisable, append([]string{name}, out.cascaded...)
 	case out.disabledChanged && !out.nowDisabled,
 		(out.versionChanged || out.pythonChanged) && !out.nowDisabled,
-		out.pinChanged && sourceKind(out.source) == SourceApt && !out.nowDisabled && AptAvailable():
+		out.pinChanged && sourceKind(out.source) == SourceApt && !out.nowDisabled && AptAvailable(),
+		out.unmetDeps:
 		return JobKindInstall, []string{name}
 	default:
 		return "", nil
@@ -1025,7 +1033,7 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 	}
 	t, inManifest := m.Tools[name]
 	status := e.store.State().Tools[name]
-	if inManifest && !t.Disabled && e.converged(name, &t, &status) {
+	if inManifest && !t.Disabled && e.converged(m, name, &t, &status, e.backends()) {
 		return nil
 	}
 	jv, err := e.ensureJob(ctx, name, &t, inManifest)
@@ -1509,6 +1517,37 @@ func depsOf(name string, t *Tool, backends map[string]string) []string {
 	return deps
 }
 
+// depsSatisfied reports whether every depsOf edge of name has an enabled
+// manifest row. Each dependency's own install state is its row's business; the
+// edge only needs the row the install plan would otherwise adopt or enable.
+func depsSatisfied(m *Manifest, name string, t *Tool, backends map[string]string) bool {
+	for _, d := range depsOf(name, t, backends) {
+		if dt, ok := m.Tools[d]; !ok || dt.Disabled {
+			return false
+		}
+	}
+	return true
+}
+
+// installClosure is names and every row their install plan walks through
+// depsOf, transitively.
+func installClosure(m *Manifest, names []string, backends map[string]string) map[string]bool {
+	seen := map[string]bool{}
+	stack := slices.Clone(names)
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		if t, ok := m.Tools[n]; ok {
+			stack = append(stack, depsOf(n, &t, backends)...)
+		}
+	}
+	return seen
+}
+
 // installTool installs one tool when not already at its manifest version,
 // recording status either way; a sparse entry resolves and persists latest.
 //
@@ -1918,19 +1957,23 @@ func (e *Engine) runReconcile(ctx context.Context, j *job, output func(string)) 
 // reconcilePlan classifies the manifest and state rows into the
 // reconcile work sets: enabled-but-missing installs, disabled-but-owned
 // footprints, and orphaned state rows (owned footprint, no manifest
-// row).
+// row). A disabled row the missing installs depend on is not an extra:
+// their plan enables it, and uninstalling it first would only reinstall it.
 func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) {
 	st := e.store.State()
+	backends := e.backends()
 	for n := range m.Tools {
 		t := m.Tools[n]
 		status := st.Tools[n]
 		switch {
 		case t.Disabled && status.owned():
 			extras = append(extras, n)
-		case !t.Disabled && !e.converged(n, &t, &status):
+		case !t.Disabled && !e.converged(m, n, &t, &status, backends):
 			missing = append(missing, n)
 		}
 	}
+	needed := installClosure(m, missing, backends)
+	extras = slices.DeleteFunc(extras, func(n string) bool { return needed[n] })
 	for n := range st.Tools {
 		status := st.Tools[n]
 		if _, inManifest := m.Tools[n]; !inManifest && status.owned() {
@@ -1944,12 +1987,13 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 }
 
 // converged is probeInstalled on a venv built for the row's Python request at
-// the row's version, and for an apt: row also a dpkg hold equal to its pin, so
-// Reconcile applies a hand-edited version and repairs a hold that a failed
-// apt-mark, a recreated container or a hand-run apt-mark left wrong. An
-// unreadable dpkg record is not converged, so the install that follows records why.
-func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
-	if s.Python != t.Python || versionDrifted(t, s) {
+// the row's version, with an enabled row for every dependency, and for an apt:
+// row also a dpkg hold equal to its pin, so Reconcile applies a hand-edited
+// version or requires and repairs a hold that a failed apt-mark, a recreated
+// container or a hand-run apt-mark left wrong. An unreadable dpkg record is not
+// converged, so the install that follows records why.
+func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, backends map[string]string) bool {
+	if s.Python != t.Python || versionDrifted(t, s) || !depsSatisfied(m, name, t, backends) {
 		return false
 	}
 	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")

@@ -21,7 +21,7 @@ The handler has no authentication and adds no middleware except its own cache po
 | `GET {prefix}` | `Inventory` | |
 | `GET {prefix}/search?q=` | `SearchWithCounts` | Add `&unavailable=1` to include tools the catalog cannot install, with the reason. See below |
 | `POST {prefix}` | `Add` | 202 `{job}`, with a null job for a template |
-| `PATCH {prefix}/{name}` | `Patch` | Merges fields into an entry. A version or python change on an enabled entry starts a reinstall, enabling installs and disabling uninstalls. 409 `has_dependents` with the names |
+| `PATCH {prefix}/{name}` | `Patch` | Merges fields into an entry. A version or python change on an enabled entry starts a reinstall, enabling installs and disabling uninstalls, and a `requires` change that names a tool with no enabled entry installs that tool. 409 `has_dependents` with the names |
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on a template |
 | `POST {prefix}/update` | `Update` | Optional `{"names": [...]}` body |
 | `DELETE {prefix}/{name}?force=1` | `Remove` or `RemoveWithDependents` | 202 `{job, dependents}`. 409 without `force`. 409 `essential` whatever `force` says |
@@ -32,7 +32,7 @@ The handler has no authentication and adds no middleware except its own cache po
 
 `POST {prefix}` takes `name` and the optional `source` (required when the catalog does not know the name), `version`, `description`, `origin`, `install`, `uninstall`, `probe`, `python`, `requires`, `version_args`, `pin` and `disabled`. An empty `version_args` takes the catalog's.
 
-`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them too. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry. A `pin` change on an enabled `apt:` entry returns the job that sets the package's dpkg hold.
+`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them too. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry. A `pin` change on an enabled `apt:` entry returns the job that sets the package's dpkg hold. A `requires` change on an enabled entry returns the job that adds or enables each tool it names that has no enabled entry, and returns a null job when every one has.
 
 `DELETE` takes `force` in the query. A cascade that includes an essential tool is refused whole.
 

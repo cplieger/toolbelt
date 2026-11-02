@@ -48,7 +48,7 @@ Every field except the name is optional, and the catalog fills in the rest.
 | `version` | The version to install. Empty means the latest. A hand edit of an installed entry's version applies at its next install or reconcile |
 | `pin` | Keep this version. Updates skip the entry |
 | `disabled` | Make the entry a template that installs nothing |
-| `requires` | Other tools this one needs, installed first |
+| `requires` | Other tools this one needs, installed first. A name with no enabled entry is added from the catalog or enabled at the entry's next install or reconcile, including after a hand edit |
 | `python` | For a `pip:` entry, the Python version uv builds the tool on, such as `3.14`. Empty takes the newest. A change through `Patch` reinstalls an enabled tool, and a hand edit applies at its next install or reconcile |
 | `version_args` | The arguments that make the tool print its version, for example `["--version"]`. The install check then compares the printed version. When unset, an entry the catalog completes takes the catalog's, and otherwise the check runs `--version` and only requires an answer. An argument may not contain a NUL byte |
 | `install`, `uninstall`, `probe` | The bash scripts for a `manual` source |
