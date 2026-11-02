@@ -76,8 +76,12 @@ func TestAptStatusFrom(t *testing.T) {
 		{state: "only the native architecture", out: "amd64\thold\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true, held: true}},
 		{state: "only a foreign architecture", out: "i386\tinstall\tinstalled\t1.0\n"},
 		{state: "only an unrecorded architecture", out: "\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
-		{state: "native among several", out: "i386\thold\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
+		{state: "native among several", out: "i386\thold\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true, foreignHeld: []string{"i386"}}},
 		{state: "no native among several", out: "i386\tinstall\tinstalled\t1.0\narmhf\tinstall\tinstalled\t1.0\n"},
+		{state: "only a held foreign architecture", out: "i386\thold\tinstalled\t1.0\n", want: aptStatus{foreignHeld: []string{"i386"}}},
+		{state: "several held foreign architectures", out: "i386\thold\tinstalled\t1.0\narmhf\thold\tinstalled\t1.0\n", want: aptStatus{foreignHeld: []string{"i386", "armhf"}}},
+		{state: "a held foreign architecture that is not installed", out: "i386\thold\tconfig-files\t1.0\n"},
+		{state: "held for the native and a foreign architecture", out: "amd64\thold\tinstalled\t1.0\ni386\thold\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true, held: true, foreignHeld: []string{"i386"}}},
 		{state: "empty-output", out: "", wantErr: true},
 		{state: "one field", out: "installed\n", wantErr: true},
 		{state: "space-separated", out: "install installed 1.0\n", wantErr: true},
@@ -88,7 +92,7 @@ func TestAptStatusFrom(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("aptStatusFrom(%q) error = %v, want error %v", tc.out, err, tc.wantErr)
 			}
-			if got != tc.want {
+			if !sameAptStatus(got, tc.want) {
 				t.Errorf("aptStatusFrom(%q) = %+v, want %+v", tc.out, got, tc.want)
 			}
 		})
@@ -113,6 +117,11 @@ func TestAptStatusFrom(t *testing.T) {
 			}
 		})
 	}
+}
+
+func sameAptStatus(a, b aptStatus) bool {
+	return a.version == b.version && a.installed == b.installed && a.held == b.held &&
+		slices.Equal(a.foreignHeld, b.foreignHeld)
 }
 
 // TestAptStatusFrom_AgreesWithRealDpkg checks the parser against the real
@@ -143,7 +152,7 @@ func TestAptQuery_UnknownPackageAgreesWithRealDpkg(t *testing.T) {
 		t.Skip("dpkg-query is not on this host")
 	}
 	st, err := aptQuery(t.Context(), "toolbelt-no-such-package")
-	if err != nil || st != (aptStatus{}) {
+	if err != nil || !sameAptStatus(st, aptStatus{}) {
 		t.Errorf("aptQuery(unknown) = %+v, %v; want the zero status and no error", st, err)
 	}
 }
@@ -160,7 +169,7 @@ func TestAptQuery_ReadsTheUnknownAnswerUnderATranslatedLocale(t *testing.T) {
 		"else echo \"dpkg-query: Kein Paket gefunden, das auf $4 passt\" >&2; fi\nexit 1\n")
 
 	st, err := aptQuery(t.Context(), "jq")
-	if err != nil || st != (aptStatus{}) {
+	if err != nil || !sameAptStatus(st, aptStatus{}) {
 		t.Errorf("aptQuery(unknown) under a German locale = %+v, %v; want the zero status and no error", st, err)
 	}
 }
@@ -175,9 +184,9 @@ func TestAptQuery_ReadsTheNativeRecordOfAMultiArchPackage(t *testing.T) {
 		native string
 		want   aptStatus
 	}{
-		{native: "amd64", want: aptStatus{version: "2.41-12", installed: true}},
+		{native: "amd64", want: aptStatus{version: "2.41-12", installed: true, foreignHeld: []string{"i386"}}},
 		{native: "i386", want: aptStatus{version: "2.41-12", installed: true, held: true}},
-		{native: "arm64", want: aptStatus{}},
+		{native: "arm64", want: aptStatus{foreignHeld: []string{"i386"}}},
 	}
 	for _, tc := range cases {
 		t.Run("native "+tc.native, func(t *testing.T) {
@@ -190,7 +199,7 @@ func TestAptQuery_ReadsTheNativeRecordOfAMultiArchPackage(t *testing.T) {
 			}
 
 			st, err := aptQuery(t.Context(), "libc6")
-			if err != nil || st != tc.want {
+			if err != nil || !sameAptStatus(st, tc.want) {
 				t.Errorf("aptQuery(libc6) on %s = %+v, %v; want %+v", tc.native, st, err, tc.want)
 			}
 		})

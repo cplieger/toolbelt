@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -141,10 +142,19 @@ func TestRemove_DisabledDependentDoesNotBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	jv, deps, err := e.Remove("base")
-	if err != nil {
-		t.Fatalf("remove with only a disabled dependent = %v (deps %v)", err, deps)
+	if err != nil || len(deps) != 0 {
+		t.Fatalf("remove with only a disabled dependent = %v (deps %v), want success naming none", err, deps)
 	}
-	waitJob(t, e, jv.ID)
+	if final := waitJob(t, e, jv.ID); final.State != JobDone || !slices.Equal(final.Names, []string{"base"}) {
+		t.Errorf("remove job = %s %v, want done over [base]", final.State, final.Names)
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := m.Tools["dep"]; !ok || !row.Disabled {
+		t.Errorf("dep row = %+v (present %v), want the disabled template kept", row, ok)
+	}
 }
 
 func TestReconcile_ConvergesBothWays(t *testing.T) {
@@ -213,6 +223,72 @@ func TestReconcile_RebuildsAVenvOnAnotherPythonRequest(t *testing.T) {
 	}
 	if out := strings.Join(waitJob(t, e, jv.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
 		t.Errorf("second reconcile output = %q, want everything converged", out)
+	}
+}
+
+// TestReconcile_InstallsTheVersionTheManifestNowNames: a hand edit of an
+// installed row's version is a request Reconcile applies, so tools.json and
+// tools-state.json agree once it reports converged.
+func TestReconcile_InstallsTheVersionTheManifestNowNames(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "tool", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		tl := m.Tools["tool"]
+		tl.Version = "2"
+		m.Tools["tool"] = tl
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("reconcile job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if got := e.store.State().Tools["tool"].InstalledVersion; got != "2" {
+		t.Errorf("installed version = %q, want 2", got)
+	}
+	out, err := exec.Command(filepath.Join(e.toolsDir, "bin", "tool")).Output()
+	if err != nil || strings.TrimSpace(string(out)) != "tool 2" {
+		t.Errorf("installed binary prints %q (%v), want tool 2", out, err)
+	}
+
+	jv, _, err = e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := strings.Join(waitJob(t, e, jv.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
+		t.Errorf("second reconcile output = %q, want everything converged", out)
+	}
+}
+
+// TestReconcile_SparseRowIsOfflineWhenInstalled: an empty manifest version
+// means the latest, which is resolved only by an install, so an installed
+// sparse row is converged and Reconcile asks no version source.
+func TestReconcile_SparseRowIsOfflineWhenInstalled(t *testing.T) {
+	e := newTestEngineClient(t, nil, offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		tl := m.Tools["tool"]
+		tl.Version = ""
+		m.Tools["tool"] = tl
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jv, _, err := e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, jv.ID)
+	if out := strings.Join(final.OutputTail, "\n"); final.State != JobDone || !strings.Contains(out, "everything converged") {
+		t.Errorf("reconcile = %s %q, want done and everything converged", final.State, out)
 	}
 }
 
@@ -610,6 +686,30 @@ func TestEnsureInstalled_EnablesDisabledTemplate(t *testing.T) {
 	}
 }
 
+// TestEnsureInstalled_InstallsTheVersionTheManifestNowNames: a caller that
+// needs the tool now gets the version the manifest names, as Reconcile would.
+func TestEnsureInstalled_InstallsTheVersionTheManifestNowNames(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "tool", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		tl := m.Tools["tool"]
+		tl.Version = "2"
+		m.Tools["tool"] = tl
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := e.EnsureInstalled(ctx, "tool"); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	if got := e.store.State().Tools["tool"].InstalledVersion; got != "2" {
+		t.Errorf("installed version = %q, want 2", got)
+	}
+}
+
 func TestInventory_UnmanagedBinaryDoesNotMarkDisabledInstalled(t *testing.T) {
 	e := newTestEngine(t, nil)
 	err := e.store.MutateManifest(func(m *Manifest) error {
@@ -762,4 +862,569 @@ func TestReconcile_SweepsOrphanedState(t *testing.T) {
 	if st := e.store.State(); len(st.Tools["orphan"].Bins) > 0 || st.Tools["orphan"].InstalledVersion != "" {
 		t.Fatalf("orphaned state row survived the sweep: %+v", st.Tools["orphan"])
 	}
+}
+
+// depCatalog offers "dep" as a manual catalog entry, so an install plan can
+// adopt it offline.
+func depCatalog() *Catalog {
+	return &Catalog{Entries: map[string]CatalogEntry{
+		"dep": {Name: "dep", Source: SourceManual, Version: "1", Install: binStub("dep"), Probe: "dep"},
+	}}
+}
+
+// editManifest applies a hand edit to tools.json.
+func editManifest(t *testing.T, e *Engine, edit func(m *Manifest)) {
+	t.Helper()
+	if err := e.store.MutateManifest(func(m *Manifest) error { edit(m); return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// requireInstalled checks that name has an enabled manifest row, a state
+// record at version 1 and its binary in bin/.
+func requireInstalled(t *testing.T, e *Engine, name string) {
+	t.Helper()
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := m.Tools[name]; !ok || row.Disabled {
+		t.Errorf("%s manifest row = %+v (present %v), want enabled", name, row, ok)
+	}
+	if got := e.store.State().Tools[name].InstalledVersion; got != "1" {
+		t.Errorf("%s installed version = %q, want 1", name, got)
+	}
+	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", name)); err != nil {
+		t.Errorf("%s binary: %v", name, err)
+	}
+}
+
+// TestPatch_RequiresOnAnInstalledRowInstallsTheDependency: a requirement
+// added to an installed, enabled row is a request for the dependency, so the
+// Patch queues the install that adopts or enables it.
+func TestPatch_RequiresOnAnInstalledRowInstallsTheDependency(t *testing.T) {
+	for _, tc := range []struct {
+		seed func(m *Manifest)
+		name string
+	}{
+		{name: "absent dependency"},
+		{name: "disabled template", seed: func(m *Manifest) {
+			d := manualEntry("dep")
+			d.Disabled = true
+			m.Tools["dep"] = d
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+			addManual(t, e, "tool", nil)
+			if tc.seed != nil {
+				editManifest(t, e, tc.seed)
+			}
+			req := []string{"dep"}
+			jv, err := e.Patch("tool", PatchRequest{Requires: &req})
+			if err != nil || jv == nil {
+				t.Fatalf("patch requires: job=%v err=%v, want a job", jv, err)
+			}
+			if final := waitJob(t, e, jv.ID); final.State != JobDone {
+				t.Fatalf("patch job = %s (tail %v)", final.State, final.OutputTail)
+			}
+			requireInstalled(t, e, "dep")
+			requireInstalled(t, e, "tool")
+		})
+	}
+}
+
+// TestPatch_SatisfiedRequiresQueuesNothing: naming an enabled dependency, or
+// dropping a requirement, asks for nothing the disk lacks.
+func TestPatch_SatisfiedRequiresQueuesNothing(t *testing.T) {
+	e := newTestEngineClient(t, nil, offlineClient(), nil)
+	addManual(t, e, "dep", nil)
+	addManual(t, e, "tool", nil)
+	for _, req := range [][]string{{"dep"}, {}} {
+		jv, err := e.Patch("tool", PatchRequest{Requires: &req})
+		if err != nil || jv != nil {
+			t.Errorf("patch requires %v: job=%v err=%v, want neither", req, jv, err)
+		}
+	}
+}
+
+// TestPatch_RequiresOnADisabledTemplateQueuesNothing: a disabled template
+// has no install obligation, so naming a dependency it lacks adopts nothing
+// until the template is enabled.
+func TestPatch_RequiresOnADisabledTemplateQueuesNothing(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	editManifest(t, e, func(m *Manifest) {
+		tl := m.Tools["tool"]
+		tl.Disabled = true
+		m.Tools["tool"] = tl
+	})
+	req := []string{"dep"}
+	jv, err := e.Patch("tool", PatchRequest{Requires: &req})
+	if err != nil || jv != nil {
+		t.Errorf("patch requires: job=%v err=%v, want neither", jv, err)
+		if jv != nil {
+			waitJob(t, e, jv.ID)
+		}
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := m.Tools["dep"]; ok {
+		t.Errorf("dep manifest row = %+v, want none", row)
+	}
+	if got := m.Tools["tool"].Requires; !slices.Equal(got, req) {
+		t.Errorf("tool requires = %v, want %v", got, req)
+	}
+}
+
+// TestReconcile_InstallsAnUnsatisfiedDependency: a hand-edited requirement
+// with no manifest row is installed by Reconcile, which then converges.
+func TestReconcile_InstallsAnUnsatisfiedDependency(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	editManifest(t, e, func(m *Manifest) {
+		tl := m.Tools["tool"]
+		tl.Requires = []string{"dep"}
+		m.Tools["tool"] = tl
+	})
+	if final := reconcileJob(t, e); final.State != JobDone {
+		t.Fatalf("reconcile = %s (tail %v)", final.State, final.OutputTail)
+	}
+	requireInstalled(t, e, "dep")
+	if out := strings.Join(reconcileJob(t, e).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
+		t.Errorf("second reconcile output = %q, want everything converged", out)
+	}
+}
+
+// TestForcedCascade_ReconcileAddsNothingBack: a forced remove or disable of
+// base in base <- mid <- top takes top too, so no enabled row needs what went
+// and the next Reconcile, which could adopt base and mid from the catalog,
+// adds nothing back.
+func TestForcedCascade_ReconcileAddsNothingBack(t *testing.T) {
+	chain := []string{"base", "mid", "top"}
+	on := true
+	for _, tc := range []struct {
+		cascade func(e *Engine) (*Job, error)
+		name    string
+	}{
+		{name: "remove", cascade: func(e *Engine) (*Job, error) {
+			jv, _, err := e.RemoveWithDependents("base")
+			return jv, err
+		}},
+		{name: "disable", cascade: func(e *Engine) (*Job, error) {
+			return e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := &Catalog{Entries: map[string]CatalogEntry{}}
+			for _, n := range chain[:2] {
+				cat.Entries[n] = CatalogEntry{Name: n, Source: SourceManual, Version: "1", Install: binStub(n), Probe: n}
+			}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			addManual(t, e, "base", nil)
+			addManual(t, e, "mid", []string{"base"})
+			addManual(t, e, "top", []string{"mid"})
+			// A bystander keeps the manifest non-empty, so Reconcile runs.
+			addManual(t, e, "side", nil)
+			jv, err := tc.cascade(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if final := waitJob(t, e, jv.ID); final.State != JobDone || !slices.Equal(final.Names, chain) {
+				t.Errorf("cascade job = %s %v, want done over %v", final.State, final.Names, chain)
+			}
+			final := reconcileJob(t, e)
+			if out := strings.Join(final.OutputTail, "\n"); final.State != JobDone || !strings.Contains(out, "everything converged") {
+				t.Errorf("reconcile = %s %q, want done and everything converged", final.State, out)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range chain {
+				if row, ok := m.Tools[n]; ok && !row.Disabled {
+					t.Errorf("%s is enabled after the cascade and a Reconcile", n)
+				}
+				if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", n)); !os.IsNotExist(err) {
+					t.Errorf("%s binary is installed after the cascade and a Reconcile", n)
+				}
+			}
+		})
+	}
+}
+
+// TestForcedCascade_CrossesADisabledOrCatalogOnlyRow: in base <- mid <- top
+// with mid disabled (hydrated or still source-less), or absent with a catalog
+// entry, Reconcile's install plan enables or adopts mid for the enabled top
+// and then restores base. So the refusal and the inventory name top, a forced
+// remove or disable takes it, and the next Reconcile adds nothing back.
+func TestForcedCascade_CrossesADisabledOrCatalogOnlyRow(t *testing.T) {
+	on := true
+	for _, mid := range []struct {
+		row  func() (Tool, bool)
+		name string
+	}{
+		{name: "disabled mid", row: func() (Tool, bool) {
+			tl := manualEntry("mid")
+			tl.Requires = []string{"base"}
+			tl.Disabled = true
+			return tl, true
+		}},
+		{name: "source-less disabled mid", row: func() (Tool, bool) { return Tool{Disabled: true}, true }},
+		{name: "catalog-only mid", row: func() (Tool, bool) { return Tool{}, false }},
+	} {
+		for _, tc := range []struct {
+			cascade func(e *Engine) (*Job, error)
+			name    string
+		}{
+			{name: "remove", cascade: func(e *Engine) (*Job, error) {
+				jv, _, err := e.RemoveWithDependents("base")
+				return jv, err
+			}},
+			{name: "disable", cascade: func(e *Engine) (*Job, error) {
+				return e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+			}},
+		} {
+			t.Run(mid.name+" "+tc.name, func(t *testing.T) {
+				cat := &Catalog{Entries: map[string]CatalogEntry{
+					"base": {Name: "base", Source: SourceManual, Version: "1", Install: binStub("base"), Probe: "base"},
+					"mid":  {Name: "mid", Source: SourceManual, Version: "1", Install: binStub("mid"), Probe: "mid", Requires: []string{"base"}},
+				}}
+				e := newTestEngineClient(t, cat, offlineClient(), nil)
+				addManual(t, e, "base", nil)
+				addManual(t, e, "top", nil)
+				// A bystander keeps the manifest non-empty, so Reconcile runs.
+				addManual(t, e, "side", nil)
+				// After the installs, which hydrate a source-less row.
+				editManifest(t, e, func(m *Manifest) {
+					top := m.Tools["top"]
+					top.Requires = []string{"mid"}
+					m.Tools["top"] = top
+					if row, ok := mid.row(); ok {
+						m.Tools["mid"] = row
+					}
+				})
+				want := []string{"top"}
+				if row := inventoryRow(t, e, "base"); !slices.Equal(row.Dependents, want) {
+					t.Errorf("inventory dependents of base = %v, want %v", row.Dependents, want)
+				}
+				if _, deps, err := e.Remove("base"); err == nil {
+					t.Fatalf("Remove(base) succeeded (dependents %v), want DependentsError naming %v", deps, want)
+				} else if de, ok := errors.AsType[*DependentsError](err); !ok || !slices.Equal(de.Dependents, want) {
+					t.Errorf("Remove(base) = %v, want DependentsError naming %v", err, want)
+				}
+				jv, err := tc.cascade(e)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if final := waitJob(t, e, jv.ID); final.State != JobDone || !slices.Equal(final.Names, []string{"base", "top"}) {
+					t.Errorf("cascade job = %s %v, want done over [base top]", final.State, final.Names)
+				}
+				final := reconcileJob(t, e)
+				if out := strings.Join(final.OutputTail, "\n"); final.State != JobDone || !strings.Contains(out, "everything converged") {
+					t.Errorf("reconcile = %s %q, want done and everything converged", final.State, out)
+				}
+				m, err := e.store.LoadManifest()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, n := range []string{"base", "mid", "top"} {
+					if row, ok := m.Tools[n]; ok && !row.Disabled {
+						t.Errorf("%s is enabled after the cascade and a Reconcile", n)
+					}
+					if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", n)); !os.IsNotExist(err) {
+						t.Errorf("%s binary is installed after the cascade and a Reconcile", n)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestReconcile_DisabledOwnedDependencyIsEnabledNotUninstalled: a disabled
+// row an enabled row needs, directly or through another disabled row, is
+// enabled by the install plan, so Reconcile does not uninstall it first.
+func TestReconcile_DisabledOwnedDependencyIsEnabledNotUninstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		disabled []string
+	}{
+		{name: "direct", disabled: []string{"dep"}},
+		{name: "through a disabled dependency", disabled: []string{"dep", "mid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngineClient(t, nil, offlineClient(), nil)
+			addManual(t, e, "dep", nil)
+			addManual(t, e, "mid", []string{"dep"})
+			addManual(t, e, "tool", []string{"mid"})
+			editManifest(t, e, func(m *Manifest) {
+				for _, n := range tc.disabled {
+					tl := m.Tools[n]
+					tl.Disabled = true
+					m.Tools[n] = tl
+				}
+			})
+			final := reconcileJob(t, e)
+			out := strings.Join(final.OutputTail, "\n")
+			if final.State != JobDone || strings.Contains(out, "uninstalling disabled tools") {
+				t.Errorf("reconcile = %s %q, want done with no uninstall", final.State, out)
+			}
+			for _, n := range tc.disabled {
+				requireInstalled(t, e, n)
+			}
+		})
+	}
+}
+
+// TestReconcile_KeepsWhatAnAdoptedDependencyNeeds: a dependency the install
+// plan adopts from the catalog brings its own edges, so a disabled, owned row
+// one of them names is enabled by that plan rather than uninstalled first.
+func TestReconcile_KeepsWhatAnAdoptedDependencyNeeds(t *testing.T) {
+	for _, tc := range []struct {
+		entry CatalogEntry
+		name  string
+	}{
+		{name: "requires", entry: CatalogEntry{
+			Name: "lsp", Source: SourceManual, Version: "1", Install: binStub("lsp"), Probe: "lsp", Requires: []string{"node"},
+		}},
+		{name: "source backend", entry: CatalogEntry{Name: "lsp", Source: "npm:lsp", Version: "1.0.0"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := t.TempDir()
+			npm := "#!/bin/sh\nd=\"$NPM_CONFIG_PREFIX/lib/node_modules/lsp\"\n" +
+				"mkdir -p \"$d\" && printf '{\"name\":\"lsp\",\"version\":\"1.0.0\"}' > \"$d/package.json\"\n"
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte(npm), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cat := &Catalog{
+				Entries:  map[string]CatalogEntry{"lsp": tc.entry},
+				Backends: map[string]string{SourceNpm: "node"},
+			}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			addManual(t, e, "node", nil)
+			addManual(t, e, "tool", nil)
+			editManifest(t, e, func(m *Manifest) {
+				n := m.Tools["node"]
+				n.Disabled = true
+				m.Tools["node"] = n
+				tl := m.Tools["tool"]
+				tl.Requires = []string{"lsp"}
+				m.Tools["tool"] = tl
+			})
+			final := reconcileJob(t, e)
+			out := strings.Join(final.OutputTail, "\n")
+			if final.State != JobDone || strings.Contains(out, "uninstalling disabled tools") {
+				t.Errorf("reconcile = %s %q, want done with no uninstall", final.State, out)
+			}
+			requireInstalled(t, e, "node")
+			if got := e.store.State().Tools["lsp"].InstalledVersion; got != tc.entry.Version {
+				t.Errorf("lsp installed version = %q, want %s", got, tc.entry.Version)
+			}
+		})
+	}
+}
+
+// TestReconcile_KeepsTheOrphanedStateOfANeededDependency: an owned state row
+// with no manifest row, for a dependency the install plan is about to adopt,
+// is the adopted row's install, so Reconcile does not sweep it first.
+func TestReconcile_KeepsTheOrphanedStateOfANeededDependency(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	addManual(t, e, "dep", nil)
+	editManifest(t, e, func(m *Manifest) {
+		delete(m.Tools, "dep")
+		tl := m.Tools["tool"]
+		tl.Requires = []string{"dep"}
+		m.Tools["tool"] = tl
+	})
+	final := reconcileJob(t, e)
+	out := strings.Join(final.OutputTail, "\n")
+	if final.State != JobDone || strings.Contains(out, "sweeping orphaned install state") {
+		t.Errorf("reconcile = %s %q, want done with no sweep", final.State, out)
+	}
+	requireInstalled(t, e, "dep")
+}
+
+// TestReconcile_UnresolvableDependencyFailsTheDependent: a requirement no
+// catalog entry resolves fails the job naming it, and leaves the installed
+// dependent in place.
+func TestReconcile_UnresolvableDependencyFailsTheDependent(t *testing.T) {
+	e := newTestEngineClient(t, nil, offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	editManifest(t, e, func(m *Manifest) {
+		tl := m.Tools["tool"]
+		tl.Requires = []string{"ghost"}
+		m.Tools["tool"] = tl
+	})
+	final := reconcileJob(t, e)
+	if final.State != JobFailed || !strings.Contains(final.Error, `dependency "ghost" failed`) {
+		t.Errorf("reconcile = %s %q, want failed naming dependency ghost", final.State, final.Error)
+	}
+	requireInstalled(t, e, "tool")
+	if got := e.store.State().Tools["tool"].LastError; !strings.Contains(got, `dependency "ghost" failed`) {
+		t.Errorf("tool last error = %q, want the dependency failure", got)
+	}
+}
+
+// TestEnsureInstalled_InstallsTheMissingDependencyOfAnInstalledTool: an
+// installed tool whose dependency is a disabled template is not ready, so
+// EnsureInstalled enables and installs the dependency.
+func TestEnsureInstalled_InstallsTheMissingDependencyOfAnInstalledTool(t *testing.T) {
+	e := newTestEngineClient(t, nil, offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	editManifest(t, e, func(m *Manifest) {
+		tl := m.Tools["tool"]
+		tl.Requires = []string{"dep"}
+		m.Tools["tool"] = tl
+		d := manualEntry("dep")
+		d.Disabled = true
+		m.Tools["dep"] = d
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := e.EnsureInstalled(ctx, "tool"); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	requireInstalled(t, e, "dep")
+}
+
+// TestEnsureInstalled_ReinstallsAnEnabledDependencyWhoseBinaryIsGone: an
+// installed tool is not ready while an enabled dependency, named in requires
+// or implied by its source's backend, has lost its binary, so EnsureInstalled
+// reinstalls the dependency as Reconcile would.
+func TestEnsureInstalled_ReinstallsAnEnabledDependencyWhoseBinaryIsGone(t *testing.T) {
+	const pkg = "pkg"
+	for _, tc := range []struct {
+		seed func(t *testing.T, e *Engine)
+		name string
+		dep  string
+	}{
+		{name: "requires", dep: "dep", seed: func(t *testing.T, e *Engine) {
+			addManual(t, e, "dep", nil)
+			addManual(t, e, pkg, []string{"dep"})
+		}},
+		{name: "source backend", dep: "node", seed: func(t *testing.T, e *Engine) {
+			addManual(t, e, "node", nil)
+			editManifest(t, e, func(m *Manifest) { m.Tools[pkg] = Tool{Source: "npm:" + pkg, Version: "1.0.0"} })
+			if err := e.store.setToolStatus(pkg, func(s *ToolStatus) { s.InstalledVersion = "1.0.0" }); err != nil {
+				t.Fatal(err)
+			}
+			writeNpmPackage(t, e, pkg, `{"name":"pkg","version":"1.0.0"}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// npm fails if anything runs it. In the source-backend case the
+			// npm row is already installed; the requires case uses no npm.
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cat := &Catalog{Entries: map[string]CatalogEntry{}, Backends: map[string]string{SourceNpm: "node"}}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			tc.seed(t, e)
+			if err := os.Remove(filepath.Join(e.toolsDir, "bin", tc.dep)); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if err := e.EnsureInstalled(ctx, pkg); err != nil {
+				t.Fatalf("EnsureInstalled: %v", err)
+			}
+			requireInstalled(t, e, tc.dep)
+		})
+	}
+}
+
+// TestEnsureInstalled_ReadsASourceLessRowAsHydrated: a runnable source-less
+// row is ready only as Reconcile would leave it after hydration, so
+// EnsureInstalled installs what the catalog entry's requires, its source's
+// backend or its default version call for before returning.
+func TestEnsureInstalled_ReadsASourceLessRowAsHydrated(t *testing.T) {
+	const tool = "tool"
+	for _, tc := range []struct {
+		entries  map[string]CatalogEntry
+		seed     func(t *testing.T, e *Engine)
+		name     string
+		want     string
+		recorded string
+	}{
+		{name: "catalog requires", want: "dep", entries: map[string]CatalogEntry{
+			tool:  {Name: tool, Source: SourceManual, Version: "1", Install: binStub(tool), Probe: tool, Requires: []string{"dep"}},
+			"dep": depCatalog().Entries["dep"],
+		}},
+		{name: "source backend", want: "node", recorded: "1.0.0", entries: map[string]CatalogEntry{
+			tool:   {Name: tool, Source: "npm:" + tool, Version: "1.0.0"},
+			"node": {Name: "node", Source: SourceManual, Version: "1", Install: binStub("node"), Probe: "node"},
+		}, seed: func(t *testing.T, e *Engine) {
+			writeNpmPackage(t, e, tool, `{"name":"tool","version":"1.0.0"}`)
+		}},
+		{name: "catalog version", want: tool, recorded: "0.9", entries: map[string]CatalogEntry{
+			tool: {Name: tool, Source: SourceManual, Version: "1", Install: binStub(tool), Probe: tool},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// npm fails if anything runs it. In the source-backend case the
+			// npm row is already installed; the other cases use no npm.
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cat := &Catalog{Entries: tc.entries, Backends: map[string]string{SourceNpm: "node"}}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			if err := os.WriteFile(filepath.Join(e.toolsDir, "bin", tool), []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			editManifest(t, e, func(m *Manifest) { m.Tools[tool] = Tool{} })
+			if tc.recorded != "" {
+				if err := e.store.setToolStatus(tool, func(s *ToolStatus) { s.InstalledVersion = tc.recorded }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.seed != nil {
+				tc.seed(t, e)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if err := e.EnsureInstalled(ctx, tool); err != nil {
+				t.Fatalf("EnsureInstalled: %v", err)
+			}
+			requireInstalled(t, e, tc.want)
+		})
+	}
+}
+
+// TestEnsureInstalled_ConvergedToolLeavesTheManifestFile: a ready tool needs
+// no manifest write, so EnsureInstalled does not replace tools.json.
+func TestEnsureInstalled_ConvergedToolLeavesTheManifestFile(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	before, err := os.Stat(e.store.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EnsureInstalled(t.Context(), "tool"); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	after, err := os.Stat(e.store.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("tools.json was replaced, want the converged call to write nothing")
+	}
+}
+
+// reconcileJob runs one ReconcileMissing job to its end.
+func reconcileJob(t *testing.T, e *Engine) *Job {
+	t.Helper()
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	return waitJob(t, e, jv.ID)
 }

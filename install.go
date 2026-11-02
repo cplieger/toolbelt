@@ -79,8 +79,12 @@ const algSHA256 = "sha256"
 // the ecosystem backends, which carry their own integrity checks).
 type installOutcome struct {
 	checksum string
-	bins     []string
-	pmBins   []string
+	// version is the version the package manager reports it installed,
+	// set by sources whose install can land on another version than the
+	// row's (apt); empty means the row's version is what landed.
+	version string
+	bins    []string
+	pmBins  []string
 	// apt marks an install whose artifacts this engine does not own: an
 	// apt package lands in /usr, on the container layer, so it produces
 	// no bins to link and nothing to remove on uninstall. Recorded so the
@@ -201,7 +205,7 @@ func (in *installer) install(ctx context.Context, name string, t *Tool, aq *Aqua
 		out.bins, out.checksum, err = in.installRelease(ctx, name, ref, t.Version, t.Release)
 	case SourceApt:
 		out.apt = true
-		err = in.installApt(ctx, ref)
+		out.version, err = in.installApt(ctx, ref, aptRequest(t))
 	case SourceManual:
 		out.bins, err = in.installManual(ctx, name, t, prev.Bins)
 	default:

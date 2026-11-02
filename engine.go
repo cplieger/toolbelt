@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -29,10 +30,9 @@ var (
 	// Enabling is an explicit state change (Patch Disabled=false), never
 	// a side effect of a retry.
 	ErrDisabled = errors.New("tool is disabled")
-	// ErrUnknownJob marks a Wait on a job id the queue no longer knows:
-	// never enqueued, or its terminal view was evicted by the history
-	// cap. Without it a Wait on an evicted id would poll to ctx
-	// deadline.
+	// ErrUnknownJob marks a Wait on a job id the queue does not know:
+	// never enqueued, or the job ended before the Wait began and its
+	// result has since been dropped from the retained history.
 	ErrUnknownJob = errors.New("unknown job")
 	// ErrRootIntegrity marks a New refused by the opt-in root-integrity
 	// check (Config.VerifyRootIntegrity): a managed root is a symlink,
@@ -49,7 +49,7 @@ var (
 )
 
 // DependentsError is the ErrHasDependents shape that names the enabled
-// entries blocking a remove/disable.
+// entries blocking a remove/disable, directly or through another entry.
 type DependentsError struct {
 	Dependents []string
 }
@@ -122,7 +122,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	// appeared in both groups would offer a delete control in one and not the
 	// other for the same thing.
 	res.AptPackages = e.discoveredApt(m)
-	dependents := dependentsIndex(m, e.backends())
+	dependents := dependentsIndex(m, e.cat())
 	names := make([]string, 0, len(m.Tools))
 	for n := range m.Tools {
 		names = append(names, n)
@@ -131,7 +131,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	for _, n := range names {
 		t := m.Tools[n]
 		s := st.Tools[n]
-		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], dependents[n]))
+		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], enabledDependents(m, dependents, n)))
 	}
 	return res, nil
 }
@@ -426,7 +426,9 @@ func (e *Engine) Jobs() (active *Job, recent []*Job) { return e.queue.Snapshot()
 func (e *Engine) CancelJob(id string) bool { return e.queue.Cancel(id) }
 
 // Wait blocks until the job reaches a terminal state and returns its
-// final view.
+// final view, or ctx.Err() when ctx ends first; a job that has already
+// ended is returned even when ctx is done. A Wait in progress always
+// receives its job's result, however many jobs finish meanwhile.
 func (e *Engine) Wait(ctx context.Context, jobID string) (*Job, error) {
 	return e.queue.Wait(ctx, jobID)
 }
@@ -633,8 +635,8 @@ type PatchRequest struct {
 	// to --version (a source-less template takes the catalog's when hydrated).
 	VersionArgs *[]string `json:"version_args,omitempty"`
 	// Force permits disabling a tool that enabled entries require,
-	// cascading the disable to those dependents (one level, mirroring
-	// RemoveWithDependents).
+	// cascading the disable to every enabled entry that needs it, directly
+	// or through another (the set RemoveWithDependents takes).
 	Force bool `json:"force,omitempty"`
 }
 
@@ -646,14 +648,18 @@ type patchOutcome struct {
 	disabledChanged bool
 	nowDisabled     bool
 	pinChanged      bool
+	requiresChanged bool
+	// unmetDeps is a requires change on an enabled row that names a
+	// dependency with no enabled row, which only an install provides.
+	unmetDeps bool
 }
 
-// Patch merges fields into an existing tool and enqueues the follow-up
-// job the transition needs: enable → install (when missing), disable →
-// footprint uninstall (template kept), version or python change on an
-// enabled tool → reinstall, pin change on an enabled apt: tool where apt is
-// available → install, which applies the dpkg hold. Returns nil when no job
-// is needed.
+// Patch merges fields into an existing tool and enqueues the job the
+// transition needs: enable → install (when missing); disable → footprint
+// uninstall (template kept); on an enabled tool, a version or python change
+// → reinstall, an apt: pin change where apt is available → install (applies
+// the dpkg hold), a requires change naming a dependency with no enabled row
+// → install (adopts or enables it). Returns nil when no job is needed.
 //
 //nolint:gocritic // hugeParam: v3 takes a value; a pointer breaks the API.
 func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
@@ -662,7 +668,7 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 		res *job
 	)
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		if err := patchManifest(m, name, &req, &out, e.backends()); err != nil {
+		if err := patchManifest(m, name, &req, &out, e.cat()); err != nil {
 			return err
 		}
 		kind, names := out.job(name)
@@ -703,9 +709,10 @@ func (e *Engine) holdToPin(ctx context.Context, name string) error {
 }
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
-// refusal (or, with Force, the one-level disable cascade mirroring
-// RemoveWithDependents) plus the field overlay. Records what changed in out.
-func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome, backends map[string]string) error {
+// refusal (or, with Force, the disable cascade over enabledDependents) plus
+// the field overlay, reading the one catalog snapshot c. Records what changed
+// in out.
+func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome, c *Catalog) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
@@ -718,16 +725,16 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	}
 	var deps []string
 	if req.Disabled != nil && *req.Disabled && !t.Disabled {
-		deps = enabledDependents(m, name, backends)
+		deps = enabledDependents(m, dependentsIndex(m, c), name)
 		if len(deps) > 0 && !req.Force {
 			return &DependentsError{Dependents: deps}
 		}
 	}
 	*out = applyPatch(&t, req)
 	m.Tools[name] = t
-	// A forced disable cascades to the enabled dependents (one level,
-	// mirroring RemoveWithDependents): a dependent left enabled would
-	// declare intent against a disabled prerequisite.
+	out.unmetDeps = out.requiresChanged && !t.Disabled && !depsSatisfied(m, name, &t, c.Backends)
+	// A dependent left enabled would declare intent against a disabled
+	// prerequisite, and Reconcile would enable the prerequisite again.
 	if out.disabledChanged && out.nowDisabled && req.Force {
 		for _, d := range deps {
 			dt := m.Tools[d]
@@ -765,6 +772,7 @@ func applyPatch(t *Tool, req *PatchRequest) patchOutcome {
 		t.Description = *req.Description
 	}
 	if req.Requires != nil {
+		out.requiresChanged = !slices.Equal(*req.Requires, t.Requires)
 		t.Requires = *req.Requires
 	}
 	if req.Install != nil {
@@ -785,59 +793,68 @@ func (out *patchOutcome) job(name string) (kind string, names []string) {
 		return JobKindDisable, append([]string{name}, out.cascaded...)
 	case out.disabledChanged && !out.nowDisabled,
 		(out.versionChanged || out.pythonChanged) && !out.nowDisabled,
-		out.pinChanged && sourceKind(out.source) == SourceApt && !out.nowDisabled && AptAvailable():
+		out.pinChanged && sourceKind(out.source) == SourceApt && !out.nowDisabled && AptAvailable(),
+		out.unmetDeps:
 		return JobKindInstall, []string{name}
 	default:
 		return "", nil
 	}
 }
 
-// enabledDependents lists the ENABLED manifest entries that require
-// name, directly (Requires) or as the implied backend of their source
-// kind. Disabled templates never block; hydration re-adopts their
-// dependencies when they are enabled.
-func enabledDependents(m *Manifest, name string, backends map[string]string) []string {
-	var out []string
-	for other := range m.Tools {
-		t := m.Tools[other]
-		if other == name || t.Disabled {
+// enabledDependents lists, sorted, the ENABLED manifest rows that need name
+// in idx (dependentsIndex): directly (Requires or the implied backend of their
+// source kind) or through any other row or adoptable catalog entry, disabled
+// or not, as Reconcile's install plan crosses both. It is the set a forced
+// disable or remove takes: a dependent left enabled would make Reconcile
+// restore what went. Disabled rows are never named and never block; the
+// install plan adopts or enables their dependencies when they are enabled.
+func enabledDependents(m *Manifest, idx map[string][]string, name string) []string {
+	return slices.DeleteFunc(cascadeOf(idx, name), func(n string) bool {
+		t, ok := m.Tools[n]
+		return !ok || t.Disabled
+	})
+}
+
+// dependentsIndex maps every name to what needs it directly along planEdges:
+// every manifest row, disabled or not, and the catalog entry of each absent
+// name they reach. One walk builds every name's reverse edges, so Inventory
+// does not re-scan the manifest per tool.
+func dependentsIndex(m *Manifest, c *Catalog) map[string][]string {
+	out := map[string][]string{}
+	seen := map[string]bool{}
+	for stack := slices.Collect(maps.Keys(m.Tools)); len(stack) > 0; {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[n] {
 			continue
 		}
-		if dependsOn(&t, other, name, backends) {
-			out = append(out, other)
+		seen[n] = true
+		for _, dep := range planEdges(m, c, n) {
+			out[dep] = append(out[dep], n)
+			stack = append(stack, dep)
+		}
+	}
+	return out
+}
+
+// cascadeOf walks idx from name to a fixed point and returns every entry
+// reached, sorted, name excluded (a cycle leads back to it).
+func cascadeOf(idx map[string][]string, name string) []string {
+	seen := map[string]bool{name: true}
+	var out []string
+	for next := []string{name}; len(next) > 0; {
+		n := next[0]
+		next = next[1:]
+		for _, d := range idx[n] {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+				next = append(next, d)
+			}
 		}
 	}
 	slices.Sort(out)
 	return out
-}
-
-// dependentsIndex is enabledDependents for every name at once, in one
-// pass over the manifest rather than one pass per row. Inventory renders
-// every tool, so the per-name form would make the read quadratic in the
-// manifest size for an answer the same walk already produces.
-func dependentsIndex(m *Manifest, backends map[string]string) map[string][]string {
-	out := map[string][]string{}
-	for other := range m.Tools {
-		t := m.Tools[other]
-		if t.Disabled {
-			continue
-		}
-		for _, dep := range depsOf(other, &t, backends) {
-			out[dep] = append(out[dep], other)
-		}
-	}
-	for dep := range out {
-		slices.Sort(out[dep])
-	}
-	return out
-}
-
-// dependsOn reports whether tool `other` requires `name`. It reads the
-// edge set from depsOf, the one place that decides what a dependency
-// edge is, so the refusal and the inventory's advisory answer cannot
-// disagree about one.
-func dependsOn(t *Tool, other, name string, backends map[string]string) bool {
-	return slices.Contains(depsOf(other, t, backends), name)
 }
 
 // Install re-enqueues an install for an existing, enabled tool (retry /
@@ -880,15 +897,14 @@ func (e *Engine) Remove(name string) (*Job, []string, error) {
 	return e.remove(name, false)
 }
 
-// RemoveWithDependents uninstalls a tool together with every enabled
-// entry that requires it, deleting all their templates; the returned job
-// carries every removed name and dependents reports which rode along.
-//
-// The cascade is ONE LEVEL: the direct requirers of name. With A
-// requiring B and B requiring name, this removes name and B and leaves A
-// enabled against a gone dependency — removing A too is the caller's
-// decision. Prefer Remove unless the caller has already established
-// that removing the dependents is intended; nothing here re-checks that.
+// RemoveWithDependents uninstalls a tool together with every enabled entry
+// that needs it, directly or through another entry (disabled or not) or a
+// catalog tool their install would add, and deletes their entries; a disabled
+// entry between them stays. The returned job carries every removed name and
+// dependents reports which rode along. With A requiring B and B requiring
+// name, it removes all three. Prefer Remove unless the caller has already
+// established that removing the dependents is intended; nothing here
+// re-checks that.
 func (e *Engine) RemoveWithDependents(name string) (*Job, []string, error) {
 	return e.remove(name, true)
 }
@@ -903,7 +919,9 @@ func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	)
 	removed := map[string]Tool{}
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		if err := removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge()); err != nil {
+		// One catalog snapshot per removal: a swap partway through a cascade
+		// would otherwise change the rules mid-decision.
+		if err := removeFromManifest(m, name, cascade, &dependents, removed, e.cat()); err != nil {
 			return err
 		}
 		names := slices.Sorted(maps.Keys(removed))
@@ -915,41 +933,20 @@ func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	return jv, dependents, err
 }
 
-// removeKnowledge is the CATALOG-derived input a removal needs: what
-// counts as a dependency edge, and which names the product declares
-// essential. Bundled because both answers come from the same live catalog
-// and must be read once per call — a swap partway through a cascade would
-// otherwise change the rules mid-decision.
-type removeKnowledge struct {
-	backends  map[string]string
-	essential func(name string) bool
-}
-
-// removeKnowledge snapshots the live catalog for one removal.
-//
-// Essential is read HERE rather than from the manifest row, and that is
-// the point: it is the bundle's live answer, so a product that stops
+// essential reports whether c declares name essential. It reads the live
+// catalog rather than the manifest row on purpose: a product that stops
 // depending on a tool releases it immediately instead of waiting for
 // something to re-resolve the row.
-func (e *Engine) removeKnowledge() removeKnowledge {
-	c := e.cat()
-	return removeKnowledge{
-		backends: e.backends(),
-		essential: func(name string) bool {
-			if c == nil {
-				return false
-			}
-			cat, ok := c.Lookup(name)
-			return ok && cat.Essential
-		},
-	}
+func essential(c *Catalog, name string) bool {
+	ce, ok := c.Lookup(name)
+	return ok && ce.Essential
 }
 
-// removeFromManifest deletes name (and, with cascade, its enabled
-// dependents) from m, recording the removed entries. It refuses with
+// removeFromManifest deletes name (and, with cascade, every entry
+// enabledDependents names) from m, recording the removed entries. It refuses with
 // *DependentsError when enabled entries require name and cascade is
 // false.
-func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool, rc removeKnowledge) error {
+func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool, c *Catalog) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
@@ -957,10 +954,10 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	// Before the dependents check, so the answer does not depend on
 	// whether anything happens to require it, and so RemoveWithDependents
 	// cannot delete it as somebody else's collateral.
-	if rc.essential(name) {
+	if essential(c, name) {
 		return fmt.Errorf("%w: %s", ErrEssential, name)
 	}
-	*dependents = enabledDependents(m, name, rc.backends)
+	*dependents = enabledDependents(m, dependentsIndex(m, c), name)
 	if len(*dependents) > 0 && !cascade {
 		return &DependentsError{Dependents: *dependents}
 	}
@@ -969,8 +966,8 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	// removing part of it would leave the user believing the rest went too.
 	if cascade {
 		for _, d := range *dependents {
-			if rc.essential(d) {
-				return fmt.Errorf("%w: %s, which requires %s", ErrEssential, d, name)
+			if essential(c, d) {
+				return fmt.Errorf("%w: %s, which needs %s", ErrEssential, d, name)
 			}
 		}
 	}
@@ -1013,19 +1010,23 @@ func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err erro
 }
 
 // EnsureInstalled synchronously guarantees a tool: present in the
-// manifest (created from the catalog when missing), enabled, installed,
-// and on PATH. This is the programmatic "a product action needs this
-// binary now" path (a forge login installing gh, an MCP flow installing
+// manifest (created from the catalog when missing), enabled, installed
+// with its dependencies as Reconcile would leave them, and on PATH. This
+// is the programmatic "a product action needs this binary now" path (a
+// forge login installing gh, an MCP flow installing
 // node); unlike Install it DOES enable a disabled template, because the
 // user explicitly invoked the feature that needs the tool.
 func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
+	// The fast path judges rows as the install job would, after hydration.
+	if err := e.hydrateStatic(); err != nil {
+		return err
+	}
 	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
 	}
 	t, inManifest := m.Tools[name]
-	status := e.store.State().Tools[name]
-	if inManifest && !t.Disabled && e.probeInstalled(name, &t, &status) {
+	if inManifest && !t.Disabled && e.closureConverged(m, name) {
 		return nil
 	}
 	jv, err := e.ensureJob(ctx, name, &t, inManifest)
@@ -1119,24 +1120,49 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // python the catalog's source refuses; they fail their own install
 // (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
-	return e.store.MutateManifest(func(m *Manifest) error {
+	c := e.cat()
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		merged := false
 		for name := range m.Tools {
 			t := m.Tools[name]
-			if t.Source != "" {
-				continue
+			if h, ok := hydrated(c, name, &t); ok {
+				m.Tools[name] = h
+				merged = true
 			}
-			cat, ok := e.cat().Lookup(name)
-			if !ok {
-				continue
-			}
-			mergeCatalogDefaults(&t, &cat)
-			if validateTool(&t) != nil {
-				continue
-			}
-			m.Tools[name] = t
+		}
+		if !merged {
+			return errHydratedAlready
 		}
 		return nil
 	})
+	if errors.Is(err, errHydratedAlready) {
+		return nil
+	}
+	return err
+}
+
+// errHydratedAlready aborts hydrateStatic's write when no row merged, so a
+// converged EnsureInstalled does not rewrite tools.json (or fail on a
+// read-only one).
+var errHydratedAlready = errors.New("toolbelt: manifest already hydrated")
+
+// hydrated is the hydration rule for one row: a source-less row the catalog
+// knows takes the catalog's static fields, unless the merge fails validation.
+// ok reports a merge.
+func hydrated(c *Catalog, name string, t *Tool) (h Tool, ok bool) {
+	if t.Source != "" {
+		return *t, false
+	}
+	cat, known := c.Lookup(name)
+	if !known {
+		return *t, false
+	}
+	h = *t
+	mergeCatalogDefaults(&h, &cat)
+	if validateTool(&h) != nil {
+		return *t, false
+	}
+	return h, true
 }
 
 // runInstall installs the named tools plus any missing dependencies,
@@ -1509,6 +1535,54 @@ func depsOf(name string, t *Tool, backends map[string]string) []string {
 	return deps
 }
 
+// depsSatisfied reports whether every depsOf edge of name has an enabled
+// manifest row. Each dependency's own install state is its row's business; the
+// edge only needs the row the install plan would otherwise adopt or enable.
+func depsSatisfied(m *Manifest, name string, t *Tool, backends map[string]string) bool {
+	for _, d := range depsOf(name, t, backends) {
+		if dt, ok := m.Tools[d]; !ok || dt.Disabled {
+			return false
+		}
+	}
+	return true
+}
+
+// planEdges is n's depsOf edges as the install plan, which runs after
+// hydration, walks them: its row's as hydrated, or for a name with no row the
+// edges of the catalog entry the plan would adopt. A known catalog name's
+// edges count whether or not its adopt later succeeds, so Reconcile keeps a
+// row behind a failing adopt rather than uninstalling it and a cascade takes
+// the rows in front of one; an unknown name has none. It reads no network.
+func planEdges(m *Manifest, c *Catalog, n string) []string {
+	t, ok := m.Tools[n]
+	if ok {
+		t, _ = hydrated(c, n, &t)
+	} else {
+		ce, known := c.Lookup(n)
+		if !known {
+			return nil
+		}
+		mergeCatalogDefaults(&t, &ce)
+	}
+	return depsOf(n, &t, c.Backends)
+}
+
+// installClosure is names and every name reached from them along planEdges.
+func installClosure(m *Manifest, c *Catalog, names []string) map[string]bool {
+	seen := map[string]bool{}
+	stack := slices.Clone(names)
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		stack = append(stack, planEdges(m, c, n)...)
+	}
+	return seen
+}
+
 // installTool installs one tool when not already at its manifest version,
 // recording status either way; a sparse entry resolves and persists latest.
 //
@@ -1539,13 +1613,48 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		}
 		return err
 	}
-	if serr := e.commitInstall(name, t, res); serr != nil {
+	if serr := e.commitInstall(name, t, &res); serr != nil {
 		return serr
 	}
 	if verr := e.verifyInstalled(name, t, output); verr != nil {
 		return verr
 	}
+	if res.version != "" && res.version != t.Version {
+		if merr := e.followInstalledVersion(name, t, res.version, output); merr != nil {
+			return merr
+		}
+	}
 	e.pruneSuperseded(name, t)
+	return nil
+}
+
+// followInstalledVersion writes the version an install landed on into the
+// row's Version, so the manifest and the state name one version and the
+// next Reconcile reads no drift. Only an unpinned apt: row gets here, since a
+// pinned one fails its install check. The row is left as it is when a Patch
+// pinned it or changed its version during the job, so that edit stands.
+func (e *Engine) followInstalledVersion(name string, t *Tool, installed string, output func(string)) error {
+	followed := false
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		cur, ok := m.Tools[name]
+		if !ok || cur.Pin || cur.Version != t.Version {
+			return nil
+		}
+		cur.Version = installed
+		m.Tools[name] = cur
+		followed = true
+		return nil
+	})
+	if err != nil {
+		err = fmt.Errorf("record %s's installed version %s: %w", name, installed, err)
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: manifest version failure not recorded", "tool", name, "error", serr)
+		}
+		return err
+	}
+	if followed {
+		output(fmt.Sprintf("%s installed at %s, not the recorded %s; an unpinned entry follows apt's candidate", name, installed, t.Version))
+	}
 	return nil
 }
 
@@ -1623,9 +1732,9 @@ func (e *Engine) unhydratedError(name string, t *Tool) error {
 // commitInstall records what landed. This write is the install's COMMIT
 // POINT, so a failure here fails the job with the PREVIOUS state intact
 // and nothing pruned, and a retry converges.
-func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
+func (e *Engine) commitInstall(name string, t *Tool, res *installOutcome) error {
 	if err := e.store.setToolStatus(name, func(s *ToolStatus) {
-		s.InstalledVersion = t.Version
+		s.InstalledVersion = cmp.Or(res.version, t.Version)
 		s.Python = t.Python
 		s.Bins = res.bins
 		s.PMBins = res.pmBins
@@ -1653,7 +1762,7 @@ func (e *Engine) commitInstall(name string, t *Tool, res installOutcome) error {
 func (e *Engine) verifyInstalled(name string, t *Tool, output func(string)) error {
 	st := e.store.State().Tools[name]
 	if v := e.probeTool(name, t, &st); !v.OK {
-		err := fmt.Errorf("installed %s but its install check failed: %s", t.Version, v.Reason)
+		err := fmt.Errorf("installed %s but its install check failed: %s", st.InstalledVersion, v.Reason)
 		output(fmt.Sprintf("ERROR %s: %v", name, err))
 		if serr := e.recordFailure(name, err); serr != nil {
 			e.log.Error("toolbelt: verification failure not recorded", "tool", name, "error", serr)
@@ -1918,22 +2027,28 @@ func (e *Engine) runReconcile(ctx context.Context, j *job, output func(string)) 
 // reconcilePlan classifies the manifest and state rows into the
 // reconcile work sets: enabled-but-missing installs, disabled-but-owned
 // footprints, and orphaned state rows (owned footprint, no manifest
-// row).
+// row). A disabled row or an orphan the missing installs depend on is
+// neither: their plan enables or adopts it, and uninstalling it first would
+// only reinstall it.
 func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) {
 	st := e.store.State()
+	c := e.cat()
+	backends := c.Backends
 	for n := range m.Tools {
 		t := m.Tools[n]
 		status := st.Tools[n]
 		switch {
 		case t.Disabled && status.owned():
 			extras = append(extras, n)
-		case !t.Disabled && !e.converged(n, &t, &status):
+		case !t.Disabled && !e.converged(m, n, &t, &status, backends):
 			missing = append(missing, n)
 		}
 	}
+	needed := installClosure(m, c, missing)
+	extras = slices.DeleteFunc(extras, func(n string) bool { return needed[n] })
 	for n := range st.Tools {
 		status := st.Tools[n]
-		if _, inManifest := m.Tools[n]; !inManifest && status.owned() {
+		if _, inManifest := m.Tools[n]; !inManifest && status.owned() && !needed[n] {
 			orphans = append(orphans, n)
 		}
 	}
@@ -1943,13 +2058,15 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 	return missing, extras, orphans
 }
 
-// converged is probeInstalled on a venv built for the row's Python request,
-// and for an apt: row also a dpkg hold equal to its pin, so Reconcile repairs
-// a hold that a failed apt-mark, a recreated container or a hand-run apt-mark
-// left wrong. An unreadable dpkg record is not converged, so the install that
-// follows records why.
-func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
-	if s.Python != t.Python {
+// converged is probeInstalled on a venv built for the row's Python request at
+// the row's version, with an enabled row for every dependency, and for an apt:
+// row also a dpkg hold equal to its pin, dpkg at its version when pinned and no
+// stale record (aptRecordStale), so Reconcile applies a hand-edited version or
+// requires and repairs what a failed apt-mark or install, a recreated container
+// or a hand-run apt left wrong. An unreadable dpkg record is not converged, so
+// the install that follows records why.
+func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, backends map[string]string) bool {
+	if s.Python != t.Python || versionDrifted(t, s) || !depsSatisfied(m, name, t, backends) {
 		return false
 	}
 	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")
@@ -1959,7 +2076,32 @@ func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	st, err := aptQuery(ctx, pkg)
-	return err == nil && st.installed && st.held == t.Pin
+	want := aptRequest(t)
+	return err == nil && st.installed && st.held == t.Pin && (want == "" || st.version == want) &&
+		!aptRecordStale(s, st)
+}
+
+// closureConverged reports whether name and every row its install plan walks
+// are enabled and converged, each against its own state record.
+func (e *Engine) closureConverged(m *Manifest, name string) bool {
+	st := e.store.State()
+	c := e.cat()
+	for n := range installClosure(m, c, []string{name}) {
+		t, ok := m.Tools[n]
+		status := st.Tools[n]
+		if !ok || t.Disabled || !e.converged(m, n, &t, &status, c.Backends) {
+			return false
+		}
+	}
+	return true
+}
+
+// versionDrifted reports a recorded install at another version than the
+// manifest names. An empty side is no request: a sparse row resolves latest
+// only when it installs, and a row with no state record is a legacy binary
+// Reconcile leaves alone.
+func versionDrifted(t *Tool, s *ToolStatus) bool {
+	return t.Version != "" && s.InstalledVersion != "" && t.Version != s.InstalledVersion
 }
 
 // sweepOrphans uninstalls engine-owned footprints whose manifest row is
