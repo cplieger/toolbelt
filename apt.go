@@ -167,10 +167,10 @@ func aptQuery(ctx context.Context, pkg string) (aptStatus, error) {
 // installed architecture of a Multi-Arch: same package and adds no separator.
 const aptStatusFormat = "-f=${Architecture}\t${db:Status-Want}\t${db:Status-Status}\t${Version}\n"
 
-// aptStatusFrom reads an aptStatusFormat answer. Several records are one
-// package's architectures, of which the native one, or an all or
-// unrecorded one, is what apt-get and apt-mark act on for a bare name;
-// nativeArch is asked only then, and no matching record reads as absent.
+// aptStatusFrom reads an aptStatusFormat answer. For a bare name apt-get and
+// apt-mark act on the native architecture's record, or an all or unrecorded
+// one, so nativeArch is asked unless the sole record is all or unrecorded,
+// and a package installed only for a foreign architecture reads as absent.
 // The status word decides: after `apt-get remove nano` (apt 3.0.3) dpkg keeps
 // a config-files record at 8.4-1+deb13u1 and exits 0 with no binary on disk,
 // so a version-only read reports every apt entry present after a recreate.
@@ -187,13 +187,13 @@ func aptStatusFrom(out string, nativeArch func() (string, error)) (aptStatus, er
 		return aptStatus{}, errors.New("empty dpkg status")
 	}
 	rec := records[0]
-	if len(records) > 1 {
+	if len(records) > 1 || !archIndependent(rec[0]) {
 		native, err := nativeArch()
 		if err != nil {
 			return aptStatus{}, err
 		}
 		i := slices.IndexFunc(records, func(r []string) bool {
-			return r[0] == native || r[0] == "all" || r[0] == ""
+			return r[0] == native || archIndependent(r[0])
 		})
 		if i < 0 {
 			return aptStatus{}, nil
@@ -206,6 +206,8 @@ func aptStatusFrom(out string, nativeArch func() (string, error)) (aptStatus, er
 	}
 	return st, nil
 }
+
+func archIndependent(arch string) bool { return arch == "all" || arch == "" }
 
 // dpkgNativeArch is dpkg's native architecture (dpkg(1), --print-architecture).
 func dpkgNativeArch(ctx context.Context) (string, error) {

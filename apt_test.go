@@ -73,7 +73,9 @@ func TestAptStatusFrom(t *testing.T) {
 		{state: "half-configured", out: "amd64\tinstall\thalf-configured\t1.0\n"},
 		{state: "library-no-binary", out: "amd64\tinstall\tinstalled\t2.41-12+deb13u3\n", want: aptStatus{version: "2.41-12+deb13u3", installed: true}},
 		{state: "architecture-independent", out: "all\tinstall\tinstalled\t2026f-0+deb13u1\n", want: aptStatus{version: "2026f-0+deb13u1", installed: true}},
-		{state: "only a foreign architecture", out: "i386\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
+		{state: "only the native architecture", out: "amd64\thold\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true, held: true}},
+		{state: "only a foreign architecture", out: "i386\tinstall\tinstalled\t1.0\n"},
+		{state: "only an unrecorded architecture", out: "\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
 		{state: "native among several", out: "i386\thold\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n", want: aptStatus{version: "1.0", installed: true}},
 		{state: "no native among several", out: "i386\tinstall\tinstalled\t1.0\narmhf\tinstall\tinstalled\t1.0\n"},
 		{state: "empty-output", out: "", wantErr: true},
@@ -92,21 +94,25 @@ func TestAptStatusFrom(t *testing.T) {
 		})
 	}
 
-	t.Run("one record does not ask for the native architecture", func(t *testing.T) {
-		st, err := aptStatusFrom("i386\tinstall\tinstalled\t1.0\n", func() (string, error) {
-			return "", errors.New("asked")
+	t.Run("an architecture-independent record does not ask for the native architecture", func(t *testing.T) {
+		for _, out := range []string{"all\tinstall\tinstalled\t1.0\n", "\tinstall\tinstalled\t1.0\n"} {
+			st, err := aptStatusFrom(out, func() (string, error) { return "", errors.New("asked") })
+			if err != nil || !st.installed {
+				t.Errorf("aptStatusFrom(%q) = %+v, %v; want it read without the native architecture", out, st, err)
+			}
+		}
+	})
+	for _, out := range []string{
+		"amd64\tinstall\tinstalled\t1.0\n",
+		"i386\tinstall\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n",
+	} {
+		t.Run("an unreadable native architecture fails "+strings.Fields(out)[0], func(t *testing.T) {
+			_, err := aptStatusFrom(out, func() (string, error) { return "", errors.New("no dpkg") })
+			if err == nil || !strings.Contains(err.Error(), "no dpkg") {
+				t.Errorf("aptStatusFrom(%q, failing arch) error = %v, want the arch failure", out, err)
+			}
 		})
-		if err != nil || !st.installed {
-			t.Errorf("aptStatusFrom(one record) = %+v, %v; want it read without the native architecture", st, err)
-		}
-	})
-	t.Run("an unreadable native architecture fails several records", func(t *testing.T) {
-		_, err := aptStatusFrom("i386\tinstall\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n",
-			func() (string, error) { return "", errors.New("no dpkg") })
-		if err == nil || !strings.Contains(err.Error(), "no dpkg") {
-			t.Errorf("aptStatusFrom(two records, failing arch) error = %v, want the arch failure", err)
-		}
-	})
+	}
 }
 
 // TestAptStatusFrom_AgreesWithRealDpkg checks the parser against the real
@@ -684,6 +690,9 @@ func TestSyncAptHold(t *testing.T) {
 				"#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> "+log+"; done\n"))
 			if tc.dpkg != "" {
 				if err := os.WriteFile(filepath.Join(dir, "dpkg-query"), []byte("#!/bin/sh\n"+tc.dpkg+"\n"), 0o755); err != nil {
+					t.Fatalf("Setup: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "dpkg"), []byte("#!/bin/sh\necho amd64\n"), 0o755); err != nil {
 					t.Fatalf("Setup: %v", err)
 				}
 			}

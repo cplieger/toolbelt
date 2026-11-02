@@ -3373,14 +3373,14 @@ func fakeRoot(t *testing.T) {
 	t.Cleanup(func() { geteuid = prev })
 }
 
-// aptStub models dpkg for one package with apt-mark, apt-get, dpkg-query and
-// apt-cache stubs that log each call. The files installed and held in its dir
-// are dpkg's record, which dpkg-query prints in the -f format it is given (a
-// held package that is not installed reads "hold not-installed", one with no
-// record answers as unknown); a call whose first argument has a gate waits
-// until open(that argument). apt-get refuses a held package, as apt-get -y
-// does (apt-get(8)); mark-fail and get-fail make apt-mark and apt-get fail,
-// and failQueriesAfter makes dpkg-query fail.
+// aptStub models dpkg for one amd64 package with logging apt-mark, apt-get,
+// dpkg-query and apt-cache stubs and an amd64 dpkg. The files installed and
+// held in its dir are dpkg's record, which dpkg-query prints in the -f format
+// it is given (held but not installed reads "hold not-installed", no record
+// answers as unknown); a call whose first argument has a gate waits until
+// open(that argument). apt-get refuses a held package, as apt-get -y does
+// (apt-get(8)); mark-fail, get-fail and failQueriesAfter make apt-mark,
+// apt-get and dpkg-query fail.
 type aptStub struct {
 	dir, log string
 }
@@ -3418,6 +3418,7 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 			"[ $status = installed ] || [ $want = hold ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
 			"case \"$2\" in *Status-Want*) printf 'amd64\\t%s\\t%s\\t%s\\n' $want $status \"$version\";; *) echo \"$status $version\";; esac\n",
 		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: 1.7.1-1\\n'\n",
+		"dpkg":      "[ \"$1\" = --print-architecture ] && echo amd64\n",
 	}
 	for name, body := range scripts {
 		if err := os.WriteFile(filepath.Join(s.dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
