@@ -654,13 +654,12 @@ type patchOutcome struct {
 	unmetDeps bool
 }
 
-// Patch merges fields into an existing tool and enqueues the follow-up
-// job the transition needs: enable → install (when missing), disable →
-// footprint uninstall (template kept), version or python change on an
-// enabled tool → reinstall, pin change on an enabled apt: tool where apt is
-// available → install, which applies the dpkg hold, requires change on an
-// enabled tool naming a dependency with no enabled row → install, which adopts
-// or enables it. Returns nil when no job is needed.
+// Patch merges fields into an existing tool and enqueues the job the
+// transition needs: enable → install (when missing); disable → footprint
+// uninstall (template kept); on an enabled tool, a version or python change
+// → reinstall, an apt: pin change where apt is available → install (applies
+// the dpkg hold), a requires change naming a dependency with no enabled row
+// → install (adopts or enables it). Returns nil when no job is needed.
 //
 //nolint:gocritic // hugeParam: v3 takes a value; a pointer breaks the API.
 func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {

@@ -342,7 +342,7 @@ const (
 // pinned, else none, because an unpinned row's Version is the candidate apt
 // offered when it was last checked and the install takes today's.
 func aptRequest(t *Tool) string {
-	if t.Pin && sourceKind(t.Source) == SourceApt {
+	if t.Pin {
 		return t.Version
 	}
 	return ""

@@ -939,6 +939,37 @@ func TestPatch_SatisfiedRequiresQueuesNothing(t *testing.T) {
 	}
 }
 
+// TestPatch_RequiresOnADisabledTemplateQueuesNothing: a disabled template
+// declares no intent, so naming a dependency it lacks adopts nothing until
+// the template is enabled.
+func TestPatch_RequiresOnADisabledTemplateQueuesNothing(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	editManifest(t, e, func(m *Manifest) {
+		tl := m.Tools["tool"]
+		tl.Disabled = true
+		m.Tools["tool"] = tl
+	})
+	req := []string{"dep"}
+	jv, err := e.Patch("tool", PatchRequest{Requires: &req})
+	if err != nil || jv != nil {
+		t.Errorf("patch requires: job=%v err=%v, want neither", jv, err)
+		if jv != nil {
+			waitJob(t, e, jv.ID)
+		}
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := m.Tools["dep"]; ok {
+		t.Errorf("dep manifest row = %+v, want none", row)
+	}
+	if got := m.Tools["tool"].Requires; !slices.Equal(got, req) {
+		t.Errorf("tool requires = %v, want %v", got, req)
+	}
+}
+
 // TestReconcile_InstallsAnUnsatisfiedDependency: a hand-edited requirement
 // with no manifest row is installed by Reconcile, which then converges.
 func TestReconcile_InstallsAnUnsatisfiedDependency(t *testing.T) {

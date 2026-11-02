@@ -22,8 +22,10 @@ const (
 	// because only these sources put the version in a path component, a
 	// URL segment and a bash $VERSION.
 	grammarTag
-	// grammarDebian is Debian Policy 5.6.12. An apt version reaches no
-	// path, URL or argv, so the wider alphabet costs nothing.
+	// grammarDebian is Debian Policy 5.6.12. A pinned version reaches
+	// apt-get as one operand, pkg=version after --; the leading
+	// alphanumeric and the absence of space and '=' keep it from reading
+	// as an option or splitting.
 	grammarDebian
 	// grammarPEP440 is PyPI's alphabet, '!' epoch separator included. A
 	// pip version reaches uv's argv and no path.
