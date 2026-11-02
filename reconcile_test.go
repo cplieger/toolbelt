@@ -949,8 +949,8 @@ func TestPatch_SatisfiedRequiresQueuesNothing(t *testing.T) {
 }
 
 // TestPatch_RequiresOnADisabledTemplateQueuesNothing: a disabled template
-// declares no intent, so naming a dependency it lacks adopts nothing until
-// the template is enabled.
+// has no install obligation, so naming a dependency it lacks adopts nothing
+// until the template is enabled.
 func TestPatch_RequiresOnADisabledTemplateQueuesNothing(t *testing.T) {
 	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
 	addManual(t, e, "tool", nil)
