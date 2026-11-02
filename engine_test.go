@@ -961,11 +961,10 @@ func TestRemove_DependentsConflict(t *testing.T) {
 	}
 }
 
-func TestRemoveWithDependents_CascadesOneLevelOnly(t *testing.T) {
-	// base <- mid <- top. RemoveWithDependents("base") is documented to
-	// cascade ONE level, so it takes mid and leaves top standing. The
-	// two-node case in TestRemove_DependentsConflict cannot tell a
-	// one-level cascade from a transitive one; this can.
+func TestRemoveWithDependents_CascadesThroughTheChain(t *testing.T) {
+	// base <- mid <- top. top requires base only through mid, and the
+	// two-node case in TestRemove_DependentsConflict cannot tell a one-level
+	// cascade from a transitive one; this can.
 	e := newTestEngine(t, nil)
 	addManual(t, e, "base", nil)
 	addManual(t, e, "mid", []string{"base"})
@@ -975,31 +974,81 @@ func TestRemoveWithDependents_CascadesOneLevelOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(deps, []string{"mid"}) {
-		t.Errorf("dependents = %v, want [mid]: only the direct requirer rides along", deps)
+	if !slices.Equal(deps, []string{"mid", "top"}) {
+		t.Errorf("dependents = %v, want [mid top]: every enabled row that needs base rides along", deps)
+	}
+	if !slices.Equal(jv.Names, []string{"base", "mid", "top"}) {
+		t.Errorf("job names = %v, want [base mid top]", jv.Names)
 	}
 	if final := waitJob(t, e, jv.ID); final.State != JobDone {
 		t.Fatalf("uninstall job = %+v tail=%v", final, final.OutputTail)
 	}
-
 	m, err := e.store.LoadManifest()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := m.Tools["base"]; ok {
-		t.Error("base survived its own removal")
+	if len(m.Tools) != 0 {
+		t.Errorf("cascade left rows: %v", slices.Sorted(maps.Keys(m.Tools)))
 	}
-	if _, ok := m.Tools["mid"]; ok {
-		t.Error("mid survived: it directly requires base, so the cascade owed it")
+	for _, bin := range []string{"base", "mid", "top"} {
+		if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", bin)); !os.IsNotExist(err) {
+			t.Errorf("%s binary not uninstalled by the cascade", bin)
+		}
 	}
-	top, ok := m.Tools["top"]
-	if !ok {
-		t.Fatal("top was removed: the cascade walked a transitive level it does not own")
+}
+
+// TestCascade_EveryEnabledDependentIsNamed: the inventory row and the
+// refusal a confirm dialog shows name the same chain the forced call would
+// take, for remove and disable, and a cycle back to the named tool ends the
+// walk.
+func TestCascade_EveryEnabledDependentIsNamed(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "base", nil)
+	addManual(t, e, "mid", []string{"base"})
+	addManual(t, e, "top", []string{"mid"})
+	addManual(t, e, "side", nil)
+	if err := e.store.MutateManifest(func(m *Manifest) error {
+		b := m.Tools["base"]
+		b.Requires = []string{"top"}
+		m.Tools["base"] = b
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	// The point of stopping at one level: top is left naming a dependency
-	// that is gone, and that is the caller's next decision, not this call's.
-	if !slices.Equal(top.Requires, []string{"mid"}) {
-		t.Errorf("top.Requires = %v, want [mid] left untouched", top.Requires)
+	want := []string{"mid", "top"}
+	if row := inventoryRow(t, e, "base"); !slices.Equal(row.Dependents, want) {
+		t.Errorf("inventory dependents of base = %v, want %v", row.Dependents, want)
+	}
+	_, deps, err := e.Remove("base")
+	if de, ok := errors.AsType[*DependentsError](err); !ok || !slices.Equal(de.Dependents, want) || !slices.Equal(deps, want) {
+		t.Errorf("Remove(base) = %v (dependents %v), want DependentsError naming %v", err, deps, want)
+	}
+	on := true
+	_, err = e.Patch("base", PatchRequest{Disabled: &on})
+	if de, ok := errors.AsType[*DependentsError](err); !ok || !slices.Equal(de.Dependents, want) {
+		t.Errorf("Patch(base, disabled) = %v, want DependentsError naming %v", err, want)
+	}
+}
+
+// TestRemoveWithDependents_EssentialDeepInTheChainRefusesTheCall: an
+// essential row two levels up would go with the cascade, so nothing goes.
+func TestRemoveWithDependents_EssentialDeepInTheChainRefusesTheCall(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "base", nil)
+	addManual(t, e, "mid", []string{"base"})
+	addManual(t, e, "top", []string{"mid"})
+	e.catalog.Store(&Catalog{Entries: map[string]CatalogEntry{
+		"top": {Name: "top", Source: SourceManual, Essential: true},
+	}})
+	if _, _, err := e.RemoveWithDependents("base"); !errors.Is(err, ErrEssential) || !strings.Contains(err.Error(), "top") {
+		t.Errorf("RemoveWithDependents(base) = %v, want ErrEssential naming top", err)
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Tools) != 3 {
+		t.Errorf("refused cascade changed the manifest: %v", slices.Sorted(maps.Keys(m.Tools)))
 	}
 }
 

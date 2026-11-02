@@ -49,7 +49,7 @@ var (
 )
 
 // DependentsError is the ErrHasDependents shape that names the enabled
-// entries blocking a remove/disable.
+// entries blocking a remove/disable, directly or through another entry.
 type DependentsError struct {
 	Dependents []string
 }
@@ -131,7 +131,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	for _, n := range names {
 		t := m.Tools[n]
 		s := st.Tools[n]
-		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], dependents[n]))
+		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], cascadeOf(dependents, n)))
 	}
 	return res, nil
 }
@@ -635,8 +635,8 @@ type PatchRequest struct {
 	// to --version (a source-less template takes the catalog's when hydrated).
 	VersionArgs *[]string `json:"version_args,omitempty"`
 	// Force permits disabling a tool that enabled entries require,
-	// cascading the disable to those dependents (one level, mirroring
-	// RemoveWithDependents).
+	// cascading the disable to every enabled entry that needs it, directly
+	// or through another (the set RemoveWithDependents takes).
 	Force bool `json:"force,omitempty"`
 }
 
@@ -710,8 +710,8 @@ func (e *Engine) holdToPin(ctx context.Context, name string) error {
 }
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
-// refusal (or, with Force, the one-level disable cascade mirroring
-// RemoveWithDependents) plus the field overlay. Records what changed in out.
+// refusal (or, with Force, the disable cascade over enabledDependents) plus
+// the field overlay. Records what changed in out.
 func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome, backends map[string]string) error {
 	t, ok := m.Tools[name]
 	if !ok {
@@ -733,9 +733,8 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	*out = applyPatch(&t, req)
 	m.Tools[name] = t
 	out.unmetDeps = out.requiresChanged && !t.Disabled && !depsSatisfied(m, name, &t, backends)
-	// A forced disable cascades to the enabled dependents (one level,
-	// mirroring RemoveWithDependents): a dependent left enabled would
-	// declare intent against a disabled prerequisite.
+	// A dependent left enabled would declare intent against a disabled
+	// prerequisite, and Reconcile would enable the prerequisite again.
 	if out.disabledChanged && out.nowDisabled && req.Force {
 		for _, d := range deps {
 			dt := m.Tools[d]
@@ -802,29 +801,20 @@ func (out *patchOutcome) job(name string) (kind string, names []string) {
 	}
 }
 
-// enabledDependents lists the ENABLED manifest entries that require
-// name, directly (Requires) or as the implied backend of their source
-// kind. Disabled templates never block; hydration re-adopts their
-// dependencies when they are enabled.
+// enabledDependents lists, sorted, the ENABLED manifest entries that need
+// name, directly (Requires or the implied backend of their source kind) or
+// through another enabled entry. It is the set a forced disable or remove
+// takes: a dependent left enabled would make Reconcile restore what went.
+// Disabled templates never block; hydration re-adopts their dependencies
+// when they are enabled.
 func enabledDependents(m *Manifest, name string, backends map[string]string) []string {
-	var out []string
-	for other := range m.Tools {
-		t := m.Tools[other]
-		if other == name || t.Disabled {
-			continue
-		}
-		if dependsOn(&t, other, name, backends) {
-			out = append(out, other)
-		}
-	}
-	slices.Sort(out)
-	return out
+	return cascadeOf(dependentsIndex(m, backends), name)
 }
 
-// dependentsIndex is enabledDependents for every name at once, in one
-// pass over the manifest rather than one pass per row. Inventory renders
-// every tool, so the per-name form would make the read quadratic in the
-// manifest size for an answer the same walk already produces.
+// dependentsIndex maps every name to the ENABLED entries that need it
+// directly, in one pass over the manifest rather than one pass per row.
+// Inventory renders every tool, so a per-name walk would make the read
+// quadratic in the manifest size.
 func dependentsIndex(m *Manifest, backends map[string]string) map[string][]string {
 	out := map[string][]string{}
 	for other := range m.Tools {
@@ -836,18 +826,27 @@ func dependentsIndex(m *Manifest, backends map[string]string) map[string][]strin
 			out[dep] = append(out[dep], other)
 		}
 	}
-	for dep := range out {
-		slices.Sort(out[dep])
-	}
 	return out
 }
 
-// dependsOn reports whether tool `other` requires `name`. It reads the
-// edge set from depsOf, the one place that decides what a dependency
-// edge is, so the refusal and the inventory's advisory answer cannot
-// disagree about one.
-func dependsOn(t *Tool, other, name string, backends map[string]string) bool {
-	return slices.Contains(depsOf(other, t, backends), name)
+// cascadeOf walks idx from name to a fixed point and returns every entry
+// reached, sorted, name excluded (a cycle leads back to it).
+func cascadeOf(idx map[string][]string, name string) []string {
+	seen := map[string]bool{name: true}
+	var out []string
+	for next := []string{name}; len(next) > 0; {
+		n := next[0]
+		next = next[1:]
+		for _, d := range idx[n] {
+			if !seen[d] {
+				seen[d] = true
+				out = append(out, d)
+				next = append(next, d)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Install re-enqueues an install for an existing, enabled tool (retry /
@@ -891,14 +890,12 @@ func (e *Engine) Remove(name string) (*Job, []string, error) {
 }
 
 // RemoveWithDependents uninstalls a tool together with every enabled
-// entry that requires it, deleting all their templates; the returned job
-// carries every removed name and dependents reports which rode along.
-//
-// The cascade is ONE LEVEL: the direct requirers of name. With A
-// requiring B and B requiring name, this removes name and B and leaves A
-// enabled against a gone dependency — removing A too is the caller's
-// decision. Prefer Remove unless the caller has already established
-// that removing the dependents is intended; nothing here re-checks that.
+// entry that needs it, directly or through another enabled entry, deleting
+// all their templates; the returned job carries every removed name and
+// dependents reports which rode along. With A requiring B and B requiring
+// name, it removes all three. Prefer Remove unless the caller has already
+// established that removing the dependents is intended; nothing here
+// re-checks that.
 func (e *Engine) RemoveWithDependents(name string) (*Job, []string, error) {
 	return e.remove(name, true)
 }
@@ -955,8 +952,8 @@ func (e *Engine) removeKnowledge() removeKnowledge {
 	}
 }
 
-// removeFromManifest deletes name (and, with cascade, its enabled
-// dependents) from m, recording the removed entries. It refuses with
+// removeFromManifest deletes name (and, with cascade, every entry
+// enabledDependents names) from m, recording the removed entries. It refuses with
 // *DependentsError when enabled entries require name and cascade is
 // false.
 func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool, rc removeKnowledge) error {
@@ -980,7 +977,7 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	if cascade {
 		for _, d := range *dependents {
 			if rc.essential(d) {
-				return fmt.Errorf("%w: %s, which requires %s", ErrEssential, d, name)
+				return fmt.Errorf("%w: %s, which needs %s", ErrEssential, d, name)
 			}
 		}
 	}

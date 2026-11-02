@@ -127,11 +127,12 @@ type ToolInfo struct {
 	// checksum while the other 402 do.
 	Checksum string   `json:"checksum,omitempty"`
 	Requires []string `json:"requires,omitempty"`
-	// Dependents names the ENABLED entries that require this tool,
-	// directly or as the implied backend of their source kind: what a
-	// consumer needs BEFORE sending a disable/remove, instead of
-	// learning it from a 409. Advisory only — the engine re-derives the
-	// set under the manifest lock, so a stale inventory is still refused.
+	// Dependents names the ENABLED entries that need this tool, directly
+	// (Requires or the implied backend of their source kind) or through
+	// another enabled entry: the set a 409 names and a forced disable or
+	// remove takes, for a consumer to show BEFORE sending one. Advisory
+	// only: the engine re-derives the set under the manifest lock, so a
+	// stale inventory is still refused.
 	Dependents []string `json:"dependents,omitempty"`
 	Pin        bool     `json:"pin,omitempty"`
 	Disabled   bool     `json:"disabled,omitempty"`

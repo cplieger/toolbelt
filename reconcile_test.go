@@ -958,6 +958,63 @@ func TestReconcile_InstallsAnUnsatisfiedDependency(t *testing.T) {
 	}
 }
 
+// TestForcedCascade_ReconcileAddsNothingBack: a forced remove or disable of
+// base in base <- mid <- top takes top too, so no enabled row needs what went
+// and the next Reconcile, which could adopt base and mid from the catalog,
+// adds nothing back.
+func TestForcedCascade_ReconcileAddsNothingBack(t *testing.T) {
+	chain := []string{"base", "mid", "top"}
+	on := true
+	for _, tc := range []struct {
+		cascade func(e *Engine) (*Job, error)
+		name    string
+	}{
+		{name: "remove", cascade: func(e *Engine) (*Job, error) {
+			jv, _, err := e.RemoveWithDependents("base")
+			return jv, err
+		}},
+		{name: "disable", cascade: func(e *Engine) (*Job, error) {
+			return e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := &Catalog{Entries: map[string]CatalogEntry{}}
+			for _, n := range chain[:2] {
+				cat.Entries[n] = CatalogEntry{Name: n, Source: SourceManual, Version: "1", Install: binStub(n), Probe: n}
+			}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			addManual(t, e, "base", nil)
+			addManual(t, e, "mid", []string{"base"})
+			addManual(t, e, "top", []string{"mid"})
+			// A bystander keeps the manifest non-empty, so Reconcile runs.
+			addManual(t, e, "side", nil)
+			jv, err := tc.cascade(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if final := waitJob(t, e, jv.ID); final.State != JobDone || !slices.Equal(final.Names, chain) {
+				t.Errorf("cascade job = %s %v, want done over %v", final.State, final.Names, chain)
+			}
+			final := reconcileJob(t, e)
+			if out := strings.Join(final.OutputTail, "\n"); final.State != JobDone || !strings.Contains(out, "everything converged") {
+				t.Errorf("reconcile = %s %q, want done and everything converged", final.State, out)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, n := range chain {
+				if row, ok := m.Tools[n]; ok && !row.Disabled {
+					t.Errorf("%s is enabled after the cascade and a Reconcile", n)
+				}
+				if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", n)); !os.IsNotExist(err) {
+					t.Errorf("%s binary is installed after the cascade and a Reconcile", n)
+				}
+			}
+		})
+	}
+}
+
 // TestReconcile_DisabledOwnedDependencyIsEnabledNotUninstalled: a disabled
 // row an enabled row needs, directly or through another disabled row, is
 // enabled by the install plan, so Reconcile does not uninstall it first.

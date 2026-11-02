@@ -32,9 +32,9 @@ The handler has no authentication and adds no middleware except its own cache po
 
 `POST {prefix}` takes `name` and the optional `source` (required when the catalog does not know the name), `version`, `description`, `origin`, `install`, `uninstall`, `probe`, `python`, `requires`, `version_args`, `pin` and `disabled`. An empty `version_args` takes the catalog's.
 
-`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them too. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry. A `pin` change on an enabled `apt:` entry returns the job that sets the package's dpkg hold. A `requires` change on an enabled entry returns the job that adds or enables each tool it names that has no enabled entry, and returns a null job when every one has.
+`PATCH` takes any of `version`, `pin`, `disabled`, `description`, `requires`, `install`, `uninstall`, `python` and `version_args`, plus `force` to disable a tool that enabled entries require, which disables them and every enabled entry that needs them. A `version_args` change applies at the next install check with no job, and an empty list clears it, so the check only requires the tool to answer `--version`. `python` applies only to a `pip:` entry. A `pin` change on an enabled `apt:` entry returns the job that sets the package's dpkg hold. A `requires` change on an enabled entry returns the job that adds or enables each tool it names that has no enabled entry, and returns a null job when every one has.
 
-`DELETE` takes `force` in the query. A cascade that includes an essential tool is refused whole.
+`DELETE` takes `force` in the query, which removes every enabled entry that needs the tool, directly or through another entry. A cascade that includes an essential tool is refused whole.
 
 Search results leave out each entry's embedded install definition. In the reply, `truncated` is true when a block was cut to its limit, and `matched` is how many rows the query found before the cut. `apt_state` is `unavailable`, `indexing` or `available`, and `apt_available` gives the same answer as a bool.
 
@@ -42,7 +42,7 @@ Search results leave out each entry's embedded install definition. In the reply,
 
 A change returns `202 {"job": ...}`, with a null job when nothing needed doing. A refusal is `409` with a coded error:
 
-- `has_dependents` names the enabled tools that need this one.
+- `has_dependents` names the enabled tools that need this one, directly or through another enabled tool.
 - `essential` marks a tool your product declares it needs.
 - `disabled` marks an install sent to a template.
 - `not_configured` marks a catalog refresh on an engine without `Config.Refresh`.
