@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -343,6 +344,70 @@ func TestJobQueue_WaitPrefersAFinishedJobToACancelledContext(t *testing.T) {
 	}
 	if v.State != JobDone {
 		t.Errorf("Wait = %s, want %s", v.State, JobDone)
+	}
+}
+
+// endsJobOnDone is a cancelled context whose Done call first ends the
+// waited job, so a Wait already past its first done check meets the job's
+// end and ctx's end in the same select.
+type endsJobOnDone struct {
+	context.Context
+	endJob func()
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *endsJobOnDone) Done() <-chan struct{} {
+	c.once.Do(func() {
+		c.endJob()
+		close(c.closed)
+	})
+	return c.closed
+}
+
+func (c *endsJobOnDone) Err() error {
+	select {
+	case <-c.closed:
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+// TestJobQueue_WaitPrefersAJobThatEndsAsItsContextDoes pins the same order
+// when the job ends while Wait is blocked and ctx is done by the time the
+// waiter runs: Go picks a ready select case at random, so the result must
+// not depend on which case won.
+func TestJobQueue_WaitPrefersAJobThatEndsAsItsContextDoes(t *testing.T) {
+	gate := make(chan struct{})
+	q := newLineQueue(t, func(*job, func(string)) error {
+		<-gate
+		return nil
+	})
+	// Each round is a fresh coin toss for a select that does not re-check
+	// done, so 64 rounds miss the bug with odds of 2^-64.
+	for i := range 64 {
+		jv, err := q.Enqueue(JobKindInstall, []string{"tool"})
+		if err != nil {
+			t.Fatalf("Setup: Enqueue: %v", err)
+		}
+		ctx := &endsJobOnDone{
+			Context: t.Context(),
+			closed:  make(chan struct{}),
+			endJob: func() {
+				gate <- struct{}{}
+				if _, err := q.Wait(t.Context(), jv.ID); err != nil {
+					t.Errorf("Setup: Wait for the job to end: %v", err)
+				}
+			},
+		}
+		v, err := q.Wait(ctx, jv.ID)
+		if err != nil {
+			t.Fatalf("round %d: Wait = %v, want the job's result", i, err)
+		}
+		if v.ID != jv.ID || v.State != JobDone {
+			t.Fatalf("round %d: Wait = %s %s, want %s done", i, v.ID, v.State, jv.ID)
+		}
 	}
 }
 

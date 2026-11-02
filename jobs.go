@@ -401,18 +401,19 @@ func (q *jobQueue) Wait(ctx context.Context, id string) (*Job, error) {
 	if live == nil {
 		return nil, fmt.Errorf("%w: %s", ErrUnknownJob, id)
 	}
-	// The job may have ended since waitTarget; a two-way select would
-	// pick at random when ctx is also done.
-	select {
-	case <-live.done:
-		return live.final, nil
-	default:
-	}
+	// Go picks a ready select case at random, so a ctx exit re-checks
+	// done: the job may have ended before this call or before the waiter
+	// ran.
 	select {
 	case <-live.done:
 		return live.final, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		select {
+		case <-live.done:
+			return live.final, nil
+		default:
+			return nil, ctx.Err()
+		}
 	}
 }
 
