@@ -1338,6 +1338,85 @@ func TestEnsureInstalled_ReinstallsAnEnabledDependencyWhoseBinaryIsGone(t *testi
 	}
 }
 
+// TestEnsureInstalled_ReadsASourceLessRowAsHydrated: a runnable source-less
+// row is ready only as Reconcile would leave it after hydration, so
+// EnsureInstalled installs what the catalog entry's requires, its source's
+// backend or its default version call for before returning.
+func TestEnsureInstalled_ReadsASourceLessRowAsHydrated(t *testing.T) {
+	const tool = "tool"
+	for _, tc := range []struct {
+		entries  map[string]CatalogEntry
+		seed     func(t *testing.T, e *Engine)
+		name     string
+		want     string
+		recorded string
+	}{
+		{name: "catalog requires", want: "dep", entries: map[string]CatalogEntry{
+			tool:  {Name: tool, Source: SourceManual, Version: "1", Install: binStub(tool), Probe: tool, Requires: []string{"dep"}},
+			"dep": depCatalog().Entries["dep"],
+		}},
+		{name: "source backend", want: "node", recorded: "1.0.0", entries: map[string]CatalogEntry{
+			tool:   {Name: tool, Source: "npm:" + tool, Version: "1.0.0"},
+			"node": {Name: "node", Source: SourceManual, Version: "1", Install: binStub("node"), Probe: "node"},
+		}, seed: func(t *testing.T, e *Engine) {
+			writeNpmPackage(t, e, tool, `{"name":"tool","version":"1.0.0"}`)
+		}},
+		{name: "catalog version", want: tool, recorded: "0.9", entries: map[string]CatalogEntry{
+			tool: {Name: tool, Source: SourceManual, Version: "1", Install: binStub(tool), Probe: tool},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// npm fails if anything runs it: the npm row is installed.
+			fake := t.TempDir()
+			if err := os.WriteFile(filepath.Join(fake, "npm"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cat := &Catalog{Entries: tc.entries, Backends: map[string]string{SourceNpm: "node"}}
+			e := newTestEngineClient(t, cat, offlineClient(), nil)
+			if err := os.WriteFile(filepath.Join(e.toolsDir, "bin", tool), []byte("#!/bin/sh\necho old\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			editManifest(t, e, func(m *Manifest) { m.Tools[tool] = Tool{} })
+			if tc.recorded != "" {
+				if err := e.store.setToolStatus(tool, func(s *ToolStatus) { s.InstalledVersion = tc.recorded }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.seed != nil {
+				tc.seed(t, e)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+			defer cancel()
+			if err := e.EnsureInstalled(ctx, tool); err != nil {
+				t.Fatalf("EnsureInstalled: %v", err)
+			}
+			requireInstalled(t, e, tc.want)
+		})
+	}
+}
+
+// TestEnsureInstalled_ConvergedToolLeavesTheManifestFile: a ready tool needs
+// no manifest write, so EnsureInstalled does not replace tools.json.
+func TestEnsureInstalled_ConvergedToolLeavesTheManifestFile(t *testing.T) {
+	e := newTestEngineClient(t, depCatalog(), offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	before, err := os.Stat(e.store.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.EnsureInstalled(t.Context(), "tool"); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	after, err := os.Stat(e.store.manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Error("tools.json was replaced, want the converged call to write nothing")
+	}
+}
+
 // reconcileJob runs one ReconcileMissing job to its end.
 func reconcileJob(t *testing.T, e *Engine) *Job {
 	t.Helper()

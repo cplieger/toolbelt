@@ -1017,6 +1017,10 @@ func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err erro
 // node); unlike Install it DOES enable a disabled template, because the
 // user explicitly invoked the feature that needs the tool.
 func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
+	// The fast path judges rows as the install job would, after hydration.
+	if err := e.hydrateStatic(); err != nil {
+		return err
+	}
 	m, err := e.store.LoadManifest()
 	if err != nil {
 		return err
@@ -1117,16 +1121,30 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
 	c := e.cat()
-	return e.store.MutateManifest(func(m *Manifest) error {
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		merged := false
 		for name := range m.Tools {
 			t := m.Tools[name]
 			if h, ok := hydrated(c, name, &t); ok {
 				m.Tools[name] = h
+				merged = true
 			}
+		}
+		if !merged {
+			return errHydratedAlready
 		}
 		return nil
 	})
+	if errors.Is(err, errHydratedAlready) {
+		return nil
+	}
+	return err
 }
+
+// errHydratedAlready aborts hydrateStatic's write when no row merged, so a
+// converged EnsureInstalled does not rewrite tools.json (or fail on a
+// read-only one).
+var errHydratedAlready = errors.New("toolbelt: manifest already hydrated")
 
 // hydrated is the hydration rule for one row: a source-less row the catalog
 // knows takes the catalog's static fields, unless the merge fails validation.
