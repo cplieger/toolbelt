@@ -1013,8 +1013,8 @@ func (e *Engine) Reconcile(mode ReconcileMode) (jv *Job, enqueued bool, err erro
 }
 
 // EnsureInstalled synchronously guarantees a tool: present in the
-// manifest (created from the catalog when missing), enabled, installed,
-// and on PATH. This is the programmatic "a product action needs this
+// manifest (created from the catalog when missing), enabled, installed
+// as Reconcile would leave it, and on PATH. This is the programmatic "a product action needs this
 // binary now" path (a forge login installing gh, an MCP flow installing
 // node); unlike Install it DOES enable a disabled template, because the
 // user explicitly invoked the feature that needs the tool.
@@ -1025,7 +1025,7 @@ func (e *Engine) EnsureInstalled(ctx context.Context, name string) error {
 	}
 	t, inManifest := m.Tools[name]
 	status := e.store.State().Tools[name]
-	if inManifest && !t.Disabled && e.probeInstalled(name, &t, &status) {
+	if inManifest && !t.Disabled && e.converged(name, &t, &status) {
 		return nil
 	}
 	jv, err := e.ensureJob(ctx, name, &t, inManifest)
@@ -1943,13 +1943,13 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 	return missing, extras, orphans
 }
 
-// converged is probeInstalled on a venv built for the row's Python request,
-// and for an apt: row also a dpkg hold equal to its pin, so Reconcile repairs
-// a hold that a failed apt-mark, a recreated container or a hand-run apt-mark
-// left wrong. An unreadable dpkg record is not converged, so the install that
-// follows records why.
+// converged is probeInstalled on a venv built for the row's Python request at
+// the row's version, and for an apt: row also a dpkg hold equal to its pin, so
+// Reconcile applies a hand-edited version and repairs a hold that a failed
+// apt-mark, a recreated container or a hand-run apt-mark left wrong. An
+// unreadable dpkg record is not converged, so the install that follows records why.
 func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
-	if s.Python != t.Python {
+	if s.Python != t.Python || versionDrifted(t, s) {
 		return false
 	}
 	pkg, ok := strings.CutPrefix(t.Source, SourceApt+":")
@@ -1960,6 +1960,14 @@ func (e *Engine) converged(name string, t *Tool, s *ToolStatus) bool {
 	defer cancel()
 	st, err := aptQuery(ctx, pkg)
 	return err == nil && st.installed && st.held == t.Pin
+}
+
+// versionDrifted reports a recorded install at another version than the
+// manifest names. An empty side is no request: a sparse row resolves latest
+// only when it installs, and a row with no state record is a legacy binary
+// Reconcile leaves alone.
+func versionDrifted(t *Tool, s *ToolStatus) bool {
+	return t.Version != "" && s.InstalledVersion != "" && t.Version != s.InstalledVersion
 }
 
 // sweepOrphans uninstalls engine-owned footprints whose manifest row is

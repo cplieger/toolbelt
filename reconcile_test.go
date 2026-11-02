@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -213,6 +214,72 @@ func TestReconcile_RebuildsAVenvOnAnotherPythonRequest(t *testing.T) {
 	}
 	if out := strings.Join(waitJob(t, e, jv.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
 		t.Errorf("second reconcile output = %q, want everything converged", out)
+	}
+}
+
+// TestReconcile_InstallsTheVersionTheManifestNowNames: a hand edit of an
+// installed row's version is a request Reconcile applies, so tools.json and
+// tools-state.json agree once it reports converged.
+func TestReconcile_InstallsTheVersionTheManifestNowNames(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "tool", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		tl := m.Tools["tool"]
+		tl.Version = "2"
+		m.Tools["tool"] = tl
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jv, enqueued, err := e.Reconcile(ReconcileMissing)
+	if err != nil || !enqueued {
+		t.Fatalf("reconcile: job=%v enqueued=%v err=%v", jv, enqueued, err)
+	}
+	if final := waitJob(t, e, jv.ID); final.State != JobDone {
+		t.Fatalf("reconcile job = %s, want done (tail %v)", final.State, final.OutputTail)
+	}
+	if got := e.store.State().Tools["tool"].InstalledVersion; got != "2" {
+		t.Errorf("installed version = %q, want 2", got)
+	}
+	out, err := exec.Command(filepath.Join(e.toolsDir, "bin", "tool")).Output()
+	if err != nil || strings.TrimSpace(string(out)) != "tool 2" {
+		t.Errorf("installed binary prints %q (%v), want tool 2", out, err)
+	}
+
+	jv, _, err = e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := strings.Join(waitJob(t, e, jv.ID).OutputTail, "\n"); !strings.Contains(out, "everything converged") {
+		t.Errorf("second reconcile output = %q, want everything converged", out)
+	}
+}
+
+// TestReconcile_SparseRowIsOfflineWhenInstalled: an empty manifest version
+// means the latest, which is resolved only by an install, so an installed
+// sparse row is converged and Reconcile asks no version source.
+func TestReconcile_SparseRowIsOfflineWhenInstalled(t *testing.T) {
+	e := newTestEngineClient(t, nil, offlineClient(), nil)
+	addManual(t, e, "tool", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		tl := m.Tools["tool"]
+		tl.Version = ""
+		m.Tools["tool"] = tl
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	jv, _, err := e.Reconcile(ReconcileMissing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitJob(t, e, jv.ID)
+	if out := strings.Join(final.OutputTail, "\n"); final.State != JobDone || !strings.Contains(out, "everything converged") {
+		t.Errorf("reconcile = %s %q, want done and everything converged", final.State, out)
 	}
 }
 
@@ -607,6 +674,30 @@ func TestEnsureInstalled_EnablesDisabledTemplate(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", "gh")); err != nil {
 		t.Fatal("tool not installed")
+	}
+}
+
+// TestEnsureInstalled_InstallsTheVersionTheManifestNowNames: a caller that
+// needs the tool now gets the version the manifest names, as Reconcile would.
+func TestEnsureInstalled_InstallsTheVersionTheManifestNowNames(t *testing.T) {
+	e := newTestEngine(t, nil)
+	addManual(t, e, "tool", nil)
+	err := e.store.MutateManifest(func(m *Manifest) error {
+		tl := m.Tools["tool"]
+		tl.Version = "2"
+		m.Tools["tool"] = tl
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	if err := e.EnsureInstalled(ctx, "tool"); err != nil {
+		t.Fatalf("EnsureInstalled: %v", err)
+	}
+	if got := e.store.State().Tools["tool"].InstalledVersion; got != "2" {
+		t.Errorf("installed version = %q, want 2", got)
 	}
 }
 

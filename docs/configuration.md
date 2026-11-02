@@ -45,7 +45,7 @@ Every field except the name is optional, and the catalog fills in the rest.
 | Field | Purpose |
 | --- | --- |
 | `source` | Where the tool comes from, such as `aqua:cli/cli` or `npm:typescript` |
-| `version` | The version to install. Empty means the latest |
+| `version` | The version to install. Empty means the latest. A hand edit of an installed entry's version applies at its next install or reconcile |
 | `pin` | Keep this version. Updates skip the entry |
 | `disabled` | Make the entry a template that installs nothing |
 | `requires` | Other tools this one needs, installed first |
