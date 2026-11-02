@@ -98,6 +98,9 @@ func (in *installer) syncAptHold(ctx context.Context, pkg string, hold bool) err
 // than the version's presence.
 const aptStatusInstalled = "installed"
 
+// aptWantHold is the ${db:Status-Want} value apt-mark hold sets.
+const aptWantHold = "hold"
+
 // geteuid is a variable so tests can drive the apt paths against stub
 // binaries without running as root.
 var geteuid = os.Geteuid
@@ -125,11 +128,14 @@ func AptAvailable() bool {
 
 // aptStatus is one package's dpkg record. held is the selection apt-mark
 // sets, which dpkg reports as the "hold" want state (dpkg-query(1), Status),
-// on a package that is not installed too.
+// on a package that is not installed too. foreignHeld lists the other
+// architectures whose installed copy is held, which apt-get -y may refuse to
+// change and the engine never releases (installApt reports them).
 type aptStatus struct {
-	version   string
-	installed bool
-	held      bool
+	version     string
+	foreignHeld []string
+	installed   bool
+	held        bool
 }
 
 // aptUnknownPackage is dpkg-query's untranslated message for a name it has no
@@ -170,7 +176,8 @@ const aptStatusFormat = "-f=${Architecture}\t${db:Status-Want}\t${db:Status-Stat
 // aptStatusFrom reads an aptStatusFormat answer. For a bare name apt-get and
 // apt-mark act on the native architecture's record, or an all or unrecorded
 // one, so nativeArch is asked unless the sole record is all or unrecorded,
-// and a package installed only for a foreign architecture reads as absent.
+// and a package installed only for a foreign architecture reads as absent
+// (its held copies still listed in foreignHeld).
 // The status word decides: after `apt-get remove nano` (apt 3.0.3) dpkg keeps
 // a config-files record at 8.4-1+deb13u1 and exits 0 with no binary on disk,
 // so a version-only read reports every apt entry present after a recreate.
@@ -186,25 +193,45 @@ func aptStatusFrom(out string, nativeArch func() (string, error)) (aptStatus, er
 	if len(records) == 0 {
 		return aptStatus{}, errors.New("empty dpkg status")
 	}
-	rec := records[0]
-	if len(records) > 1 || !archIndependent(rec[0]) {
-		native, err := nativeArch()
-		if err != nil {
-			return aptStatus{}, err
-		}
-		i := slices.IndexFunc(records, func(r []string) bool {
-			return r[0] == native || archIndependent(r[0])
-		})
-		if i < 0 {
-			return aptStatus{}, nil
-		}
-		rec = records[i]
+	if len(records) == 1 && archIndependent(records[0][0]) {
+		return statusOf(records[0]), nil
 	}
-	st := aptStatus{held: rec[1] == "hold", installed: rec[2] == aptStatusInstalled}
+	native, err := nativeArch()
+	if err != nil {
+		return aptStatus{}, err
+	}
+	rec, foreignHeld := nativeRecord(records, native)
+	var st aptStatus
+	if rec != nil {
+		st = statusOf(rec)
+	}
+	st.foreignHeld = foreignHeld
+	return st, nil
+}
+
+// nativeRecord picks the record apt-get and apt-mark act on for a bare name,
+// nil when there is none, and lists the foreign architectures whose
+// installed copy is held.
+func nativeRecord(records [][]string, native string) (rec, foreignHeld []string) {
+	for _, r := range records {
+		switch {
+		case r[0] == native || archIndependent(r[0]):
+			if rec == nil {
+				rec = r
+			}
+		case r[1] == aptWantHold && r[2] == aptStatusInstalled:
+			foreignHeld = append(foreignHeld, r[0])
+		}
+	}
+	return rec, foreignHeld
+}
+
+func statusOf(rec []string) aptStatus {
+	st := aptStatus{held: rec[1] == aptWantHold, installed: rec[2] == aptStatusInstalled}
 	if st.installed {
 		st.version = rec[3]
 	}
-	return st, nil
+	return st
 }
 
 func archIndependent(arch string) bool { return arch == "all" || arch == "" }
@@ -358,7 +385,7 @@ func (in *installer) installApt(ctx context.Context, pkg, want string) (string, 
 		return "", fmt.Errorf("lift the hold for the install: %w", herr)
 	}
 	if ierr := in.aptGetInstall(ctx, []string{target}, opts...); ierr != nil {
-		return "", ierr
+		return "", foreignHoldError(ierr, pkg, st.foreignHeld)
 	}
 	if st, err = aptQuery(ctx, pkg); err != nil {
 		return "", err
@@ -367,6 +394,21 @@ func (in *installer) installApt(ctx context.Context, pkg, want string) (string, 
 		return "", fmt.Errorf("apt-get succeeded but dpkg reports %s is not installed", pkg)
 	}
 	return st.version, nil
+}
+
+// foreignHoldError names the held foreign-architecture copies beside a failed
+// install, which may be what apt-get refused. The engine reads, holds and
+// releases only the native record, so releasing them is the operator's.
+func foreignHoldError(err error, pkg string, foreignHeld []string) error {
+	if len(foreignHeld) == 0 {
+		return err
+	}
+	copies := make([]string, len(foreignHeld))
+	for i, arch := range foreignHeld {
+		copies[i] = pkg + ":" + arch
+	}
+	return fmt.Errorf("%w; dpkg holds %s for another architecture, which can block this install and which the engine never changes: release it with apt-mark unhold %s",
+		err, strings.Join(copies, ", "), strings.Join(copies, " "))
 }
 
 // aptGetInstall runs one apt-get install over a package set, with opts

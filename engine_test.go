@@ -3375,13 +3375,13 @@ func fakeRoot(t *testing.T) {
 }
 
 // aptStub models dpkg for one amd64 jq with logging apt-mark, apt-get,
-// dpkg-query and apt-cache stubs. Its dir's files are dpkg's record: installed
-// (the version, empty for setAptRow's 1.6-1) and held, so a held absent package
-// reads "hold not-installed" and neither file reads unknown. A call whose first
-// argument has a gate waits until open(that argument). apt-get installs its
-// `pkg=version` argument's version, else the candidate (always, with
-// ignore-pin), refusing a held package and an unflagged downgrade as apt-get
-// -y does (apt-get(8)); set and failQueriesAfter switch failures on.
+// dpkg-query and apt-cache stubs. Its dir's files are dpkg's record (installed
+// holds the version, empty for setAptRow's 1.6-1; held; foreign-held, a held
+// installed i386 copy): a held absent package reads "hold not-installed", none
+// reads unknown. A gated first argument waits until open(it). apt-get installs
+// `pkg=version`'s version, else the candidate (always, with ignore-pin), and
+// refuses a held package (or foreign-conflicts) and an unflagged downgrade as
+// apt-get -y does (apt-get(8)); set and failQueriesAfter switch failures on.
 type aptStub struct {
 	dir, log string
 }
@@ -3416,7 +3416,7 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 			"case \"$1\" in hold) touch " + d + "held;; unhold) rm -f " + d + "held;; esac\n" +
 			"echo \"mark-end $1\" >> " + s.log + "\n",
 		"apt-get": "echo \"apt-get $*\" >> " + s.log + "\n" + wait +
-			"if [ -e " + d + "held ]; then case \" $* \" in *' --allow-change-held-packages '*) ;; *)\n" +
+			"if [ -e " + d + "held ] || [ -e " + d + "foreign-conflicts ]; then case \" $* \" in *' --allow-change-held-packages '*) ;; *)\n" +
 			"echo 'E: Held packages were changed and -y was used without --allow-change-held-packages.' >&2; exit 100;; esac; fi\n" +
 			"[ -e " + d + "get-fail ] && { echo 'E: install failed' >&2; exit 100; }\n" +
 			"[ -e " + d + "get-noop ] && exit 0\n" +
@@ -3433,8 +3433,12 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 			"want=install; [ -e " + d + "held ] && want=hold\n" +
 			"status=installed; version=$(cat " + d + "installed 2>/dev/null); version=${version:-1.6-1}\n" +
 			"[ -e " + d + "installed ] || { status=not-installed; version=; }\n" +
-			"[ $status = installed ] || [ $want = hold ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
-			"case \"$2\" in *Status-Want*) printf 'amd64\\t%s\\t%s\\t%s\\n' $want $status \"$version\";; *) echo \"$status $version\";; esac\n",
+			"native=; if [ $status = installed ] || [ $want = hold ]; then native=1; fi\n" +
+			"foreign=; [ -e " + d + "foreign-held ] && foreign=1\n" +
+			"[ -n \"$native$foreign\" ] || { echo \"dpkg-query: no packages found matching $4\" >&2; exit 1; }\n" +
+			"case \"$2\" in *Status-Want*) if [ -n \"$foreign\" ]; then printf 'i386\\thold\\tinstalled\\t1.6-1\\n'; fi\n" +
+			"if [ -n \"$native\" ]; then printf 'amd64\\t%s\\t%s\\t%s\\n' $want $status \"$version\"; fi;;\n" +
+			"*) echo \"$status $version\";; esac\n",
 		"apt-cache": "[ \"$1\" = policy ] || exit 1\nprintf 'jq:\\n  Installed: 1.6-1\\n  Candidate: " + aptStubCandidate + "\\n'\n",
 		"dpkg":      "[ \"$1\" = --print-architecture ] && echo amd64\n",
 	}
@@ -3451,7 +3455,7 @@ func stubApt(t *testing.T, gated ...string) *aptStub {
 
 // set creates the named state files: installed and held, mark-fail and
 // get-fail to fail apt-mark and apt-get, get-noop for an apt-get that
-// installs nothing, and ignore-pin.
+// installs nothing, ignore-pin, foreign-held and foreign-conflicts.
 func (s *aptStub) set(t *testing.T, names ...string) {
 	t.Helper()
 	for _, n := range names {
@@ -4168,6 +4172,61 @@ func TestReconcile_ReinstallsAPinnedAptRowAtAnotherVersion(t *testing.T) {
 	}
 	if got := s.installedVersion(t); got != "1.6-1" || !s.held(t) {
 		t.Errorf("dpkg reports jq %q, held %v; want the pinned 1.6-1 held", got, s.held(t))
+	}
+}
+
+// TestAptInstall_NamesAHeldForeignCopyWhenAptRefuses: a hold on another
+// architecture's copy is a selection the engine never made, so when apt-get
+// fails beside one the job's error names that copy and how to release it.
+func TestAptInstall_NamesAHeldForeignCopyWhenAptRefuses(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	s.set(t, "foreign-held", "foreign-conflicts")
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, false, false)
+
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	got := waitJob(t, e, jv.ID)
+	if got.State != JobFailed {
+		t.Fatalf("job = %s, want failed", got.State)
+	}
+	for name, msg := range map[string]string{"job error": got.Error, "recorded error": e.store.State().Tools["jq"].LastError} {
+		for _, want := range []string{"Held packages were changed", "jq:i386", "another architecture", "apt-mark unhold jq:i386"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("%s = %q, want it to contain %q", name, msg, want)
+			}
+		}
+	}
+	if lines := s.lines(t); slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "mark ") }) {
+		t.Errorf("calls = %q, want no apt-mark on a foreign architecture's selection", lines)
+	}
+}
+
+// TestAptInstall_NeverUnholdsAForeignCopy: a held Multi-Arch: same copy does
+// not block the native install, so the install succeeds and leaves that
+// selection alone.
+func TestAptInstall_NeverUnholdsAForeignCopy(t *testing.T) {
+	fakeRoot(t)
+	s := stubApt(t)
+	s.set(t, "foreign-held")
+	e := newTestEngine(t, nil)
+	setAptRow(t, e, false, false)
+
+	jv, err := e.Install("jq")
+	if err != nil {
+		t.Fatalf("Install(jq) = %v", err)
+	}
+	wantJobState(t, e, jv, JobDone)
+
+	lines := s.lines(t)
+	if !slices.Contains(lines, aptGetInstallLine("--", "jq")) {
+		t.Errorf("calls = %q, want apt-get to install jq", lines)
+	}
+	if slices.ContainsFunc(lines, func(l string) bool { return strings.HasPrefix(l, "mark ") }) {
+		t.Errorf("calls = %q, want no apt-mark call", lines)
 	}
 }
 
