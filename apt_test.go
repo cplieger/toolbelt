@@ -102,14 +102,14 @@ func TestAptStatusFrom(t *testing.T) {
 			}
 		}
 	})
-	for _, out := range []string{
-		"amd64\tinstall\tinstalled\t1.0\n",
-		"i386\tinstall\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n",
+	for _, tc := range []struct{ name, out string }{
+		{name: "a sole native record", out: "amd64\tinstall\tinstalled\t1.0\n"},
+		{name: "several records", out: "i386\tinstall\tinstalled\t1.0\namd64\tinstall\tinstalled\t1.0\n"},
 	} {
-		t.Run("an unreadable native architecture fails "+strings.Fields(out)[0], func(t *testing.T) {
-			_, err := aptStatusFrom(out, func() (string, error) { return "", errors.New("no dpkg") })
+		t.Run("an unreadable native architecture fails "+tc.name, func(t *testing.T) {
+			_, err := aptStatusFrom(tc.out, func() (string, error) { return "", errors.New("no dpkg") })
 			if err == nil || !strings.Contains(err.Error(), "no dpkg") {
-				t.Errorf("aptStatusFrom(%q, failing arch) error = %v, want the arch failure", out, err)
+				t.Errorf("aptStatusFrom(%q, failing arch) error = %v, want the arch failure", tc.out, err)
 			}
 		})
 	}
