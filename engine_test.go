@@ -855,7 +855,7 @@ func TestInventory_ReportsDependents(t *testing.T) {
 	// The refusal and the advisory field must name the same set, or a
 	// consumer's pre-check disagrees with the answer it gets.
 	m, _ := e.store.LoadManifest()
-	if want := enabledDependents(m, "node", e.backends()); !slices.Equal(got["node"], want) {
+	if want := enabledDependents(m, dependentsIndex(m, e.cat()), "node"); !slices.Equal(got["node"], want) {
 		t.Errorf("inventory dependents %v disagree with the refusal's %v", got["node"], want)
 	}
 }
@@ -1031,24 +1031,38 @@ func TestCascade_EveryEnabledDependentIsNamed(t *testing.T) {
 }
 
 // TestRemoveWithDependents_EssentialDeepInTheChainRefusesTheCall: an
-// essential row two levels up would go with the cascade, so nothing goes.
+// essential row two levels up would go with the cascade, so nothing goes,
+// whether the row between is enabled or disabled (the install plan enables a
+// disabled one for top).
 func TestRemoveWithDependents_EssentialDeepInTheChainRefusesTheCall(t *testing.T) {
-	e := newTestEngine(t, nil)
-	addManual(t, e, "base", nil)
-	addManual(t, e, "mid", []string{"base"})
-	addManual(t, e, "top", []string{"mid"})
-	e.catalog.Store(&Catalog{Entries: map[string]CatalogEntry{
-		"top": {Name: "top", Source: SourceManual, Essential: true},
-	}})
-	if _, _, err := e.RemoveWithDependents("base"); !errors.Is(err, ErrEssential) || !strings.Contains(err.Error(), "top") {
-		t.Errorf("RemoveWithDependents(base) = %v, want ErrEssential naming top", err)
-	}
-	m, err := e.store.LoadManifest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(m.Tools) != 3 {
-		t.Errorf("refused cascade changed the manifest: %v", slices.Sorted(maps.Keys(m.Tools)))
+	for _, tc := range []struct {
+		name        string
+		midDisabled bool
+	}{{name: "enabled mid"}, {name: "disabled mid", midDisabled: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			addManual(t, e, "base", nil)
+			addManual(t, e, "mid", []string{"base"})
+			addManual(t, e, "top", []string{"mid"})
+			editManifest(t, e, func(m *Manifest) {
+				mid := m.Tools["mid"]
+				mid.Disabled = tc.midDisabled
+				m.Tools["mid"] = mid
+			})
+			e.catalog.Store(&Catalog{Entries: map[string]CatalogEntry{
+				"top": {Name: "top", Source: SourceManual, Essential: true},
+			}})
+			if _, _, err := e.RemoveWithDependents("base"); !errors.Is(err, ErrEssential) || !strings.Contains(err.Error(), "top") {
+				t.Errorf("RemoveWithDependents(base) = %v, want ErrEssential naming top", err)
+			}
+			m, err := e.store.LoadManifest()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(m.Tools) != 3 || m.Tools["mid"].Disabled != tc.midDisabled {
+				t.Errorf("refused cascade changed the manifest: %v (mid disabled %v)", slices.Sorted(maps.Keys(m.Tools)), m.Tools["mid"].Disabled)
+			}
+		})
 	}
 }
 

@@ -42,7 +42,7 @@ Search results leave out each entry's embedded install definition. In the reply,
 
 A change returns `202 {"job": ...}`, with a null job when nothing needed doing. A refusal is `409` with a coded error:
 
-- `has_dependents` names the enabled tools that need this one, directly or through another enabled tool.
+- `has_dependents` names the enabled tools that need this one, directly or through other tools, enabled, disabled or not yet added.
 - `essential` marks a tool your product declares it needs.
 - `disabled` marks an install sent to a template.
 - `not_configured` marks a catalog refresh on an engine without `Config.Refresh`.

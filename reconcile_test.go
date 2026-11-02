@@ -142,10 +142,19 @@ func TestRemove_DisabledDependentDoesNotBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	jv, deps, err := e.Remove("base")
-	if err != nil {
-		t.Fatalf("remove with only a disabled dependent = %v (deps %v)", err, deps)
+	if err != nil || len(deps) != 0 {
+		t.Fatalf("remove with only a disabled dependent = %v (deps %v), want success naming none", err, deps)
 	}
-	waitJob(t, e, jv.ID)
+	if final := waitJob(t, e, jv.ID); final.State != JobDone || !slices.Equal(final.Names, []string{"base"}) {
+		t.Errorf("remove job = %s %v, want done over [base]", final.State, final.Names)
+	}
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, ok := m.Tools["dep"]; !ok || !row.Disabled {
+		t.Errorf("dep row = %+v (present %v), want the disabled template kept", row, ok)
+	}
 }
 
 func TestReconcile_ConvergesBothWays(t *testing.T) {
@@ -1043,6 +1052,94 @@ func TestForcedCascade_ReconcileAddsNothingBack(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestForcedCascade_CrossesADisabledOrCatalogOnlyRow: in base <- mid <- top
+// with mid disabled (hydrated or still source-less), or absent with a catalog
+// entry, Reconcile's install plan enables or adopts mid for the enabled top
+// and then restores base. So the refusal and the inventory name top, a forced
+// remove or disable takes it, and the next Reconcile adds nothing back.
+func TestForcedCascade_CrossesADisabledOrCatalogOnlyRow(t *testing.T) {
+	on := true
+	for _, mid := range []struct {
+		row  func() (Tool, bool)
+		name string
+	}{
+		{name: "disabled mid", row: func() (Tool, bool) {
+			tl := manualEntry("mid")
+			tl.Requires = []string{"base"}
+			tl.Disabled = true
+			return tl, true
+		}},
+		{name: "source-less disabled mid", row: func() (Tool, bool) { return Tool{Disabled: true}, true }},
+		{name: "catalog-only mid", row: func() (Tool, bool) { return Tool{}, false }},
+	} {
+		for _, tc := range []struct {
+			cascade func(e *Engine) (*Job, error)
+			name    string
+		}{
+			{name: "remove", cascade: func(e *Engine) (*Job, error) {
+				jv, _, err := e.RemoveWithDependents("base")
+				return jv, err
+			}},
+			{name: "disable", cascade: func(e *Engine) (*Job, error) {
+				return e.Patch("base", PatchRequest{Disabled: &on, Force: true})
+			}},
+		} {
+			t.Run(mid.name+" "+tc.name, func(t *testing.T) {
+				cat := &Catalog{Entries: map[string]CatalogEntry{
+					"base": {Name: "base", Source: SourceManual, Version: "1", Install: binStub("base"), Probe: "base"},
+					"mid":  {Name: "mid", Source: SourceManual, Version: "1", Install: binStub("mid"), Probe: "mid", Requires: []string{"base"}},
+				}}
+				e := newTestEngineClient(t, cat, offlineClient(), nil)
+				addManual(t, e, "base", nil)
+				addManual(t, e, "top", nil)
+				// A bystander keeps the manifest non-empty, so Reconcile runs.
+				addManual(t, e, "side", nil)
+				// After the installs, which hydrate a source-less row.
+				editManifest(t, e, func(m *Manifest) {
+					top := m.Tools["top"]
+					top.Requires = []string{"mid"}
+					m.Tools["top"] = top
+					if row, ok := mid.row(); ok {
+						m.Tools["mid"] = row
+					}
+				})
+				want := []string{"top"}
+				if row := inventoryRow(t, e, "base"); !slices.Equal(row.Dependents, want) {
+					t.Errorf("inventory dependents of base = %v, want %v", row.Dependents, want)
+				}
+				if _, deps, err := e.Remove("base"); err == nil {
+					t.Fatalf("Remove(base) succeeded (dependents %v), want DependentsError naming %v", deps, want)
+				} else if de, ok := errors.AsType[*DependentsError](err); !ok || !slices.Equal(de.Dependents, want) {
+					t.Errorf("Remove(base) = %v, want DependentsError naming %v", err, want)
+				}
+				jv, err := tc.cascade(e)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if final := waitJob(t, e, jv.ID); final.State != JobDone || !slices.Equal(final.Names, []string{"base", "top"}) {
+					t.Errorf("cascade job = %s %v, want done over [base top]", final.State, final.Names)
+				}
+				final := reconcileJob(t, e)
+				if out := strings.Join(final.OutputTail, "\n"); final.State != JobDone || !strings.Contains(out, "everything converged") {
+					t.Errorf("reconcile = %s %q, want done and everything converged", final.State, out)
+				}
+				m, err := e.store.LoadManifest()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, n := range []string{"base", "mid", "top"} {
+					if row, ok := m.Tools[n]; ok && !row.Disabled {
+						t.Errorf("%s is enabled after the cascade and a Reconcile", n)
+					}
+					if _, err := os.Stat(filepath.Join(e.toolsDir, "bin", n)); !os.IsNotExist(err) {
+						t.Errorf("%s binary is installed after the cascade and a Reconcile", n)
+					}
+				}
+			})
+		}
 	}
 }
 

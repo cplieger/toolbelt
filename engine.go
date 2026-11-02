@@ -122,7 +122,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	// appeared in both groups would offer a delete control in one and not the
 	// other for the same thing.
 	res.AptPackages = e.discoveredApt(m)
-	dependents := dependentsIndex(m, e.backends())
+	dependents := dependentsIndex(m, e.cat())
 	names := make([]string, 0, len(m.Tools))
 	for n := range m.Tools {
 		names = append(names, n)
@@ -131,7 +131,7 @@ func (e *Engine) Inventory() (*Inventory, error) {
 	for _, n := range names {
 		t := m.Tools[n]
 		s := st.Tools[n]
-		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], cascadeOf(dependents, n)))
+		res.Tools = append(res.Tools, e.toolInfo(n, &t, &s, installing[n], enabledDependents(m, dependents, n)))
 	}
 	return res, nil
 }
@@ -668,7 +668,7 @@ func (e *Engine) Patch(name string, req PatchRequest) (*Job, error) {
 		res *job
 	)
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		if err := patchManifest(m, name, &req, &out, e.backends()); err != nil {
+		if err := patchManifest(m, name, &req, &out, e.cat()); err != nil {
 			return err
 		}
 		kind, names := out.job(name)
@@ -710,8 +710,9 @@ func (e *Engine) holdToPin(ctx context.Context, name string) error {
 
 // patchManifest applies one PatchRequest to the manifest: the dependent
 // refusal (or, with Force, the disable cascade over enabledDependents) plus
-// the field overlay. Records what changed in out.
-func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome, backends map[string]string) error {
+// the field overlay, reading the one catalog snapshot c. Records what changed
+// in out.
+func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcome, c *Catalog) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
@@ -724,14 +725,14 @@ func patchManifest(m *Manifest, name string, req *PatchRequest, out *patchOutcom
 	}
 	var deps []string
 	if req.Disabled != nil && *req.Disabled && !t.Disabled {
-		deps = enabledDependents(m, name, backends)
+		deps = enabledDependents(m, dependentsIndex(m, c), name)
 		if len(deps) > 0 && !req.Force {
 			return &DependentsError{Dependents: deps}
 		}
 	}
 	*out = applyPatch(&t, req)
 	m.Tools[name] = t
-	out.unmetDeps = out.requiresChanged && !t.Disabled && !depsSatisfied(m, name, &t, backends)
+	out.unmetDeps = out.requiresChanged && !t.Disabled && !depsSatisfied(m, name, &t, c.Backends)
 	// A dependent left enabled would declare intent against a disabled
 	// prerequisite, and Reconcile would enable the prerequisite again.
 	if out.disabledChanged && out.nowDisabled && req.Force {
@@ -800,29 +801,37 @@ func (out *patchOutcome) job(name string) (kind string, names []string) {
 	}
 }
 
-// enabledDependents lists, sorted, the ENABLED manifest entries that need
-// name, directly (Requires or the implied backend of their source kind) or
-// through another enabled entry. It is the set a forced disable or remove
-// takes: a dependent left enabled would make Reconcile restore what went.
-// Disabled templates never block; hydration re-adopts their dependencies
-// when they are enabled.
-func enabledDependents(m *Manifest, name string, backends map[string]string) []string {
-	return cascadeOf(dependentsIndex(m, backends), name)
+// enabledDependents lists, sorted, the ENABLED manifest rows that need name
+// in idx (dependentsIndex): directly (Requires or the implied backend of their
+// source kind) or through any other row or adoptable catalog entry, disabled
+// or not, as Reconcile's install plan crosses both. It is the set a forced
+// disable or remove takes: a dependent left enabled would make Reconcile
+// restore what went. Disabled rows are never named and never block; the
+// install plan adopts or enables their dependencies when they are enabled.
+func enabledDependents(m *Manifest, idx map[string][]string, name string) []string {
+	return slices.DeleteFunc(cascadeOf(idx, name), func(n string) bool {
+		t, ok := m.Tools[n]
+		return !ok || t.Disabled
+	})
 }
 
-// dependentsIndex maps every name to the ENABLED entries that need it
-// directly, in one pass over the manifest rather than one pass per row.
-// Inventory renders every tool, so a per-name walk would make the read
-// quadratic in the manifest size.
-func dependentsIndex(m *Manifest, backends map[string]string) map[string][]string {
+// dependentsIndex maps every name to what needs it directly along planEdges:
+// every manifest row, disabled or not, and the catalog entry of each absent
+// name they reach. One walk rather than one per row, so Inventory, which
+// renders every tool, stays linear in the manifest size.
+func dependentsIndex(m *Manifest, c *Catalog) map[string][]string {
 	out := map[string][]string{}
-	for other := range m.Tools {
-		t := m.Tools[other]
-		if t.Disabled {
+	seen := map[string]bool{}
+	for stack := slices.Collect(maps.Keys(m.Tools)); len(stack) > 0; {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[n] {
 			continue
 		}
-		for _, dep := range depsOf(other, &t, backends) {
-			out[dep] = append(out[dep], other)
+		seen[n] = true
+		for _, dep := range planEdges(m, c, n) {
+			out[dep] = append(out[dep], n)
+			stack = append(stack, dep)
 		}
 	}
 	return out
@@ -888,9 +897,10 @@ func (e *Engine) Remove(name string) (*Job, []string, error) {
 	return e.remove(name, false)
 }
 
-// RemoveWithDependents uninstalls a tool together with every enabled
-// entry that needs it, directly or through another enabled entry, deleting
-// all their templates; the returned job carries every removed name and
+// RemoveWithDependents uninstalls a tool together with every enabled entry
+// that needs it, directly or through another entry (disabled or not) or a
+// catalog tool their install would add, and deletes their entries; a disabled
+// entry between them stays. The returned job carries every removed name and
 // dependents reports which rode along. With A requiring B and B requiring
 // name, it removes all three. Prefer Remove unless the caller has already
 // established that removing the dependents is intended; nothing here
@@ -909,7 +919,9 @@ func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	)
 	removed := map[string]Tool{}
 	err := e.store.MutateManifest(func(m *Manifest) error {
-		if err := removeFromManifest(m, name, cascade, &dependents, removed, e.removeKnowledge()); err != nil {
+		// One catalog snapshot per removal: a swap partway through a cascade
+		// would otherwise change the rules mid-decision.
+		if err := removeFromManifest(m, name, cascade, &dependents, removed, e.cat()); err != nil {
 			return err
 		}
 		names := slices.Sorted(maps.Keys(removed))
@@ -921,41 +933,20 @@ func (e *Engine) remove(name string, cascade bool) (*Job, []string, error) {
 	return jv, dependents, err
 }
 
-// removeKnowledge is the CATALOG-derived input a removal needs: what
-// counts as a dependency edge, and which names the product declares
-// essential. Bundled because both answers come from the same live catalog
-// and must be read once per call — a swap partway through a cascade would
-// otherwise change the rules mid-decision.
-type removeKnowledge struct {
-	backends  map[string]string
-	essential func(name string) bool
-}
-
-// removeKnowledge snapshots the live catalog for one removal.
-//
-// Essential is read HERE rather than from the manifest row, and that is
-// the point: it is the bundle's live answer, so a product that stops
+// essential reports whether c declares name essential. It reads the live
+// catalog rather than the manifest row on purpose: a product that stops
 // depending on a tool releases it immediately instead of waiting for
 // something to re-resolve the row.
-func (e *Engine) removeKnowledge() removeKnowledge {
-	c := e.cat()
-	return removeKnowledge{
-		backends: e.backends(),
-		essential: func(name string) bool {
-			if c == nil {
-				return false
-			}
-			cat, ok := c.Lookup(name)
-			return ok && cat.Essential
-		},
-	}
+func essential(c *Catalog, name string) bool {
+	ce, ok := c.Lookup(name)
+	return ok && ce.Essential
 }
 
 // removeFromManifest deletes name (and, with cascade, every entry
 // enabledDependents names) from m, recording the removed entries. It refuses with
 // *DependentsError when enabled entries require name and cascade is
 // false.
-func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool, rc removeKnowledge) error {
+func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]string, removed map[string]Tool, c *Catalog) error {
 	t, ok := m.Tools[name]
 	if !ok {
 		return ErrNotFound
@@ -963,10 +954,10 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	// Before the dependents check, so the answer does not depend on
 	// whether anything happens to require it, and so RemoveWithDependents
 	// cannot delete it as somebody else's collateral.
-	if rc.essential(name) {
+	if essential(c, name) {
 		return fmt.Errorf("%w: %s", ErrEssential, name)
 	}
-	*dependents = enabledDependents(m, name, rc.backends)
+	*dependents = enabledDependents(m, dependentsIndex(m, c), name)
 	if len(*dependents) > 0 && !cascade {
 		return &DependentsError{Dependents: *dependents}
 	}
@@ -975,7 +966,7 @@ func removeFromManifest(m *Manifest, name string, cascade bool, dependents *[]st
 	// removing part of it would leave the user believing the rest went too.
 	if cascade {
 		for _, d := range *dependents {
-			if rc.essential(d) {
+			if essential(c, d) {
 				return fmt.Errorf("%w: %s, which needs %s", ErrEssential, d, name)
 			}
 		}
@@ -1125,24 +1116,35 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // python the catalog's source refuses; they fail their own install
 // (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
+	c := e.cat()
 	return e.store.MutateManifest(func(m *Manifest) error {
 		for name := range m.Tools {
 			t := m.Tools[name]
-			if t.Source != "" {
-				continue
+			if h, ok := hydrated(c, name, &t); ok {
+				m.Tools[name] = h
 			}
-			cat, ok := e.cat().Lookup(name)
-			if !ok {
-				continue
-			}
-			mergeCatalogDefaults(&t, &cat)
-			if validateTool(&t) != nil {
-				continue
-			}
-			m.Tools[name] = t
 		}
 		return nil
 	})
+}
+
+// hydrated is the hydration rule for one row: a source-less row the catalog
+// knows takes the catalog's static fields, unless the merge fails validation.
+// ok reports a merge.
+func hydrated(c *Catalog, name string, t *Tool) (h Tool, ok bool) {
+	if t.Source != "" {
+		return *t, false
+	}
+	cat, known := c.Lookup(name)
+	if !known {
+		return *t, false
+	}
+	h = *t
+	mergeCatalogDefaults(&h, &cat)
+	if validateTool(&h) != nil {
+		return *t, false
+	}
+	return h, true
 }
 
 // runInstall installs the named tools plus any missing dependencies,
@@ -1527,12 +1529,28 @@ func depsSatisfied(m *Manifest, name string, t *Tool, backends map[string]string
 	return true
 }
 
-// installClosure is names and every name their install plan walks through
-// depsOf, transitively: a row's edges, and for a name with no row the edges
-// of the catalog entry the plan would adopt (an unknown name has none, as its
-// adopt fails). It reads no network.
-func (e *Engine) installClosure(m *Manifest, names []string, backends map[string]string) map[string]bool {
-	cat := e.cat()
+// planEdges is n's depsOf edges as the install plan, which runs after
+// hydration, walks them: its row's as hydrated, or for a name with no row the
+// edges of the catalog entry the plan would adopt. A known catalog name's
+// edges count whether or not its adopt later succeeds, so Reconcile keeps a
+// row behind a failing adopt rather than uninstalling it and a cascade takes
+// the rows in front of one; an unknown name has none. It reads no network.
+func planEdges(m *Manifest, c *Catalog, n string) []string {
+	t, ok := m.Tools[n]
+	if ok {
+		t, _ = hydrated(c, n, &t)
+	} else {
+		ce, known := c.Lookup(n)
+		if !known {
+			return nil
+		}
+		mergeCatalogDefaults(&t, &ce)
+	}
+	return depsOf(n, &t, c.Backends)
+}
+
+// installClosure is names and every name reached from them along planEdges.
+func installClosure(m *Manifest, c *Catalog, names []string) map[string]bool {
 	seen := map[string]bool{}
 	stack := slices.Clone(names)
 	for len(stack) > 0 {
@@ -1542,15 +1560,7 @@ func (e *Engine) installClosure(m *Manifest, names []string, backends map[string
 			continue
 		}
 		seen[n] = true
-		t, ok := m.Tools[n]
-		if !ok {
-			ce, known := cat.Lookup(n)
-			if !known {
-				continue
-			}
-			mergeCatalogDefaults(&t, &ce)
-		}
-		stack = append(stack, depsOf(n, &t, backends)...)
+		stack = append(stack, planEdges(m, c, n)...)
 	}
 	return seen
 }
@@ -2004,7 +2014,8 @@ func (e *Engine) runReconcile(ctx context.Context, j *job, output func(string)) 
 // only reinstall it.
 func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) {
 	st := e.store.State()
-	backends := e.backends()
+	c := e.cat()
+	backends := c.Backends
 	for n := range m.Tools {
 		t := m.Tools[n]
 		status := st.Tools[n]
@@ -2015,7 +2026,7 @@ func (e *Engine) reconcilePlan(m *Manifest) (missing, extras, orphans []string) 
 			missing = append(missing, n)
 		}
 	}
-	needed := e.installClosure(m, missing, backends)
+	needed := installClosure(m, c, missing)
 	extras = slices.DeleteFunc(extras, func(n string) bool { return needed[n] })
 	for n := range st.Tools {
 		status := st.Tools[n]
@@ -2056,11 +2067,11 @@ func (e *Engine) converged(m *Manifest, name string, t *Tool, s *ToolStatus, bac
 // are enabled and converged, each against its own state record.
 func (e *Engine) closureConverged(m *Manifest, name string) bool {
 	st := e.store.State()
-	backends := e.backends()
-	for n := range e.installClosure(m, []string{name}, backends) {
+	c := e.cat()
+	for n := range installClosure(m, c, []string{name}) {
 		t, ok := m.Tools[n]
 		status := st.Tools[n]
-		if !ok || t.Disabled || !e.converged(m, n, &t, &status, backends) {
+		if !ok || t.Disabled || !e.converged(m, n, &t, &status, c.Backends) {
 			return false
 		}
 	}
