@@ -328,7 +328,7 @@ func TestInstall_SyncFailureRetainsPreviousVersion(t *testing.T) {
 			wantState: "v1.0.0",
 		},
 		{
-			// atomicfile's landed-but-undurable case: the bytes are
+			// filesafe's landed-but-undurable case: the bytes are
 			// correct, their survival is not promised. Still an install
 			// failure (so the job retries and rewrites), and still no
 			// prune of the previous tree.

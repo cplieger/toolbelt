@@ -10,7 +10,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/cplieger/pathinside/v2"
+	"github.com/cplieger/go/pathinside"
 )
 
 // Root integrity: an opt-in prerequisite check (Config.VerifyRootIntegrity).

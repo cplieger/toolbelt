@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/scheduler/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/scheduler"
 )
 
 // CatalogRefresh configures the runtime catalog refresh: the engine
@@ -341,8 +341,8 @@ func (e *Engine) runCatalogRefresh(ctx context.Context, output func(string)) (er
 	// monopolize the queue. Two minutes is generous for a ~1 MB document.
 	fetchCtx, cancel := context.WithTimeout(ctx, catalogFetchBudget)
 	defer cancel()
-	body, err := httpx.GetBytes(fetchCtx, e.client, cfg.URL,
-		httpx.WithMaxAttempts(3), httpx.WithMaxBodyBytes(maxCatalogBytes))
+	body, err := httpclient.GetBytes(fetchCtx, e.client, cfg.URL,
+		httpclient.WithMaxAttempts(3), httpclient.WithMaxBodyBytes(maxCatalogBytes))
 	if err != nil {
 		return fmt.Errorf("fetch catalog: %w", err)
 	}
@@ -367,8 +367,8 @@ func (e *Engine) runCatalogRefresh(ctx context.Context, output func(string)) (er
 	if err != nil {
 		return fmt.Errorf("rejected the fetched catalog and kept the current one: %w", err)
 	}
-	if _, err := atomicfile.WriteFile(ctx, e.cachedCatalogPath(), body,
-		atomicfile.WithMode(engineFileMode), atomicfile.WithMkdirMode(engineDirMode)); err != nil {
+	if _, err := filesafe.WriteFile(ctx, e.cachedCatalogPath(), body,
+		filesafe.WithMode(engineFileMode), filesafe.WithMkdirMode(engineDirMode)); err != nil {
 		// The prepared catalog is good; a cache-write failure only costs
 		// restart persistence, and the next refresh repairs it (the
 		// content short-circuit above misses on a divergent cache).

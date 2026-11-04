@@ -20,8 +20,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/cplieger/go/httpserver"
 	"github.com/cplieger/toolbelt/v3"
-	"github.com/cplieger/webhttp/v4"
 )
 
 // maxBodyBytes caps request bodies: tool definitions are small.
@@ -212,10 +212,10 @@ func withNoStore(h http.Handler) http.Handler {
 func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	inv, err := e.Inventory()
 	if err != nil {
-		webhttp.WriteError(w, r, http.StatusInternalServerError, "inventory_failed", err.Error())
+		httpserver.WriteError(w, r, http.StatusInternalServerError, "inventory_failed", err.Error())
 		return
 	}
-	webhttp.WriteJSON(w, inv)
+	httpserver.WriteJSON(w, inv)
 }
 
 // searchUnavailableParam opts a caller INTO the uninstallable block;
@@ -246,7 +246,7 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		res.Matched += sc.UnavailableMatched
 		res.Truncated = res.Truncated || sc.UnavailableMatched > len(sc.Unavailable)
 	}
-	webhttp.WriteJSON(w, res)
+	httpserver.WriteJSON(w, res)
 }
 
 // mergeSearchHits projects both installable corpora into ONE
@@ -331,11 +331,11 @@ func getJobs(e *toolbelt.Engine, w http.ResponseWriter) {
 	if recent == nil {
 		recent = []*toolbelt.Job{}
 	}
-	webhttp.WriteJSON(w, JobsResponse{Active: active, Recent: recent})
+	httpserver.WriteJSON(w, JobsResponse{Active: active, Recent: recent})
 }
 
 func getCatalog(e *toolbelt.Engine, w http.ResponseWriter) {
-	webhttp.WriteJSON(w, e.CatalogInfo())
+	httpserver.WriteJSON(w, e.CatalogInfo())
 }
 
 func postCatalogRefresh(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
@@ -344,13 +344,13 @@ func postCatalogRefresh(e *toolbelt.Engine, w http.ResponseWriter, r *http.Reque
 		writeEngineError(w, r, err)
 		return
 	}
-	webhttp.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
+	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
 func postAdd(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	var req toolbelt.AddRequest
-	if err := webhttp.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
-		webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+	if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
+		httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	job, err := e.Add(r.Context(), &req)
@@ -358,7 +358,7 @@ func postAdd(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, r, err)
 		return
 	}
-	webhttp.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
+	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
 func postUpdate(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
@@ -366,8 +366,8 @@ func postUpdate(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		Names []string `json:"names,omitempty"`
 	}
 	if r.ContentLength != 0 {
-		if err := webhttp.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
-			webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
+			httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 	}
@@ -376,13 +376,13 @@ func postUpdate(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, r, err)
 		return
 	}
-	webhttp.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
+	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
 func patchTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	var req toolbelt.PatchRequest
-	if err := webhttp.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
-		webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+	if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
+		httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	job, err := e.Patch(r.PathValue("name"), req)
@@ -390,7 +390,7 @@ func patchTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, r, err)
 		return
 	}
-	webhttp.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
+	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
 func postInstall(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
@@ -399,7 +399,7 @@ func postInstall(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, r, err)
 		return
 	}
-	webhttp.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
+	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
 func deleteTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
@@ -415,15 +415,15 @@ func deleteTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		writeEngineError(w, r, err)
 		return
 	}
-	webhttp.WriteJSONStatus(w, http.StatusAccepted, RemoveResponse{Job: job, Dependents: dependents})
+	httpserver.WriteJSONStatus(w, http.StatusAccepted, RemoveResponse{Job: job, Dependents: dependents})
 }
 
 func postCancel(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	if !e.CancelJob(r.PathValue("id")) {
-		webhttp.WriteError(w, r, http.StatusNotFound, "not_found", "no such job")
+		httpserver.WriteError(w, r, http.StatusNotFound, "not_found", "no such job")
 		return
 	}
-	webhttp.Ok(w)
+	httpserver.Ok(w)
 }
 
 // writeEngineError maps engine sentinels onto wire responses.
@@ -432,30 +432,30 @@ func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var rl *toolbelt.GitHubRateLimitError
 	switch {
 	case errors.As(err, &dep):
-		webhttp.WriteJSONStatus(w, http.StatusConflict, dependentsResponse{
+		httpserver.WriteJSONStatus(w, http.StatusConflict, dependentsResponse{
 			Error:      dep.Error(),
 			Code:       "has_dependents",
 			Dependents: dep.Dependents,
 		})
 	case errors.As(err, &rl):
-		webhttp.WriteJSONStatus(w, http.StatusServiceUnavailable, rateLimitResponse{
+		httpserver.WriteJSONStatus(w, http.StatusServiceUnavailable, rateLimitResponse{
 			Error:     err.Error(),
 			Code:      toolbelt.ErrorCodeGitHubRateLimited,
 			RateLimit: rl.Wire(),
 		})
 	case errors.Is(err, toolbelt.ErrEssential):
-		webhttp.WriteError(w, r, http.StatusConflict, "essential", err.Error())
+		httpserver.WriteError(w, r, http.StatusConflict, "essential", err.Error())
 	case errors.Is(err, toolbelt.ErrNotFound):
-		webhttp.WriteError(w, r, http.StatusNotFound, "not_found", err.Error())
+		httpserver.WriteError(w, r, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, toolbelt.ErrDisabled):
-		webhttp.WriteError(w, r, http.StatusConflict, "disabled", err.Error())
+		httpserver.WriteError(w, r, http.StatusConflict, "disabled", err.Error())
 	case errors.Is(err, toolbelt.ErrRefreshNotConfigured):
-		webhttp.WriteError(w, r, http.StatusConflict, "not_configured", err.Error())
+		httpserver.WriteError(w, r, http.StatusConflict, "not_configured", err.Error())
 	case errors.Is(err, toolbelt.ErrQueueFull):
-		webhttp.WriteError(w, r, http.StatusServiceUnavailable, "queue_full", err.Error())
+		httpserver.WriteError(w, r, http.StatusServiceUnavailable, "queue_full", err.Error())
 	case errors.Is(err, toolbelt.ErrShuttingDown):
-		webhttp.WriteError(w, r, http.StatusServiceUnavailable, "shutting_down", err.Error())
+		httpserver.WriteError(w, r, http.StatusServiceUnavailable, "shutting_down", err.Error())
 	default:
-		webhttp.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
 	}
 }

@@ -25,7 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/ssrf/v4"
+	"github.com/cplieger/go/ssrf"
 )
 
 // Source prefixes for Tool.Source. A source is "<kind>:<ref>" except
@@ -198,7 +198,7 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 			limits: &rateLimitGate{},
 		},
 		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
-		// Per-attempt bound: retry loops (httpx.GetBytes / httpx.Do) sit
+		// Per-attempt bound: retry loops (httpclient.GetBytes / httpclient.Do) sit
 		// OUTSIDE client.Do, so this caps one attempt, not the sequence.
 		Timeout: 15 * time.Minute,
 	}

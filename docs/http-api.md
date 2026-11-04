@@ -63,4 +63,4 @@ To follow job progress, use the `Config` callbacks or poll `GET {prefix}/jobs`.
 
 Every response carries `Cache-Control: no-store`, including success bodies, rejected requests, engine errors, and the router's own 404, 405 and redirect replies. You need no no-store middleware of your own.
 
-A `Cache-Control` your stack already set on the response is left as it is, the same rule `webhttp.JSONHeaders` applies to `X-Content-Type-Options`. A stricter policy such as `no-store, no-cache, must-revalidate`, or a weaker one on purpose, stays yours to set.
+A `Cache-Control` your stack already set on the response is left as it is, the same rule `httpserver.JSONHeaders` applies to `X-Content-Type-Options`. A stricter policy such as `no-store, no-cache, must-revalidate`, or a weaker one on purpose, stays yours to set.

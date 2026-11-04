@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
 )
 
 // wantFinding is one expected root-integrity finding: the exact path the
@@ -440,9 +440,9 @@ func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
 
 			orig := probeWritable
 			t.Cleanup(func() { probeWritable = orig })
-			probeWritable = func(ctx context.Context, dir string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+			probeWritable = func(ctx context.Context, dir string, opts ...filesafe.Option) (filesafe.ProbeResult, error) {
 				if err := os.Chmod(widened, 0o770); err != nil {
-					return atomicfile.ProbeResult{}, err
+					return filesafe.ProbeResult{}, err
 				}
 				return orig(ctx, dir, opts...)
 			}
