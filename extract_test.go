@@ -1,7 +1,11 @@
 package toolbelt
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -396,6 +400,139 @@ func TestExtractArtifact_RefusesAFormatItCannotExtract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExtractArtifact_TarDropsTheArchivedOwner pins that a tar member's
+// recorded owner never reaches the installed tree. GNU tar run as root
+// restores that owner by default, so a release built by some uid installs
+// files owned by that uid, an identity the host may give to anyone. Every tar
+// format shares the one flag, so the plain and gzip spellings stand for all.
+//
+// Only a root run can tell the flag's presence from its absence, because an
+// unprivileged tar cannot chown at all. The root run therefore first proves,
+// with tar's own default, that this tar really restores the archived owner,
+// and fails as INVALID otherwise. The unprivileged run is the witness that the
+// flag is accepted and extraction still works.
+func TestExtractArtifact_TarDropsTheArchivedOwner(t *testing.T) {
+	t.Parallel()
+	euid, egid := os.Geteuid(), os.Getegid()
+	archived := 54321
+	if archived == euid || archived == egid {
+		archived++
+	}
+	tarball := ownedTarball(t, archived)
+
+	if euid == 0 {
+		dir := t.TempDir()
+		cmd, err := systemCommand(t.Context(), "tar", "-xf", "-", "-C", dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd.Stdin = bytes.NewReader(tarball)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("witness tar: %v: %s", err, out)
+		}
+		if uid, _ := ownerOf(t, filepath.Join(dir, "pkg", "tool")); uid != archived {
+			t.Fatalf("INVALID: tar as root without --no-same-owner stored uid %d, want the archived %d; "+
+				"this tar never restores owners, so the test below is vacuous", uid, archived)
+		}
+	} else {
+		t.Logf("running as uid %d: tar cannot chown, so only flag acceptance is exercised", euid)
+	}
+
+	for name, format := range map[string]string{"tar": formatTar, "tar.gz": formatTarGz} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			artifact := filepath.Join(base, "tool."+name)
+			data := tarball
+			if format == formatTarGz {
+				var buf bytes.Buffer
+				zw := gzip.NewWriter(&buf)
+				if _, err := zw.Write(tarball); err != nil {
+					t.Fatal(err)
+				}
+				if err := zw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				data = buf.Bytes()
+			}
+			if err := os.WriteFile(artifact, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			destDir := filepath.Join(base, "dest")
+			if err := os.Mkdir(destDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := extractArtifact(t.Context(), artifact, format, destDir, "tool"); err != nil {
+				t.Fatalf("extractArtifact(%s): %v", format, err)
+			}
+			seen := 0
+			err := filepath.WalkDir(destDir, func(path string, _ fs.DirEntry, werr error) error {
+				if werr != nil || path == destDir {
+					return werr
+				}
+				seen++
+				uid, gid := ownerOf(t, path)
+				if uid != euid {
+					t.Errorf("%s: uid %d, want the extracting uid %d", path, uid, euid)
+				}
+				if gid == archived {
+					t.Errorf("%s: gid %d is the archived group, want the extracting side's", path, gid)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seen != 3 {
+				t.Fatalf("extracted %d entries, want 3 (pkg, pkg/tool, pkg/link)", seen)
+			}
+		})
+	}
+}
+
+// ownedTarball returns an uncompressed tar holding a directory, a file and a
+// symlink, each recorded as owned by uid and gid id with no owner names, so
+// tar resolves the numbers rather than a local account.
+func ownedTarball(t *testing.T, id int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	body := []byte("#!/bin/sh\n")
+	for _, h := range []*tar.Header{
+		{Typeflag: tar.TypeDir, Name: "pkg/", Mode: 0o755},
+		{Typeflag: tar.TypeReg, Name: "pkg/tool", Mode: 0o755, Size: int64(len(body))},
+		{Typeflag: tar.TypeSymlink, Name: "pkg/link", Linkname: "tool", Mode: 0o777},
+	} {
+		h.Uid, h.Gid, h.Format = id, id, tar.FormatPAX
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if h.Typeflag == tar.TypeReg {
+			if _, err := tw.Write(body); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// ownerOf returns path's own uid and gid, never a symlink target's.
+func ownerOf(t *testing.T, path string) (uid, gid int) {
+	t.Helper()
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("%s: no syscall.Stat_t", path)
+	}
+	return int(st.Uid), int(st.Gid)
 }
 
 // TestExtractArtifact_RawEnforcesTheStoredExecutableMode pins that the mode of

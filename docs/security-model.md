@@ -22,7 +22,7 @@ Every extracted file and the staging directory are flushed to disk before the re
 
 Downloads are capped at 1 GiB. Archive extraction refuses a symlink that points outside the install tree. Installs land in versioned directories that are swapped in one step.
 
-The managed directories the engine creates are created owner-writable only and are otherwise left as they are; [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write, including a root `New` has just created.
+The managed directories the engine creates are created owner-writable only and are otherwise left as they are. [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write, including a root `New` has just created.
 
 ## Network
 
@@ -47,6 +47,8 @@ This matters because the engine's own `bin/` comes before the system directories
 The protection is limited. If your server runs as root, it can still replace files in the system directories, which belong to root, so a fixed path is not unforgeable. What changes is persistence. A file placed in the system directories disappears with the container, while one placed in the tools tree stays on the volume and runs again each time your server calls `Reconcile` at startup.
 
 The apt binaries get the trusted directories added in front of the `PATH` they inherit, so a Debian maintainer script can still rely on `/usr/sbin`. The archive tools get the trusted directories alone. A `manual` script keeps the tools tree first, because reaching the installed tools is what it is for.
+
+Files unpacked from an archive belong to the account the engine runs as. When tar runs as root, it normally gives each file the owner recorded in the archive, which is the account that built the release. That number can belong to another account on your host. The engine passes `--no-same-owner` to tar to prevent this, and it never passes `-X`, the option that makes unzip do the same.
 
 ## Binaries the engine installs
 
