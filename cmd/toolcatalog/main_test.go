@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,14 +29,14 @@ func TestResolveBackendCore(t *testing.T) {
 		t.Fatal(`coreBackendAqua has no "node" entry; pick another core tool for this test`)
 	}
 	for _, tc := range []struct {
-		name, body    string
-		wantUnsupport bool
+		name, body string
+		wantSkip   bool
 	}{
-		{name: "missing package", wantUnsupport: true},
-		{name: "unevaluable type", body: "packages:\n  - type: go_install\n", wantUnsupport: true},
-		{name: "syntax error", body: "packages: [\n", wantUnsupport: false},
-		{name: "wrong type", body: "packages: notalist\n", wantUnsupport: false},
-		{name: "no packages", body: "packages: []\n", wantUnsupport: false},
+		{name: "missing package", wantSkip: true},
+		{name: "unevaluable type", body: "packages:\n  - type: go_install\n", wantSkip: true},
+		{name: "syntax error", body: "packages: [\n", wantSkip: false},
+		{name: "wrong type", body: "packages: notalist\n", wantSkip: false},
+		{name: "no packages", body: "packages: []\n", wantSkip: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -48,8 +47,8 @@ func TestResolveBackendCore(t *testing.T) {
 			if err == nil {
 				t.Fatal("resolveBackend(core:node) = nil error, want one")
 			}
-			if got := errors.Is(err, errUnsupported); got != tc.wantUnsupport {
-				t.Errorf("resolveBackend(core:node) = %v, errors.Is(errUnsupported) = %v, want %v", err, got, tc.wantUnsupport)
+			if skip, _ := backendSkip("core:node", err); skip != tc.wantSkip {
+				t.Errorf("resolveBackend(core:node) = %v, backendSkip = %v, want %v", err, skip, tc.wantSkip)
 			}
 		})
 	}
