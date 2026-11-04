@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/cplieger/pathinside/v2"
+	"github.com/cplieger/go/pathinside"
 )
 
 // installBase stands in for the version directory the containment rule

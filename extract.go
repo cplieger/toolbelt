@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/cplieger/atomicfile/v4"
-	"github.com/cplieger/pathinside/v2"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/go/pathinside"
 )
 
 // Aqua format names: what a definition's format field holds, what an asset
@@ -155,7 +155,7 @@ const binExecMode os.FileMode = 0o755
 // A pathname chmod is only a REQUEST: a filesystem with an inheritable
 // group ACE can override it (measured on ZFS nfs4acl, a 0o600 create
 // comes back 0770), and a 0775 binary published to bin/ on PATH is then
-// writable by its whole group. atomicfile.EnforceMode fchmods and fstats
+// writable by its whole group. filesafe.EnforceMode fchmods and fstats
 // the SAME descriptor, so it cannot certify a different file than it
 // chmod'd (a chmod-name-then-stat-name sequence can, if the name is
 // swapped in between). O_NOFOLLOW makes the kernel refuse a symlink at
@@ -178,7 +178,7 @@ func enforceDirMode(dir string, mode os.FileMode) error {
 
 // enforceStoredMode is the shared open-then-certify sequence: open path
 // so the kernel refuses to redirect it, then hand the descriptor to
-// atomicfile.EnforceMode. extraFlags carries O_DIRECTORY for a directory.
+// filesafe.EnforceMode. extraFlags carries O_DIRECTORY for a directory.
 // Shared rather than duplicated so the file and directory callers cannot
 // drift apart on O_NOFOLLOW/O_NONBLOCK (see enforceExecutable).
 func enforceStoredMode(path string, mode os.FileMode, extraFlags int) error {
@@ -187,7 +187,7 @@ func enforceStoredMode(path string, mode os.FileMode, extraFlags int) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	_, err = atomicfile.EnforceMode(f, mode)
+	_, err = filesafe.EnforceMode(f, mode)
 	return err
 }
 

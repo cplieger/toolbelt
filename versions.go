@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
 	goversion "github.com/hashicorp/go-version"
 	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
@@ -23,7 +23,7 @@ import (
 )
 
 // versionLookupBudget bounds one upstream request of a latest-version
-// resolution, retries included (httpx retries transient failures and honors
+// resolution, retries included (httpclient retries transient failures and honors
 // 429 Retry-After inside this window).
 const versionLookupBudget = 45 * time.Second
 
@@ -756,7 +756,7 @@ func moduleCandidates(listed []string) []string {
 // isNotFound reports whether err is the proxy saying it has no such module
 // or version: 404 or 410, per https://go.dev/ref/mod#goproxy-protocol.
 func isNotFound(err error) bool {
-	se, ok := errors.AsType[*httpx.StatusError](err)
+	se, ok := errors.AsType[*httpclient.StatusError](err)
 	return ok && (se.Code == http.StatusNotFound || se.Code == http.StatusGone)
 }
 
@@ -769,16 +769,16 @@ func (v *versionResolver) getJSON(ctx context.Context, rawURL string, out any) e
 func (v *versionResolver) getBytes(ctx context.Context, rawURL string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, versionLookupBudget)
 	defer cancel()
-	return httpx.GetBytes(ctx, v.client, rawURL,
-		httpx.WithMaxAttempts(3),
-		httpx.WithMaxBodyBytes(versionResponseCap),
+	return httpclient.GetBytes(ctx, v.client, rawURL,
+		httpclient.WithMaxAttempts(3),
+		httpclient.WithMaxBodyBytes(versionResponseCap),
 	)
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, rawURL string, maxBytes int64, out any) error {
-	body, err := httpx.GetBytes(ctx, client, rawURL,
-		httpx.WithMaxAttempts(3),
-		httpx.WithMaxBodyBytes(maxBytes),
+	body, err := httpclient.GetBytes(ctx, client, rawURL,
+		httpclient.WithMaxAttempts(3),
+		httpclient.WithMaxBodyBytes(maxBytes),
 	)
 	if err != nil {
 		return err

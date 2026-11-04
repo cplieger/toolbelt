@@ -4,14 +4,14 @@ go 1.27.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/cplieger/atomicfile/v4 v4.2.0
-	github.com/cplieger/httpx/v5 v5.3.0
-	github.com/cplieger/keyenc v1.1.0
-	github.com/cplieger/pathinside/v2 v2.1.0
-	github.com/cplieger/runesafe/v3 v3.2.0
-	github.com/cplieger/scheduler/v4 v4.3.0
-	github.com/cplieger/ssrf/v4 v4.6.0
-	github.com/cplieger/webhttp/v4 v4.1.0
+	github.com/cplieger/go/filesafe v1.0.0-dev.1
+	github.com/cplieger/go/httpclient v1.0.0-dev.2
+	github.com/cplieger/go/httpserver v1.0.0-dev.1
+	github.com/cplieger/go/keyenc v1.2.0-dev.1
+	github.com/cplieger/go/pathinside v1.0.0-dev.1
+	github.com/cplieger/go/scheduler v1.0.0-dev.1
+	github.com/cplieger/go/ssrf v1.0.0-dev.1
+	github.com/cplieger/go/textsafe v1.0.0-dev.1
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-version v1.9.0
 	go.yaml.in/yaml/v3 v3.0.6

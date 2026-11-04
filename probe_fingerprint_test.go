@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/keyenc"
+	"github.com/cplieger/go/keyenc"
 )
 
 // TestProbeFingerprintCannotBeForged pins that two different probe

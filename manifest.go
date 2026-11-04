@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
 )
 
 // Tool is one manifest entry: the user's intent for a single tool.
@@ -276,13 +276,13 @@ func (s *store) writeManifestLocked(m *Manifest) error {
 // the state-write barrier.
 var atomicWrite = realAtomicWrite
 
-// realAtomicWrite is the production writer: atomicfile runs the full
+// realAtomicWrite is the production writer: filesafe runs the full
 // protocol (write temp, fsync it, rename, fsync the parent directory), and
 // Durable is false when the parent-directory barrier failed after the
 // rename.
 func realAtomicWrite(path string, data []byte) (durable bool, err error) {
-	res, err := atomicfile.WriteFile(context.Background(), path, data,
-		atomicfile.WithMode(engineFileMode), atomicfile.WithMkdirMode(engineDirMode))
+	res, err := filesafe.WriteFile(context.Background(), path, data,
+		filesafe.WithMode(engineFileMode), filesafe.WithMkdirMode(engineDirMode))
 	return res.Durable, err
 }
 
@@ -297,7 +297,7 @@ const (
 
 // probeWritable is a package var so tests can stand in for a read-only
 // volume, which a test running as root cannot stage.
-var probeWritable = atomicfile.ProbeWritable
+var probeWritable = filesafe.ProbeWritable
 
 // verifyConfigWritable proves configDir can stage a private file and publish
 // it by rename, the steps every store write takes. New writes nothing over an
@@ -306,7 +306,7 @@ var probeWritable = atomicfile.ProbeWritable
 // recorded owner. A teardown-only failure is a Warn: the store's writes
 // rename the temp away and never unlink it.
 func verifyConfigWritable(log *slog.Logger, configDir string) error {
-	res, err := probeWritable(context.Background(), configDir, atomicfile.WithMode(engineFileMode))
+	res, err := probeWritable(context.Background(), configDir, filesafe.WithMode(engineFileMode))
 	if err != nil {
 		return err
 	}
@@ -318,7 +318,7 @@ func verifyConfigWritable(log *slog.Logger, configDir string) error {
 			"dir", res.Dir, "stage", res.Stage.String(), "name", res.Name, "leaked", res.Leaked, "err", res.Err)
 		return nil
 	}
-	if errors.Is(res.Err, atomicfile.ErrModeNotStored) {
+	if errors.Is(res.Err, filesafe.ErrModeNotStored) {
 		return fmt.Errorf("config dir %s cannot keep an owner-only staging file, typically because an inherited ACL widens new files: %w",
 			res.Dir, res.Err)
 	}
@@ -391,7 +391,7 @@ func (s *store) readStateLocked() State {
 // install's commit point: it gates pruning superseded versions, so a
 // write that failed — or landed without reaching stable storage — is an
 // ERROR the caller must fail on, not a warning. Failing here leaves the
-// previous state file intact (atomicfile publishes by rename).
+// previous state file intact (filesafe publishes by rename).
 func (s *store) MutateState(fn func(*State)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

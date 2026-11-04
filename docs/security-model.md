@@ -26,7 +26,7 @@ The managed directories the engine creates are created owner-writable only and a
 
 ## Network
 
-Every fetch goes through a client that allows only public IP addresses, checked when the connection is made, and only port 443, with its own redirect policy. Transient failures are retried and rate limits are respected through [cplieger/httpx](https://github.com/cplieger/httpx).
+Every fetch goes through a client that allows only public IP addresses, checked when the connection is made, and only port 443, with its own redirect policy. Transient failures are retried and rate limits are respected through [cplieger/go/httpclient](https://github.com/cplieger/go/tree/main/httpclient).
 
 Requests to the GitHub API carry the token that your `Config.GitHubToken` function returns. The engine asks for it on each request to `api.github.com` and sends it nowhere else, never to a download host, even one an API request redirects to.
 

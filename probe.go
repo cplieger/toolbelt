@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/keyenc"
+	"github.com/cplieger/go/keyenc"
 )
 
 // probeTimeout bounds one probe execution: generous enough for a

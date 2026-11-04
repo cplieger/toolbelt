@@ -23,9 +23,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/pathinside/v2"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/pathinside"
+	"github.com/cplieger/go/textsafe"
 )
 
 // installer executes install/uninstall plans for every source kind.
@@ -605,9 +605,9 @@ func binDirRank(p string) int {
 // download fetches url to dest with a size cap, retrying transient
 // failures (a fresh attempt truncates and rewrites dest).
 func (in *installer) download(ctx context.Context, rawURL, dest string) error {
-	_, err := httpx.Do(ctx, func(ctx context.Context) (struct{}, error) {
+	_, err := httpclient.Do(ctx, func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, in.downloadOnce(ctx, rawURL, dest)
-	}, httpx.WithMaxAttempts(2), httpx.WithLabel("download "+lastPathSegment(rawURL)))
+	}, httpclient.WithMaxAttempts(2), httpclient.WithLabel("download "+lastPathSegment(rawURL)))
 	return err
 }
 
@@ -624,7 +624,7 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return httpx.CheckHTTPStatus(res)
+		return httpclient.CheckStatus(res)
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -638,7 +638,7 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 		return err
 	}
 	if n > maxArtifactSize {
-		return httpx.Permanent(fmt.Errorf("artifact exceeds %d byte cap", int64(maxArtifactSize)))
+		return httpclient.Permanent(fmt.Errorf("artifact exceeds %d byte cap", int64(maxArtifactSize)))
 	}
 	in.logf("downloaded %s (%.1f MB)", filepath.Base(dest), float64(n)/1e6)
 	return nil
@@ -648,8 +648,8 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 // download's digest. The checksum file may be a bare digest or the
 // standard "digest  filename" list (sha256sum style).
 func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *InstallSpec) error {
-	body, err := httpx.GetBytes(ctx, in.client, spec.ChecksumURL,
-		httpx.WithMaxAttempts(3), httpx.WithMaxBodyBytes(1<<20))
+	body, err := httpclient.GetBytes(ctx, in.client, spec.ChecksumURL,
+		httpclient.WithMaxAttempts(3), httpclient.WithMaxBodyBytes(1<<20))
 	if err != nil {
 		return fmt.Errorf("fetch checksum: %w", err)
 	}
@@ -923,7 +923,7 @@ func (in *installer) streamCmd(cmd *exec.Cmd, label string) error {
 }
 
 // keepTail's kept suffix never exceeds n bytes nor starts mid-rune, the
-// runesafe.CapBytesTail rule applied in place to reuse b.
+// textsafe.CapBytesTail rule applied in place to reuse b.
 func keepTail(b []byte, n int) []byte {
 	if len(b) <= n {
 		return b
@@ -968,11 +968,11 @@ func commandFailed(label string, err error, output string) error {
 			lines = append(lines, line)
 		}
 	}
-	msg := runesafe.SanitizeSingleLine(strings.Join(lines, " | "))
+	msg := textsafe.SanitizeSingleLine(strings.Join(lines, " | "))
 	if msg == "" {
 		return fmt.Errorf("%s failed: %w", label, err)
 	}
-	if tail := runesafe.CapBytesTail(msg, maxCommandOutput); len(tail) < len(msg) {
+	if tail := textsafe.CapBytesTail(msg, maxCommandOutput); len(tail) < len(msg) {
 		msg = "..." + tail
 	}
 	return fmt.Errorf("%s failed: %w (%s)", label, err, msg)
