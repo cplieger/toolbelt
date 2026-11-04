@@ -31,7 +31,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/cplieger/toolbelt/v3"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 func main() {
