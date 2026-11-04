@@ -14,6 +14,6 @@ require (
 	github.com/cplieger/webhttp/v4 v4.1.0
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-version v1.9.0
-	go.yaml.in/yaml/v3 v3.0.6
+	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/mod v0.42.0
 )
