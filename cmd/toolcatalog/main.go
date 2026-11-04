@@ -551,21 +551,7 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 		}
 		return "aqua:" + ref, aq, nil
 	case "core":
-		// A core tool aqua does not package stays unavailable, reported
-		// with its backend so the reason names what could not be read.
-		aquaRef, ok := coreBackendAqua[ref]
-		if !ok {
-			return "", nil, errUnsupported
-		}
-		aq, err := loadAquaDef(aquaDir, aquaRef)
-		if err != nil {
-			// The translation table names a package the pinned aqua
-			// registry does not carry, or carries in a shape the runtime
-			// cannot evaluate. Not fatal: the tool is simply unavailable,
-			// exactly as it was before the table existed.
-			return "", nil, errUnsupported
-		}
-		return "aqua:" + aquaRef, aq, nil
+		return resolveCoreBackend(aquaDir, ref)
 	case "github":
 		// mise's github backend (formerly ubi) installs a release asset,
 		// which is what the release source does. The registry names the
@@ -592,6 +578,29 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 
 // loadAquaDef parses pkgs/<ref>/registry.yaml and keeps definitions the
 // runtime evaluator supports on linux.
+
+// resolveCoreBackend maps a mise core tool to the aqua package that installs
+// it. A core tool aqua does not package stays unavailable, reported with its
+// backend so the reason names what could not be read.
+func resolveCoreBackend(aquaDir, ref string) (string, *toolbelt.AquaPackage, error) {
+	aquaRef, ok := coreBackendAqua[ref]
+	if !ok {
+		return "", nil, errUnsupported
+	}
+	aq, err := loadAquaDef(aquaDir, aquaRef)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errUnsupported) {
+		// The pinned aqua registry does not carry the package, or carries it
+		// in a shape the runtime cannot evaluate: the tool is unavailable,
+		// not a build failure. A file that does not parse is registry drift
+		// and fails the build, as for aqua:.
+		return "", nil, errUnsupported
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	return "aqua:" + aquaRef, aq, nil
+}
+
 func loadAquaDef(aquaDir, ref string) (*toolbelt.AquaPackage, error) {
 	data, err := os.ReadFile(filepath.Join(aquaDir, filepath.FromSlash(ref), "registry.yaml"))
 	if err != nil {
