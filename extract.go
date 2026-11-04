@@ -102,18 +102,24 @@ func canonicalFormat(format string) string {
 // decompression dependencies. destDir must exist and be empty. A format
 // the image cannot extract is an error, never a raw install: an archive
 // written out as the binary passes every later check.
+//
+// Every tar extraction passes --no-same-owner: GNU tar run as root (the
+// engine's normal case) otherwise restores each member's recorded owner, so
+// a release tarball built by uid 1001 installs files owned by uid 1001, an
+// identity the host may hand to anyone. unzip restores owners only under -X,
+// which is never passed.
 func extractArtifact(ctx context.Context, artifact, format, destDir, binName string) error {
 	switch format {
 	case formatTarGz:
-		return runQuiet(ctx, "tar", "-xzf", artifact, "-C", destDir)
+		return runQuiet(ctx, "tar", "--no-same-owner", "-xzf", artifact, "-C", destDir)
 	case formatTarXz:
-		return runQuiet(ctx, "tar", "-xJf", artifact, "-C", destDir)
+		return runQuiet(ctx, "tar", "--no-same-owner", "-xJf", artifact, "-C", destDir)
 	case formatTarBz2:
-		return runQuiet(ctx, "tar", "-xjf", artifact, "-C", destDir)
+		return runQuiet(ctx, "tar", "--no-same-owner", "-xjf", artifact, "-C", destDir)
 	case formatTarZst:
-		return runQuiet(ctx, "tar", "--zstd", "-xf", artifact, "-C", destDir)
+		return runQuiet(ctx, "tar", "--no-same-owner", "--zstd", "-xf", artifact, "-C", destDir)
 	case formatTar:
-		return runQuiet(ctx, "tar", "-xf", artifact, "-C", destDir)
+		return runQuiet(ctx, "tar", "--no-same-owner", "-xf", artifact, "-C", destDir)
 	case formatZip:
 		return runQuiet(ctx, "unzip", "-q", artifact, "-d", destDir)
 	case formatGz:
