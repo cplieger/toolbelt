@@ -26,7 +26,7 @@ import (
 // Layout and protocol constants.
 const (
 	// sentinelName marks a version directory as completely installed. It lives
-	// INSIDE the directory it describes, so it cannot drift from the artifacts
+	// INSIDE the directory it describes, so it cannot drift from the artifact
 	// it vouches for, and it is written LAST.
 	sentinelName = ".complete"
 	// versionsSuffix names the version-addressed installation root, appended to
@@ -215,9 +215,9 @@ type Manager struct {
 
 // New validates cfg and returns a manager. It resolves the architecture from
 // runtime.GOARCH, requires a well-formed digest for it and an archive URL whose
-// extension names a format, and refuses a config with no Required assertion. Nothing the manager keeps shares memory with
-// cfg: the snapshot is taken before validation, so what was validated is what
-// the manager uses.
+// extension names a format, and refuses a config with no Required assertion.
+// Nothing the manager keeps shares memory with cfg: the snapshot is taken before
+// validation, so what was validated is what the manager uses.
 func New(cfg *Config) (*Manager, error) {
 	if cfg == nil {
 		return nil, errors.New("pin: Config is required")
@@ -515,8 +515,8 @@ func (m *Manager) Version() string {
 }
 
 // PathEntry returns the absolute directory to lead PATH with, or "" when no
-// version is active. It holds only this release's own artifacts, so leading with
-// it shadows nothing else.
+// version is active. It holds only this release's artifact and its sentinel, so
+// leading with it shadows nothing else.
 func (m *Manager) PathEntry() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -524,9 +524,9 @@ func (m *Manager) PathEntry() string {
 }
 
 // PathEnv returns the overlay to append to [os.Environ] before spawning anything
-// that must resolve this release's artifacts, or nil when no version is active:
-// [Manager.PathEntry] composed under [pathEnv]'s rule, so consumers do not each
-// write their own composer.
+// that must resolve this release's artifact, or nil when no version is active:
+// PATH led by [Manager.PathEntry], then the inherited PATH when there is one, so
+// consumers do not each write their own composer.
 func (m *Manager) PathEnv() []string {
 	return pathEnv(m.PathEntry())
 }

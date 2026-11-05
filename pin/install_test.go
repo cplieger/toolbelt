@@ -232,6 +232,48 @@ func TestEnsureSyncFailureAtEveryProtocolPointRetainsPreviousVersion(t *testing.
 	}
 }
 
+// TestEnsureSyncsInProtocolOrder pins the order of the durability protocol: the
+// artifact, then the sentinel, then the staged directory, then the rename, then the
+// installation root. The directory synced before the sentinel is written would not
+// make the sentinel's entry durable before publication.
+func TestEnsureSyncsInProtocolOrder(t *testing.T) {
+	env := newFakeEnv(t)
+	if err := env.manager().Ensure(t.Context()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	root := env.versionsRoot()
+	steps := []struct {
+		name  string
+		match func(call string) bool
+	}{
+		{"the artifact", func(c string) bool {
+			return strings.HasPrefix(c, "fsync ") && strings.Contains(c, stagePrefix) && filepath.Base(c) == toolName
+		}},
+		{"the sentinel", func(c string) bool {
+			return strings.HasPrefix(c, "fsync ") && strings.Contains(c, stagePrefix) && filepath.Base(c) == sentinelName
+		}},
+		{"the staged directory", func(c string) bool {
+			return strings.HasPrefix(c, "fsync ") && strings.Contains(c, stagePrefix) && filepath.Base(c) == "v"
+		}},
+		{"the publish rename", func(c string) bool {
+			return strings.HasPrefix(c, "rename ") && strings.HasSuffix(c, " -> "+env.versionDir(pinnedVersion))
+		}},
+		{"the installation root", func(c string) bool { return c == "fsync "+root }},
+	}
+	calls := env.called()
+	last := -1
+	for _, step := range steps {
+		at := slices.IndexFunc(calls, step.match)
+		if at < 0 {
+			t.Fatalf("no call for %s in %v", step.name, calls)
+		}
+		if at < last {
+			t.Errorf("%s came before the step it must follow; calls = %v", step.name, calls)
+		}
+		last = at
+	}
+}
+
 // TestEnsurePublishRenameFailureKeepsPreviousActive pins the publish boundary: when
 // the single same-filesystem rename that makes a version visible fails, the install
 // fails and the previously complete version stays selected. There is no
@@ -614,10 +656,10 @@ func TestWriteFileDurablyLeavesNoTempOnFailure(t *testing.T) {
 
 // TestExecRunnerBoundsAndIsolatesASubprocess pins the production runner, the one
 // boundary the harness replaces everywhere else. Every subprocess this library
-// spawns, the version probe and every assertion, goes through it, so its three properties are worth pinning directly: the argv is
-// passed as separate elements with no shell in the path, the extra environment is
-// appended rather than replacing the process environment, and the timeout bounds a
-// command that never returns.
+// spawns, the version probe and every assertion, goes through it, so its three
+// properties are pinned directly: the argv is passed as separate elements with no
+// shell in the path, the extra environment is appended rather than replacing the
+// process environment, and the timeout bounds a command that never returns.
 func TestExecRunnerBoundsAndIsolatesASubprocess(t *testing.T) {
 	sh, err := exec.LookPath("sh")
 	if err != nil {

@@ -258,13 +258,13 @@ func (m *Manager) selectActive(ctx context.Context) (selection, bool) {
 			continue
 		}
 		if m.cfg.Untrusted {
-			m.log.Error("activating a version on degraded evidence: Config.Untrusted declares this tree shared, so all that is known is that this process published this version from a verified archive earlier, not that its artifacts are unchanged since",
+			m.log.Error("activating a version on degraded evidence: Config.Untrusted declares this tree shared, so all that is known is that this process published this version from a verified archive earlier, not that its artifact is unchanged since",
 				"package", m.cfg.Name, "version", version, "reason", a.verdict)
 		}
 		switch a.stage {
 		case stageWideEntry:
 			if a.entry == "." {
-				m.log.Error("excluding a version directory: the directory itself is not provably private to this process, so any artifact in it can be replaced whatever the artifacts' own modes say",
+				m.log.Error("excluding a version directory: the directory itself is not provably private to this process, so any entry in it can be replaced whatever its own mode says",
 					"package", m.cfg.Name, "version", version, "dir", a.dir, "reason", a.reason)
 			} else {
 				m.log.Error("excluding a version directory: an entry in it is not provably private to this process, so it is a file this process may execute and cannot vouch for",

@@ -32,8 +32,8 @@ type Config struct {
 	// ArchTokens maps a GOARCH to the token the publisher uses in its URLs
 	// (e.g. "amd64" -> "x86_64-linux").
 	ArchTokens map[string]string
-	// ArtifactDir is where the artifacts sit inside the archive. Empty means
-	// its root.
+	// ArtifactDir is where the primary artifact sits inside the archive. Empty
+	// means its root.
 	ArtifactDir string
 	// ProbeArgs is the argv that makes the primary artifact print its version
 	// (e.g. {"--version"}). Every start probes the artifact it activates, and
@@ -55,8 +55,8 @@ type Config struct {
 	// so the directory the custody check judges is the one every later open
 	// reaches.
 	Root string
-	// LinkDir is a directory under Root holding a convenience symlink to each
-	// artifact of the active version, for an operator shelling into the
+	// LinkDir is a directory under Root holding a convenience symlink to the
+	// active version's primary artifact, for an operator shelling into the
 	// environment. Nothing in this package reads the links, and an entry
 	// another owner put there is never touched. It is relative, with no ".."
 	// component. Empty publishes none.

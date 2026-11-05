@@ -211,14 +211,13 @@ func TestEnsureRefusesATreeWithoutCustody(t *testing.T) {
 		t.Fatalf("chmod the install root: %v", err)
 	}
 	m := env.manager()
-	m.checkCustody()
 
-	if _, ok := m.selectActive(t.Context()); ok {
-		t.Fatal("selectActive accepted a pre-existing directory in a tree without custody")
-	}
 	err := m.Ensure(t.Context())
 	if err == nil || !strings.Contains(err.Error(), "not under this process's exclusive control") {
 		t.Fatalf("Ensure error = %v, want the custody refusal", err)
+	}
+	if _, ok := m.selectActive(t.Context()); ok {
+		t.Fatal("selectActive accepted a pre-existing directory in a tree without custody")
 	}
 	if env.fetchCount() != 0 {
 		t.Errorf("fetches = %d, want 0: nothing is downloaded into a tree without custody", env.fetchCount())

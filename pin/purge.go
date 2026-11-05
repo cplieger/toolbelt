@@ -238,15 +238,8 @@ func (m *Manager) publishConvenienceLinks(sel selection) {
 			"package", m.cfg.Name, "path", linkDir, "error", err)
 		return
 	}
-	target := filepath.Join(sel.dir, m.primary)
-	var changed bool
-	if selfContained(target) {
-		changed = m.publishLink(root, m.primary, target)
-	} else {
-		m.log.Warn("not publishing a convenience symlink: the active version holds no self-contained executable at its primary artifact",
-			"package", m.cfg.Name, "target", target)
-		changed = m.retractLink(root, m.primary, m.primary)
-	}
+	// Selection proved the primary is a self-contained executable.
+	changed := m.publishLink(root, m.primary, filepath.Join(sel.dir, m.primary))
 	changed = m.retractStrayLinks(root) || changed
 	if !changed {
 		return

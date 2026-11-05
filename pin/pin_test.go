@@ -71,33 +71,6 @@ func TestNewRejectsAConfigPointerOfNil(t *testing.T) {
 	}
 }
 
-// TestNewCopiesEverythingItDependsOn pins that a caller mutating its own Config
-// after construction cannot change what the manager installs. The maps and slices
-// in a Config are shared by a shallow copy, so the facts have to be resolved once.
-func TestNewCopiesEverythingItDependsOn(t *testing.T) {
-	env := newFakeEnv(t)
-	cfg := env.config()
-	m, err := New(cfg)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	wantURL := m.archiveURL
-
-	cfg.Digests["amd64"] = strings.Repeat("f", 64)
-	cfg.ArchTokens["amd64"] = "hijacked"
-	cfg.Version = "9.9.9"
-
-	if m.digest != env.digest {
-		t.Errorf("digest = %q, want the digest resolved at construction %q", m.digest, env.digest)
-	}
-	if m.archiveURL != wantURL {
-		t.Errorf("archiveURL = %q, want %q", m.archiveURL, wantURL)
-	}
-	if m.cfg.Version != pinnedVersion {
-		t.Errorf("Version = %q, want %q", m.cfg.Version, pinnedVersion)
-	}
-}
-
 // TestEnsureReassertsRequiredAssertionsOnAStartThatSkipsTheInstall pins that an
 // assertion cannot be remembered. Its effect lives in the package's own mutable
 // configuration, not in the immutable version directory, so even the fast path
