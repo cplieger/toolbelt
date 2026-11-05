@@ -25,7 +25,6 @@ func widgetConfig() *pin.Config {
 		},
 		Root:    "/var/lib/example/tools",
 		LinkDir: "bin",
-		Require: []string{"widget-helper"},
 		Assertions: []pin.Assertion{
 			// The widget must not update itself: that would replace the
 			// artifact whose digest was verified.

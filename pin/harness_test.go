@@ -30,13 +30,12 @@ const (
 	oldVersion    = "2.14.0"
 )
 
-// The harness's primary profile: a package whose archive holds the artifacts
+// The harness's primary profile: a package whose archive holds its artifact
 // under pkg/bin. It is deliberately NOT a real upstream: the library must name
 // no vendor.
 const (
 	toolName          = "toolkit"
 	toolSidecar       = "toolkit-chat"
-	toolExtra         = "toolkit-term"
 	toolArtifactDir   = "pkg/bin"
 	mandatoryName     = "pkg.disableAutoupdates"
 	toolURLTemplate   = "https://example.invalid/{version}/tool-{arch}.zip"
@@ -118,21 +117,14 @@ func (h *logRecorder) messages(level slog.Level) []string {
 	return out
 }
 
-// captureLogs sends this package's log output to a recorder for the rest of the test,
-// which is how a warn-only path is asserted on at all: several of this library's
-// failures are deliberately non-fatal, and the log line IS the observable half of that
-// contract.
-//
-// slog's default logger is process-global, so a test holding this must not run in
-// parallel. The cleanup restores whatever was installed before, which is normally
-// the discard handler TestMain set for the package.
-//
-// slog.SetDefault also points the standard log package at the installed handler,
-// and it skips that redirect when the logger being installed carries slog's own
-// default handler. Reinstalling the previous logger therefore does not undo the
-// redirect, so the writer and flags are saved and restored explicitly. slog goes
-// back first: reinstalling a previous handler that is not slog's default re-runs
-// the redirect and would overwrite a log restore done before it.
+// captureLogs sends this package's log output to a recorder for the rest of the
+// test, which is how a warn-only path is asserted on: the log line is the
+// observable half of a deliberately non-fatal failure. slog's default is
+// process-global, so a test holding this must not run in parallel. slog.SetDefault
+// also redirects the standard log package and skips that when handed slog's own
+// default handler, so restoring the previous logger does not undo it: the log
+// writer and flags are saved and restored explicitly, after slog, since
+// reinstalling a non-default handler re-runs the redirect.
 func captureLogs(t *testing.T) *logRecorder {
 	t.Helper()
 	rec := &logRecorder{}
@@ -216,9 +208,7 @@ type fakeEnv struct {
 	t    *testing.T
 	root string
 
-	release  Config
-	require  []string
-	optional []string
+	release Config
 
 	// fixed is an archive a test supplied; nil builds one from produces when the
 	// config is built, so the pinned digest always matches what fetch serves.
@@ -226,12 +216,12 @@ type fakeEnv struct {
 	archive []byte
 	digest  string
 
-	// produces maps the artifact names the archive holds under ArtifactDir to
-	// the version each one reports.
+	// produces maps the executable names the archive holds under ArtifactDir
+	// to the version each one reports.
 	produces map[string]string
-	// installerFails makes the archive hold no artifact at all, the shape that
-	// fails the staged gates.
-	installerFails bool
+	// archiveLacksArtifacts makes the archive hold no executable at all, the
+	// shape that fails the staged gates.
+	archiveLacksArtifacts bool
 	// probeAnswerFor renders the version a fake artifact encodes into the shape
 	// that package's probe prints.
 	probeAnswerFor func(version string) string
@@ -249,14 +239,12 @@ type fakeEnv struct {
 }
 
 // newEnv wires an env to one profile and one archive.
-func newEnv(t *testing.T, release Config, archive []byte, require, optional []string) *fakeEnv {
+func newEnv(t *testing.T, release Config, archive []byte) *fakeEnv {
 	t.Helper()
 	e := &fakeEnv{
 		t:              t,
 		root:           t.TempDir(),
 		release:        release,
-		require:        require,
-		optional:       optional,
 		fixed:          archive,
 		probeAnswerFor: func(v string) string { return toolName + " " + v + "\n" },
 	}
@@ -280,10 +268,10 @@ func (e *fakeEnv) setArchive(archive []byte) {
 }
 
 // builtArchive is the archive the primary profile ships: every produced
-// artifact under ArtifactDir, beside a file no artifact list names.
+// executable under ArtifactDir, beside a NOTICE file.
 func (e *fakeEnv) builtArchive() []byte {
 	entries := map[string]zipEntry{"pkg/NOTICE": {body: "toolkit\n", mode: 0o644}}
-	if !e.installerFails {
+	if !e.archiveLacksArtifacts {
 		for name, version := range e.produces {
 			entries[e.release.ArtifactDir+"/"+name] = zipEntry{body: fakeBinaryBody(version), mode: 0o755}
 		}
@@ -291,14 +279,14 @@ func (e *fakeEnv) builtArchive() []byte {
 	return buildZip(e.t, entries)
 }
 
-// newFakeEnv is the primary env: one required sidecar and one optional extra.
+// newFakeEnv is the primary env: an archive holding the primary artifact and a
+// sidecar executable pin installs nothing for.
 func newFakeEnv(t *testing.T) *fakeEnv {
 	t.Helper()
-	env := newEnv(t, toolRelease(), nil, []string{toolSidecar}, []string{toolExtra})
+	env := newEnv(t, toolRelease(), nil)
 	env.produces = map[string]string{
 		toolName:    pinnedVersion,
 		toolSidecar: pinnedVersion,
-		toolExtra:   pinnedVersion,
 	}
 	return env
 }
@@ -403,8 +391,6 @@ func (e *fakeEnv) config(mutate ...func(*Config)) *Config {
 	cfg.Digests = map[string]string{"amd64": e.digest, "arm64": e.digest}
 	cfg.Root = e.root
 	cfg.goarch = "amd64"
-	cfg.Require = e.require
-	cfg.Optional = e.optional
 	cfg.LinkDir = testLinkDir
 	cfg.MaxAttempts = 1
 	for _, f := range mutate {
@@ -555,7 +541,7 @@ func (e *fakeEnv) placeVersion(version string, names ...string) string {
 	e.t.Helper()
 	dir := e.versionDir(version)
 	if len(names) == 0 {
-		names = append([]string{e.release.Name}, e.require...)
+		names = []string{e.release.Name}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		e.t.Fatalf("MkdirAll(%s): %v", dir, err)
@@ -579,10 +565,8 @@ func (e *fakeEnv) placePartial(version string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		e.t.Fatalf("MkdirAll(%s): %v", dir, err)
 	}
-	for _, n := range append([]string{e.release.Name}, e.require...) {
-		if err := writeFakeBinary(filepath.Join(dir, n), version); err != nil {
-			e.t.Fatalf("writeFakeBinary(%s): %v", n, err)
-		}
+	if err := writeFakeBinary(filepath.Join(dir, e.release.Name), version); err != nil {
+		e.t.Fatalf("writeFakeBinary(%s): %v", e.release.Name, err)
 	}
 	return dir
 }
@@ -612,6 +596,20 @@ func (e *fakeEnv) versionDirs() []string {
 		}
 	}
 	return out
+}
+
+// dirNames lists the names in dir, sorted.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", dir, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 func exists(path string) bool {

@@ -72,12 +72,7 @@ func (m *Manager) versionDirComplete(version string) bool {
 	if err != nil || strings.TrimSpace(string(raw)) != version {
 		return false
 	}
-	for _, name := range m.cfg.Require {
-		if !selfContained(filepath.Join(dir, name)) {
-			return false
-		}
-	}
-	return true
+	return selfContained(filepath.Join(dir, m.primary))
 }
 
 // activationStage names the check a version directory failed. It exists so selection and
@@ -225,13 +220,13 @@ func (m *Manager) trusted(version string) (mayActivate bool, verdict error) {
 
 // wideArtifact returns the first entry in dir that is not provably private to
 // this process and why, or "" when everything is; "." is the directory itself.
-// Every top-level entry counts, not only the declared artifacts: PathEntry puts
-// the whole directory on PATH, and a primary artifact resolves its sidecars there
-// by bare name. The reason travels with the name because an entry somebody can
+// Every top-level entry counts, not only the primary: PathEntry puts the whole
+// directory on PATH, where an entry beside the primary resolves by bare name.
+// The reason travels with the name because an entry somebody can
 // write and one whose access list could not be read are fixed differently.
 func (m *Manager) wideArtifact(dir string) (name, reason string) {
 	euid := os.Geteuid()
-	if why, private := m.trust.EntryPrivate(dir, true, euid); !private {
+	if why, private := m.trust.EntryPrivate(dir, euid); !private {
 		return ".", why
 	}
 	entries, err := os.ReadDir(dir)
@@ -242,7 +237,7 @@ func (m *Manager) wideArtifact(dir string) (name, reason string) {
 		if e.IsDir() {
 			continue
 		}
-		if why, private := m.trust.EntryPrivate(filepath.Join(dir, e.Name()), false, euid); !private {
+		if why, private := m.trust.EntryPrivate(filepath.Join(dir, e.Name()), euid); !private {
 			return e.Name(), why
 		}
 	}
@@ -334,7 +329,7 @@ func (m *Manager) pruneSuperseded(ctx context.Context, active string) {
 
 // prunePartials removes incomplete version directories and orphan staging trees.
 // It runs before selection so a partial directory is never a candidate, and it
-// runs while no staging tree of this manager exists — Ensure holds opMu and
+// runs while no staging tree of this manager exists: Ensure holds opSem and
 // creates its stage later.
 //
 // Its caller runs it only when Manager.mayMutateTree allows.

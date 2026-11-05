@@ -68,16 +68,12 @@ func assertFindings(t *testing.T, err error, want []wantFinding) {
 	}
 }
 
-// TestNew_VerifyRootIntegrityRefusesUnfitRoots pins the opt-in check on
-// the states that make a managed root a root-code-execution surface: the
-// engine EXECUTES launchers out of this tree during probing and puts
-// bin/ first on PATH, so a root that is a symlink elsewhere, that is not
-// a directory at all, or that a non-owner can write must refuse
-// construction rather than be probed.
-//
-// Each case writes the bad state into real temp dirs (real symlinks,
-// real chmod — a mode question is not worth mocking) and calls the real
-// New.
+// TestNew_VerifyRootIntegrityRefusesUnfitRoots pins the opt-in check on the
+// states that make a managed root a root-code-execution surface: the engine
+// executes launchers out of this tree while probing and puts bin/ first on PATH,
+// so a root that is a symlink elsewhere, not a directory, or writable by a
+// non-owner refuses construction. Each case writes the bad state into real temp
+// dirs (real symlinks, real chmod) and calls the real New.
 func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 	cases := map[string]struct {
 		// setup writes the bad state and returns what the check must
@@ -675,17 +671,21 @@ func TestNew_RefusesANegativeTrustedUID(t *testing.T) {
 
 func TestNew_RefusesADotDotRoot(t *testing.T) {
 	root := t.TempDir()
-	tests := map[string]*Config{
-		"config dir, inside": {ConfigDir: root + "/link/../config", ToolsDir: root + "/tools"},
-		"config dir, ending": {ConfigDir: root + "/config/x/..", ToolsDir: root + "/tools"},
-		"tools dir, inside":  {ConfigDir: root + "/config", ToolsDir: root + "/link/../tools"},
-		"tools dir, ending":  {ConfigDir: root + "/config", ToolsDir: root + "/tools/x/.."},
+	tests := map[string]struct {
+		cfg   *Config
+		field string
+	}{
+		"config dir, inside": {&Config{ConfigDir: root + "/link/../config", ToolsDir: root + "/tools"}, "ConfigDir"},
+		"config dir, ending": {&Config{ConfigDir: root + "/config/x/..", ToolsDir: root + "/tools"}, "ConfigDir"},
+		"tools dir, inside":  {&Config{ConfigDir: root + "/config", ToolsDir: root + "/link/../tools"}, "ToolsDir"},
+		"tools dir, ending":  {&Config{ConfigDir: root + "/config", ToolsDir: root + "/tools/x/.."}, "ToolsDir"},
+		"both dirs":          {&Config{ConfigDir: root + "/x/../config", ToolsDir: root + "/x/../tools"}, "ConfigDir"},
 	}
-	for name, cfg := range tests {
+	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			_, err := New(cfg)
-			if err == nil || !strings.Contains(err.Error(), `must not contain a ".." component`) {
-				t.Errorf("New = %v, want the dot-dot root refused", err)
+			_, err := New(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "toolbelt: "+tc.field+" ") || !strings.Contains(err.Error(), `must not contain a ".." component`) {
+				t.Errorf("New = %v, want the dot-dot %s refused", err, tc.field)
 			}
 		})
 	}

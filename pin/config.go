@@ -26,8 +26,8 @@ type Config struct {
 	// (<Root>/<Name>-state.json) and the completion sentinel's claim.
 	Name string
 	// URLTemplate is the archive URL, carrying the {version} and {arch}
-	// placeholders. Its extension picks the format: .zip, .tar, .tar.gz,
-	// .tgz, .tar.bz2, .tbz2 or .tbz.
+	// placeholders. The extension of the resolved URL's last path segment
+	// picks the format: .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tbz2 or .tbz.
 	URLTemplate string
 	// ArchTokens maps a GOARCH to the token the publisher uses in its URLs
 	// (e.g. "amd64" -> "x86_64-linux").
@@ -61,12 +61,6 @@ type Config struct {
 	// another owner put there is never touched. It is relative, with no ".."
 	// component. Empty publishes none.
 	LinkDir string
-	// Require names artifacts beside the primary one that a version directory
-	// must hold to count as complete, such as a sidecar the primary execs.
-	Require []string
-	// Optional names artifacts installed when the archive provides them, and
-	// only warned about when it does not.
-	Optional []string
 	// Assertions are re-asserted against the active artifact on every start,
 	// and the Required ones against the staged artifact before it is
 	// published. At least one must be Required.
@@ -84,7 +78,8 @@ type Config struct {
 	TrustedUIDs []int
 	// MaxAttempts bounds [Manager.EnsureWithRetry]. Zero or less uses 4.
 	MaxAttempts int
-	// Logger receives every log line. Nil uses [slog.Default].
+	// Logger receives every log line. Nil uses [slog.Default] as it is when
+	// [New] runs.
 	Logger *slog.Logger
 
 	// goarch selects the architecture in tests. Empty resolves runtime.GOARCH.
@@ -132,8 +127,7 @@ const (
 	formatTarBz2 = "tar.bz2"
 )
 
-// archiveFormats maps a URL's extension to its format, the tar forms first so
-// .tar.gz is matched before a shorter suffix.
+// archiveFormats maps a URL's extension to its format.
 var archiveFormats = []struct{ ext, format string }{
 	{".tar.gz", formatTarGz},
 	{".tgz", formatTarGz},
@@ -144,9 +138,9 @@ var archiveFormats = []struct{ ext, format string }{
 	{".zip", formatZip},
 }
 
-// formatOf returns the archive format of the template's last path segment.
-func formatOf(tmpl string) (string, bool) {
-	u, err := url.Parse(strings.NewReplacer(versionPlaceholder, "0", archPlaceholder, "0").Replace(tmpl))
+// formatOf returns the archive format of the URL's last path segment.
+func formatOf(rawURL string) (string, bool) {
+	u, err := url.Parse(rawURL)
 	if err != nil {
 		return "", false
 	}
@@ -169,8 +163,6 @@ func (c *Config) snapshot() Config {
 	out.ProbeArgs = slices.Clone(c.ProbeArgs)
 	out.Digests = maps.Clone(c.Digests)
 	out.TrustedUIDs = slices.Clone(c.TrustedUIDs)
-	out.Require = slices.Clone(c.Require)
-	out.Optional = slices.Clone(c.Optional)
 	if c.Assertions != nil {
 		out.Assertions = make([]Assertion, 0, len(c.Assertions))
 		for _, a := range c.Assertions {
@@ -203,9 +195,6 @@ func (c *Config) validateRelease() error {
 	}
 	if err := validateURLTemplate("URLTemplate", c.URLTemplate); err != nil {
 		return err
-	}
-	if _, ok := formatOf(c.URLTemplate); !ok {
-		return fmt.Errorf("pin: URLTemplate %q must end in .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tbz2 or .tbz", c.URLTemplate)
 	}
 	if len(c.ArchTokens) == 0 {
 		return errors.New("pin: ArchTokens is required. Map a GOARCH to the publisher's token")
@@ -247,15 +236,8 @@ func (c *Config) validateDeployment() error {
 	return nil
 }
 
-// validateLists checks the artifact names, the assertions and the uids.
+// validateLists checks the assertions and the uids.
 func (c *Config) validateLists() error {
-	for _, group := range [][]string{c.Require, c.Optional} {
-		for _, name := range group {
-			if err := validateIdentifier("artifact name", name); err != nil {
-				return err
-			}
-		}
-	}
 	if err := validateAssertions(c.Assertions); err != nil {
 		return err
 	}
@@ -265,15 +247,6 @@ func (c *Config) validateLists() error {
 		}
 	}
 	return nil
-}
-
-// withPrimaryArtifact returns require with the primary artifact first: the
-// probe runs it and consumers execute it, so it cannot be configured out.
-func withPrimaryArtifact(require []string, primary string) []string {
-	if slices.Contains(require, primary) {
-		return require
-	}
-	return append([]string{primary}, require...)
 }
 
 // validateRoot refuses a Root that is empty, relative or holds a ".." component.

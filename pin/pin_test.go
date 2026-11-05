@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -49,9 +50,9 @@ func TestNewValidatesItsPins(t *testing.T) {
 				if err != nil {
 					t.Fatalf("New: %v", err)
 				}
-				if m.cfg.MaxAttempts <= 0 || m.urlTemplate == "" || m.format != "zip" {
+				if m.cfg.MaxAttempts <= 0 || m.archiveURL == "" || m.format != "zip" {
 					t.Errorf("New left a default unset: attempts=%d url=%q format=%q",
-						m.cfg.MaxAttempts, m.urlTemplate, m.format)
+						m.cfg.MaxAttempts, m.archiveURL, m.format)
 				}
 			case err == nil:
 				t.Fatalf("New accepted %s", name)
@@ -80,24 +81,20 @@ func TestNewCopiesEverythingItDependsOn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	wantURL := m.archiveURL()
-	wantRequire := append([]string(nil), m.cfg.Require...)
+	wantURL := m.archiveURL
 
 	cfg.Digests["amd64"] = strings.Repeat("f", 64)
-	cfg.Require[0] = "hijacked"
 	cfg.ArchTokens["amd64"] = "hijacked"
 	cfg.Version = "9.9.9"
 
 	if m.digest != env.digest {
 		t.Errorf("digest = %q, want the digest resolved at construction %q", m.digest, env.digest)
 	}
-	if got := m.archiveURL(); got != wantURL {
-		t.Errorf("archiveURL() = %q, want %q", got, wantURL)
+	if m.archiveURL != wantURL {
+		t.Errorf("archiveURL = %q, want %q", m.archiveURL, wantURL)
 	}
-	for i, name := range wantRequire {
-		if m.cfg.Require[i] != name {
-			t.Errorf("Require[%d] = %q, want %q", i, m.cfg.Require[i], name)
-		}
+	if m.cfg.Version != pinnedVersion {
+		t.Errorf("Version = %q, want %q", m.cfg.Version, pinnedVersion)
 	}
 }
 
@@ -261,7 +258,7 @@ func failRenameTo(target string) func(string, string) error {
 // an endless loop or a process exit.
 func TestEnsureWithRetryIsBoundedAndReportsTerminalFailure(t *testing.T) {
 	env := newFakeEnv(t)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager(func(c *Config) {
 		c.MaxAttempts = 3
 	})
@@ -288,7 +285,7 @@ func TestEnsureWithRetryIsBoundedAndReportsTerminalFailure(t *testing.T) {
 func TestEnsureWithRetryStopsEarlyOnShutdown(t *testing.T) {
 	t.Run("a cancelled context stops after the attempt in flight", func(t *testing.T) {
 		env := newFakeEnv(t)
-		env.installerFails = true
+		env.archiveLacksArtifacts = true
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		m := env.manager(func(c *Config) { c.MaxAttempts = 4 })
@@ -306,7 +303,7 @@ func TestEnsureWithRetryStopsEarlyOnShutdown(t *testing.T) {
 
 	t.Run("a wait that reports cancellation is returned", func(t *testing.T) {
 		env := newFakeEnv(t)
-		env.installerFails = true
+		env.archiveLacksArtifacts = true
 		m := env.manager(func(c *Config) { c.MaxAttempts = 4 })
 		m.sleep = func(context.Context, time.Duration) error { return context.Canceled }
 
@@ -367,7 +364,7 @@ func TestReasonStringIsEmptyOnlyWhenReady(t *testing.T) {
 // become observable without a fresh process.
 func TestRescanMakesAnInPlaceRepairVisible(t *testing.T) {
 	env := newFakeEnv(t)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager(func(c *Config) { c.MaxAttempts = 2 })
 
 	if err := m.EnsureWithRetry(t.Context()); err == nil {
@@ -451,7 +448,7 @@ func TestEnsureIsIdempotent(t *testing.T) {
 // reports no error — and a backoff left at zero is a hot loop against the upstream.
 func TestEnsureWithRetryUsesTheLibraryPolicyWhenTheRetryKnobsAreUnset(t *testing.T) {
 	env := newFakeEnv(t)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager(func(c *Config) {
 		c.MaxAttempts = 0
 	})
@@ -511,7 +508,7 @@ func TestServingAPredecessorSaysThePinIsNotInstalled(t *testing.T) {
 	logs := captureLogs(t)
 	env := newFakeEnv(t)
 	env.placeVersion(prevVersion)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager()
 
 	// The install failure is reported; the previous version still serves.
@@ -538,7 +535,7 @@ func TestServingAPredecessorSaysThePinIsNotInstalled(t *testing.T) {
 func TestExhaustedRetriesWithNothingUsableIsAnError(t *testing.T) {
 	logs := captureLogs(t)
 	env := newFakeEnv(t)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager(func(c *Config) { c.MaxAttempts = 2 })
 
 	if err := m.EnsureWithRetry(t.Context()); err == nil {
@@ -596,13 +593,10 @@ func TestSleepCtxHonoursCancellation(t *testing.T) {
 	}
 }
 
-// TestProbeAndAssertionsLeadPATHWithTheBinaryDir pins the sidecar-delegation
-// contract: a multi-binary release's primary executable may resolve its
-// sidecars by BARE NAME on PATH rather than beside its own executable
-// (kiro-cli's `settings` delegates to the kiro-cli-chat sidecar that way).
-// Every command pinstall runs against an installed or staged binary must
-// therefore lead PATH with that binary's own directory, or every assertion
-// fails with ENOENT while the sidecar sits right next to the asserted binary.
+// TestProbeAndAssertionsLeadPATHWithTheBinaryDir pins that every command pin
+// runs against an installed or staged binary leads PATH with that binary's own
+// directory, the PATH a consumer gives it through PathEnv, so what the probe
+// and the assertions prove holds where the consumer runs it.
 func TestProbeAndAssertionsLeadPATHWithTheBinaryDir(t *testing.T) {
 	env := newFakeEnv(t)
 	m := env.manager()
@@ -642,14 +636,11 @@ func TestProbeAndAssertionsLeadPATHWithTheBinaryDir(t *testing.T) {
 }
 
 // TestPathEnvNeverAdmitsTheWorkingDirectory pins the degenerate half of the
-// lead-PATH rule, which is where its guarantee inverts rather than weakens. A
-// PATH element that is empty means the current working directory, so appending
-// an empty inherited PATH leaves a trailing separator that hands the child a
-// search directory nobody chose — the calling server's cwd — and a release whose
-// primary executable resolves sidecars by bare name then runs whatever is
-// standing there. Narrowing the lookup to one verified directory is the entire
-// point of leading with it, so an empty inherited PATH must produce that
-// directory ALONE.
+// lead-PATH rule. An empty PATH element means the working directory, so
+// appending an empty inherited PATH would leave a trailing separator and hand
+// the child the calling server's cwd as a search directory, where a bare-name
+// exec runs whatever stands there. An empty inherited PATH must therefore
+// produce the entry ALONE.
 func TestPathEnvNeverAdmitsTheWorkingDirectory(t *testing.T) {
 	const entry = "/opt/toolkit-versions/2.14.2"
 
@@ -788,18 +779,13 @@ func assertNoWorkingDirectoryOnPATH(t *testing.T, overlay []string) {
 // gates plus a context.WithoutCancel wrapper, which is library knowledge that
 // nothing kept in step (one of two consumers had neither).
 
-// A caller that gives up while queued must return promptly instead of holding a
-// goroutine inside the library until an operation it never started finishes.
-//
-// Inside a synctest bubble because the first half is a NEGATIVE assertion — "it is
-// still waiting" — and on a real clock that is only ever probabilistic: a 50 ms
-// time.After says the queued caller had not returned within 50 ms, not that it
-// could not. synctest.Wait returns when every goroutine in the bubble is DURABLY
-// blocked, so reading the channel after it is a proof rather than a guess, and the
-// same substitution retires the 5 s deadline guard on the second half. The queued
-// caller parks on a channel send inside a select, which is durable, so the bubble
-// has something to settle on; a goroutine busy-spinning or parked on an external
-// socket would hang here instead.
+// TestOperationWaitIsCancellable pins that a caller giving up while queued returns
+// promptly instead of holding a goroutine until an operation it never started ends.
+// It runs in a synctest bubble because "still waiting" is a negative assertion,
+// only probabilistic on a real clock; synctest.Wait returns once every goroutine is
+// durably blocked, which makes reading the channel after it a proof. The queued
+// caller parks on a channel send inside a select, which is durable; a goroutine
+// spinning or parked on a socket would hang the bubble instead.
 func TestOperationWaitIsCancellable(t *testing.T) {
 	env := newFakeEnv(t)
 	synctest.Test(t, func(t *testing.T) {
@@ -913,13 +899,15 @@ func TestEnsureStillHonoursCancellation(t *testing.T) {
 
 // TestNewSnapshotsTheCallerConfig pins that every reference-bearing field is
 // copied, not just the ones read at construction: the argv of each assertion,
-// ProbeArgs, and both Purge slices (the DELETE list, aliased across the
-// validation that just approved it) are read long after New returns.
+// ProbeArgs, TrustedUIDs and both Purge slices (the DELETE list, aliased across
+// the validation that just approved it) are read long after New returns. Each is
+// mutated in place, which is the write an alias would carry.
 func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	env := newFakeEnv(t)
 	cfg := env.config(func(c *Config) {
 		c.Purge = &Purge{Artifacts: []string{"legacy-artifact"}, Names: []string{toolName}, Marker: legacyMarker}
 		c.Assertions = append(c.Assertions, Assertion{Name: "extra", Args: []string{"settings", "extra", "true"}})
+		c.TrustedUIDs = []int{4000}
 	})
 	m, err := New(cfg)
 	if err != nil {
@@ -928,9 +916,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 
 	// Everything a caller could reach into after construction.
 	cfg.Digests["amd64"] = "mutated"
-	cfg.Require = append(cfg.Require, "mutated")
-	cfg.Optional = append(cfg.Optional, "mutated")
-	cfg.TrustedUIDs = append(cfg.TrustedUIDs, 4242)
+	cfg.TrustedUIDs[0] = 4242
 	cfg.ArchTokens["amd64"] = "mutated"
 	cfg.ProbeArgs[0] = "mutated"
 	for i := range cfg.Assertions {
@@ -940,13 +926,12 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	cfg.Purge.Names[0] = "mutated"
 
 	checks := map[string]string{
-		"Digests":             m.cfg.Digests["amd64"],
-		"ArchTokens":          m.cfg.ArchTokens["amd64"],
-		"ProbeArgs":           m.cfg.ProbeArgs[0],
-		"Purge.Artifacts":     m.cfg.Purge.Artifacts[0],
-		"Purge.Names":         m.cfg.Purge.Names[0],
-		"resolved digest":     m.digest,
-		"resolved arch token": m.archToken,
+		"Digests":         m.cfg.Digests["amd64"],
+		"ArchTokens":      m.cfg.ArchTokens["amd64"],
+		"ProbeArgs":       m.cfg.ProbeArgs[0],
+		"Purge.Artifacts": m.cfg.Purge.Artifacts[0],
+		"Purge.Names":     m.cfg.Purge.Names[0],
+		"resolved digest": m.digest,
 	}
 	for field, got := range checks {
 		if got == "mutated" || got == "../escaped" {
@@ -958,10 +943,77 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 			t.Errorf("assertion %q argv reads %v after the caller mutated its own Config, so New aliased it", a.Name, a.Args)
 		}
 	}
-	if slices.Contains(m.cfg.Require, "mutated") || slices.Contains(m.cfg.Optional, "mutated") {
-		t.Errorf("Require/Optional read %v/%v, so New aliased one of them", m.cfg.Require, m.cfg.Optional)
-	}
 	if slices.Contains(m.trust.UIDs, 4242) || slices.Contains(m.cfg.TrustedUIDs, 4242) {
 		t.Errorf("the trust set reads %v/%v, so New aliased it", m.trust.UIDs, m.cfg.TrustedUIDs)
+	}
+}
+
+// TestNewUsesTheConfiguredLogger pins Config.Logger: set, it receives the
+// manager's lines and slog.Default none; nil, the manager keeps the default
+// that was installed when New ran.
+func TestNewUsesTheConfiguredLogger(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		def := captureLogs(t)
+		own := &logRecorder{}
+		m := newFakeEnv(t).manager(func(c *Config) { c.Logger = slog.New(own) })
+		if err := m.Ensure(t.Context()); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		if got := own.messages(slog.LevelInfo); !slices.Contains(got, "version active") {
+			t.Errorf("the configured logger saw %v, want the install's lines", got)
+		}
+		if got := def.messages(slog.LevelInfo); len(got) != 0 {
+			t.Errorf("slog.Default saw %v, want nothing while Config.Logger is set", got)
+		}
+	})
+	t.Run("nil", func(t *testing.T) {
+		atNew := captureLogs(t)
+		m := newFakeEnv(t).manager()
+		later := captureLogs(t)
+		if err := m.Ensure(t.Context()); err != nil {
+			t.Fatalf("Ensure: %v", err)
+		}
+		if got := atNew.messages(slog.LevelInfo); !slices.Contains(got, "version active") {
+			t.Errorf("the default installed at New saw %v, want the install's lines", got)
+		}
+		if got := later.messages(slog.LevelInfo); len(got) != 0 {
+			t.Errorf("a default installed after New saw %v, want nothing", got)
+		}
+	})
+}
+
+// TestFinishRecordsTheActivationOnlyInATreeItMayMutate pins that finish writes
+// the activation time only under a clean custody verdict: under a refusal the
+// selected directory keeps its mtime, under a clean one it takes the clock's.
+func TestFinishRecordsTheActivationOnlyInATreeItMayMutate(t *testing.T) {
+	for _, refused := range []bool{true, false} {
+		t.Run(fmt.Sprintf("refused %v", refused), func(t *testing.T) {
+			env := newFakeEnv(t)
+			dir := env.placeVersion(prevVersion)
+			before := time.Unix(1600000000, 0)
+			if err := os.Chtimes(dir, before, before); err != nil {
+				t.Fatalf("Chtimes: %v", err)
+			}
+			m := env.manager()
+			sel, ok := m.selectActive(t.Context())
+			if !ok || sel.version != prevVersion {
+				t.Fatalf("selectActive = %+v, %v, want %s", sel, ok, prevVersion)
+			}
+			if refused {
+				m.setCustody(errors.New("the installation root is writable by group 1000"))
+			}
+			_ = m.finish(t.Context(), sel, errors.New("the pin did not install"))
+			fi, err := os.Stat(dir)
+			if err != nil {
+				t.Fatalf("Stat: %v", err)
+			}
+			want := m.now()
+			if refused {
+				want = before
+			}
+			if !fi.ModTime().Equal(want) {
+				t.Errorf("mtime = %v, want %v", fi.ModTime(), want)
+			}
+		})
 	}
 }

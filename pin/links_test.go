@@ -11,41 +11,31 @@ import (
 	"testing"
 )
 
-// A release that ships its binaries straight from the archive and drops four of its five
-// between two versions, with the consumer's declared set shrinking to match.
+// A release that ships five binaries at one version and only its primary at the
+// next, the shape of a sidecar set an earlier installer linked and pin installs
+// none of.
 const (
 	shrinkWideVersion   = "2.37.1"
 	shrinkNarrowVersion = "3.0.0"
 	shrinkArtifactDir   = "toolkit/bin"
+	toolExtra           = "toolkit-term"
 	toolAlias           = "tk"
 	toolAliasChat       = "tkchat"
 )
 
-// shrinkRelease is the primary profile with its own ArtifactDir, so each archive
-// alone decides which artifacts a version holds.
+// shrinkRelease is the primary profile with its own ArtifactDir.
 func shrinkRelease() Config {
 	r := toolRelease()
 	r.ArtifactDir = shrinkArtifactDir
 	return r
 }
 
-// shrinkArchive holds one executable per name under the profile's ArtifactDir, each
-// reporting version.
-func shrinkArchive(t *testing.T, version string, names ...string) []byte {
-	t.Helper()
-	entries := make(map[string]zipEntry, len(names))
-	for _, n := range names {
-		entries[shrinkArtifactDir+"/"+n] = zipEntry{body: fakeBinaryBody(version), mode: 0o755}
-	}
-	return buildZip(t, entries)
-}
-
-// newShrinkEnv is a volume on which the five-binary release has been activated, with
-// LinkDir created and plant run before that first install.
+// newShrinkEnv is a volume an earlier installer left with the five-binary release
+// active: its version directory complete and a link to each binary in LinkDir.
+// plant runs first, and a name it fills gets no link.
 func newShrinkEnv(t *testing.T, plant func(env *fakeEnv, linkDir string)) *fakeEnv {
 	t.Helper()
-	wide := shrinkArchive(t, shrinkWideVersion, toolName, toolSidecar, toolExtra, toolAlias, toolAliasChat)
-	env := newEnv(t, shrinkRelease(), wide, []string{toolSidecar}, []string{toolExtra, toolAlias, toolAliasChat})
+	env := newEnv(t, shrinkRelease(), nil)
 	linkDir := filepath.Join(env.root, testLinkDir)
 	if err := os.MkdirAll(linkDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%s): %v", linkDir, err)
@@ -53,39 +43,40 @@ func newShrinkEnv(t *testing.T, plant func(env *fakeEnv, linkDir string)) *fakeE
 	if plant != nil {
 		plant(env, linkDir)
 	}
-	if err := env.manager(func(c *Config) { c.Version = shrinkWideVersion }).Ensure(t.Context()); err != nil {
-		t.Fatalf("Ensure %s: %v", shrinkWideVersion, err)
+	dir := env.placeVersion(shrinkWideVersion, toolName, toolSidecar, toolExtra, toolAlias, toolAliasChat)
+	for _, name := range []string{toolName, toolSidecar, toolExtra, toolAlias, toolAliasChat} {
+		link := filepath.Join(linkDir, name)
+		if _, err := os.Lstat(link); err == nil {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(dir, name), link); err != nil {
+			t.Fatalf("Symlink(%s): %v", link, err)
+		}
 	}
 	return env
 }
 
-// shrinkTo points env at the one-binary release, declared with nothing beyond the
-// primary, and runs Ensure on it.
+// shrinkTo pins env to the one-binary release and runs Ensure on it.
 func shrinkTo(t *testing.T, env *fakeEnv, mutate ...func(*Config)) error {
 	t.Helper()
-	env.archive = shrinkArchive(t, shrinkNarrowVersion, toolName)
-	env.digest = digestOf(env.archive)
-	env.require, env.optional = nil, nil
+	archive := buildZip(t, map[string]zipEntry{
+		shrinkArtifactDir + "/" + toolName: {body: fakeBinaryBody(shrinkNarrowVersion), mode: 0o755},
+	})
+	env.useArchive(archive)
 	mutate = append([]func(*Config){func(c *Config) { c.Version = shrinkNarrowVersion }}, mutate...)
 	return env.manager(mutate...).Ensure(t.Context())
 }
 
 // TestConvenienceLinksRetractWhatADroppedReleaseNoLongerShips pins retraction on
-// ownership rather than on the names the current configuration declares. A consumer
-// moving to a release that ships one binary instead of five also stops declaring the
-// other four, and the links this manager published for them must still go: left in place
-// they keep resolving into the predecessor and dangle once retention prunes it. An entry
-// this manager did not create, at one of those names or anywhere else, is never touched.
+// ownership rather than on configured names. pin links only the primary, and the
+// links an earlier installer published for four sidecars into this tree must go:
+// left in place they dangle once retention prunes their version. An entry of
+// another shape, at one of those names or anywhere else, is never touched.
 func TestConvenienceLinksRetractWhatADroppedReleaseNoLongerShips(t *testing.T) {
 	t.Run("own links of dropped artifacts are retracted", func(t *testing.T) {
 		env := newShrinkEnv(t, nil)
 		linkDir := filepath.Join(env.root, testLinkDir)
 		dropped := []string{toolSidecar, toolExtra, toolAlias, toolAliasChat}
-		for _, name := range dropped {
-			if got, want := readLink(t, filepath.Join(linkDir, name)), filepath.Join(env.versionDir(shrinkWideVersion), name); got != want {
-				t.Fatalf("after %s, %s -> %q, want %q", shrinkWideVersion, name, got, want)
-			}
-		}
 
 		if err := shrinkTo(t, env); err != nil {
 			t.Fatalf("Ensure %s: %v", shrinkNarrowVersion, err)

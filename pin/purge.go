@@ -213,9 +213,9 @@ func (m *Manager) recordPurge() {
 	m.log.Debug("recorded the purge as complete", "package", m.cfg.Name, "path", path)
 }
 
-// publishConvenienceLinks republishes <Root>/<LinkDir>/<name> into sel's directory
-// for every declared artifact sel holds, and retracts every other link this manager
-// owns there, so no link dangles once the old version is pruned.
+// publishConvenienceLinks republishes <Root>/<LinkDir>/<Name> into sel's directory
+// and retracts every other link this manager owns there, so no link dangles once
+// the old version is pruned.
 // Non-authoritative: every failure only warns.
 // LinkDir is commonly co-owned, so only an empty slot or this manager's own link
 // is replaced or removed ([Manager.ownsLink]). Every step goes through an
@@ -238,21 +238,16 @@ func (m *Manager) publishConvenienceLinks(sel selection) {
 			"package", m.cfg.Name, "path", linkDir, "error", err)
 		return
 	}
-	changed := false
-	declared := m.linkNames()
-	for _, name := range declared {
-		target := filepath.Join(sel.dir, name)
-		if selfContained(target) {
-			changed = m.publishLink(root, name, target) || changed
-			continue
-		}
-		if slices.Contains(m.cfg.Require, name) {
-			m.log.Warn("not publishing a convenience symlink: the active version holds no self-contained executable at this required artifact",
-				"package", m.cfg.Name, "target", target)
-		}
-		changed = m.retractLink(root, name, name) || changed
+	target := filepath.Join(sel.dir, m.primary)
+	var changed bool
+	if selfContained(target) {
+		changed = m.publishLink(root, m.primary, target)
+	} else {
+		m.log.Warn("not publishing a convenience symlink: the active version holds no self-contained executable at its primary artifact",
+			"package", m.cfg.Name, "target", target)
+		changed = m.retractLink(root, m.primary, m.primary)
 	}
-	changed = m.retractStrayLinks(root, declared) || changed
+	changed = m.retractStrayLinks(root) || changed
 	if !changed {
 		return
 	}
@@ -260,18 +255,6 @@ func (m *Manager) publishConvenienceLinks(sel selection) {
 		m.log.Warn("failed to sync the link dir after republishing the convenience symlinks",
 			"package", m.cfg.Name, "error", err)
 	}
-}
-
-// linkNames is every artifact name a version directory may hold, each once: the
-// set the convenience links are published as.
-func (m *Manager) linkNames() []string {
-	names := make([]string, 0, len(m.cfg.Require)+len(m.cfg.Optional))
-	for _, name := range slices.Concat(m.cfg.Require, m.cfg.Optional) {
-		if !slices.Contains(names, name) {
-			names = append(names, name)
-		}
-	}
-	return names
 }
 
 // publishLink points <LinkDir>/<name> at target and reports whether it changed the
@@ -304,12 +287,12 @@ func (m *Manager) publishLink(root *os.Root, name, target string) bool {
 	return true
 }
 
-// retractStrayLinks retracts every link this manager owns in LinkDir outside the
-// declared names, and every staged link a crash left, and reports whether it changed
-// the link directory. Ownership is read off each entry rather than the configuration:
-// a consumer that stops declaring an artifact a new release dropped still has the link
-// published for it, and that link would dangle once retention prunes its version.
-func (m *Manager) retractStrayLinks(root *os.Root, declared []string) bool {
+// retractStrayLinks retracts every link this manager owns in LinkDir under another
+// name than the primary's, and every staged link a crash left, and reports whether it
+// changed the link directory. Ownership is read off each entry rather than the
+// configuration: a link an earlier installer published for a sidecar the release has
+// since dropped would dangle once retention prunes its version.
+func (m *Manager) retractStrayLinks(root *os.Root) bool {
 	entries, err := m.listLinkDir(root)
 	if err != nil {
 		m.log.Warn("failed to list the link dir to retract stale convenience symlinks",
@@ -324,7 +307,7 @@ func (m *Manager) retractStrayLinks(root *os.Root, declared []string) bool {
 		// publishLink renames or removes its staged link before returning, so one found
 		// here is a crash remnant whatever its artifact's status.
 		artifact, staged := stagedLinkArtifact(e.Name())
-		if !staged && slices.Contains(declared, artifact) {
+		if !staged && artifact == m.primary {
 			continue
 		}
 		changed = m.retractLink(root, e.Name(), artifact) || changed

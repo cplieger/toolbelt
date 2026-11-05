@@ -4,7 +4,6 @@ package pin
 
 import (
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -30,26 +29,28 @@ func TestConfigValidationRefusesEachBrokenField(t *testing.T) {
 		"url of a raw binary":      {mutate: func(c *Config) { c.URLTemplate = "https://x/{version}/tool-{arch}.exe" }, wantErr: "must end in .zip"},
 		"url of an xz tarball":     {mutate: func(c *Config) { c.URLTemplate = "https://x/{version}/tool-{arch}.tar.xz" }, wantErr: "must end in .zip"},
 		"url of a bare extension":  {mutate: func(c *Config) { c.URLTemplate = "https://x/{version}/.zip" }, wantErr: "must end in .zip"},
-		"no probe args":            {mutate: func(c *Config) { c.ProbeArgs = nil }, wantErr: "ProbeArgs is required"},
-		"absolute artifact dir":    {mutate: func(c *Config) { c.ArtifactDir = "/usr/bin" }, wantErr: "must be relative"},
-		"escaping artifact dir":    {mutate: func(c *Config) { c.ArtifactDir = "../../etc" }, wantErr: "escape"},
-		"missing version":          {mutate: func(c *Config) { c.Version = "" }, wantErr: "Version"},
-		"no digests":               {mutate: func(c *Config) { c.Digests = nil }, wantErr: "Digests is required"},
-		"missing root":             {mutate: func(c *Config) { c.Root = "" }, wantErr: "Root is required"},
-		"relative root":            {mutate: func(c *Config) { c.Root = "tools" }, wantErr: "must be absolute"},
-		"dot-dot ending root":      {mutate: func(c *Config) { c.Root += "/x/.." }, wantErr: "must not contain"},
-		"dot-dot inside root":      {mutate: func(c *Config) { c.Root = "/srv/link/../tools" }, wantErr: "must not contain"},
-		"dot-dot name in root":     {mutate: func(c *Config) { c.Root = "/srv/..tools" }},
-		"absolute link dir":        {mutate: func(c *Config) { c.LinkDir = "/usr/local/bin" }, wantErr: "must be relative"},
-		"escaping link dir":        {mutate: func(c *Config) { c.LinkDir = "../bin" }, wantErr: "escape"},
-		"dot-dot in link dir":      {mutate: func(c *Config) { c.LinkDir = "x/../bin" }, wantErr: "must not contain"},
-		"dot-dot ending link dir":  {mutate: func(c *Config) { c.LinkDir = "bin/x/.." }, wantErr: "must not contain"},
-		"required with a slash":    {mutate: func(c *Config) { c.Require = []string{"sub/tool"} }, wantErr: "single path component"},
-		"dotted optional":          {mutate: func(c *Config) { c.Optional = []string{".complete"} }, wantErr: "must not start with a dot"},
-		"no required assertion":    {mutate: func(c *Config) { c.Assertions = []Assertion{{Name: "a", Args: []string{"x"}}} }, wantErr: "no Required entry"},
-		"no assertion at all":      {mutate: func(c *Config) { c.Assertions = nil }, wantErr: "no Required entry"},
-		"assertion with no name":   {mutate: func(c *Config) { c.Assertions[0].Name = "" }, wantErr: "has no Name"},
-		"assertion with no args":   {mutate: func(c *Config) { c.Assertions[0].Args = nil }, wantErr: "has no Args"},
+		"token hiding the extension": {mutate: func(c *Config) {
+			c.URLTemplate = "https://x/{version}/tool-{arch}.zip"
+			c.ArchTokens["amd64"] = "linux#"
+		}, wantErr: "must end in .zip"},
+		"no probe args":           {mutate: func(c *Config) { c.ProbeArgs = nil }, wantErr: "ProbeArgs is required"},
+		"absolute artifact dir":   {mutate: func(c *Config) { c.ArtifactDir = "/usr/bin" }, wantErr: "must be relative"},
+		"escaping artifact dir":   {mutate: func(c *Config) { c.ArtifactDir = "../../etc" }, wantErr: "escape"},
+		"missing version":         {mutate: func(c *Config) { c.Version = "" }, wantErr: "Version"},
+		"no digests":              {mutate: func(c *Config) { c.Digests = nil }, wantErr: "Digests is required"},
+		"missing root":            {mutate: func(c *Config) { c.Root = "" }, wantErr: "Root is required"},
+		"relative root":           {mutate: func(c *Config) { c.Root = "tools" }, wantErr: "must be absolute"},
+		"dot-dot ending root":     {mutate: func(c *Config) { c.Root += "/x/.." }, wantErr: "must not contain"},
+		"dot-dot inside root":     {mutate: func(c *Config) { c.Root = "/srv/link/../tools" }, wantErr: "must not contain"},
+		"dot-dot name in root":    {mutate: func(c *Config) { c.Root = "/srv/..tools" }},
+		"absolute link dir":       {mutate: func(c *Config) { c.LinkDir = "/usr/local/bin" }, wantErr: "must be relative"},
+		"escaping link dir":       {mutate: func(c *Config) { c.LinkDir = "../bin" }, wantErr: "escape"},
+		"dot-dot in link dir":     {mutate: func(c *Config) { c.LinkDir = "x/../bin" }, wantErr: "must not contain"},
+		"dot-dot ending link dir": {mutate: func(c *Config) { c.LinkDir = "bin/x/.." }, wantErr: "must not contain"},
+		"no required assertion":   {mutate: func(c *Config) { c.Assertions = []Assertion{{Name: "a", Args: []string{"x"}}} }, wantErr: "no Required entry"},
+		"no assertion at all":     {mutate: func(c *Config) { c.Assertions = nil }, wantErr: "no Required entry"},
+		"assertion with no name":  {mutate: func(c *Config) { c.Assertions[0].Name = "" }, wantErr: "has no Name"},
+		"assertion with no args":  {mutate: func(c *Config) { c.Assertions[0].Args = nil }, wantErr: "has no Args"},
 		"duplicate assertion": {mutate: func(c *Config) {
 			c.Assertions = append(c.Assertions, Assertion{Name: c.Assertions[0].Name, Args: []string{"x"}})
 		}, wantErr: "two entries named"},
@@ -75,31 +76,49 @@ func TestConfigValidationRefusesEachBrokenField(t *testing.T) {
 	}
 }
 
-// TestFormatOfReadsTheTemplateExtension pins R12: the archive format comes from
-// the URL's last path segment, the tar forms before their shorter suffixes.
-func TestFormatOfReadsTheTemplateExtension(t *testing.T) {
+// TestFormatOfReadsTheURLExtension pins R12: the archive format comes from the
+// last path segment of the URL New resolves, never its query or fragment.
+func TestFormatOfReadsTheURLExtension(t *testing.T) {
 	tests := map[string]string{
-		"https://x/{version}/a-{arch}.zip":         "zip",
-		"https://x/{version}/a-{arch}.ZIP":         "zip",
-		"https://x/{version}/a-{arch}.tar":         "tar",
-		"https://x/{version}/a-{arch}.tar.gz":      "tar.gz",
-		"https://x/{version}/a-{arch}.tgz":         "tar.gz",
-		"https://x/{version}/a-{arch}.tar.bz2":     "tar.bz2",
-		"https://x/{version}/a-{arch}.tbz2":        "tar.bz2",
-		"https://x/{version}/a-{arch}.tbz":         "tar.bz2",
-		"https://x/{version}/a-{arch}.zip?sig=1":   "zip",
-		"https://x/{version}/a-{arch}.tar.zst":     "",
-		"https://x/{version}/a-{arch}.gz":          "",
-		"https://x/{version}.zip/a-{arch}":         "",
-		"https://x/{version}/a-{arch}.tar.gz#frag": "tar.gz",
+		"https://x/1.0/a-amd64.zip":         "zip",
+		"https://x/1.0/a-amd64.ZIP":         "zip",
+		"https://x/1.0/a-amd64.tar":         "tar",
+		"https://x/1.0/a-amd64.tar.gz":      "tar.gz",
+		"https://x/1.0/a-amd64.tgz":         "tar.gz",
+		"https://x/1.0/a-amd64.tar.bz2":     "tar.bz2",
+		"https://x/1.0/a-amd64.tbz2":        "tar.bz2",
+		"https://x/1.0/a-amd64.tbz":         "tar.bz2",
+		"https://x/1.0/a-amd64.zip?sig=1":   "zip",
+		"https://x/1.0/a-amd64.tar.zst":     "",
+		"https://x/1.0/a-amd64.gz":          "",
+		"https://x/1.0.zip/a-amd64":         "",
+		"https://x/1.0/a-amd64.tar.gz#frag": "tar.gz",
+		"https://x/1.0/a-amd64#.zip":        "",
+		"https://x/1.0/a.tar.gz?v=.zip":     "tar.gz",
 	}
-	for tmpl, want := range tests {
-		t.Run(tmpl, func(t *testing.T) {
-			got, ok := formatOf(tmpl)
+	for rawURL, want := range tests {
+		t.Run(rawURL, func(t *testing.T) {
+			got, ok := formatOf(rawURL)
 			if got != want || ok != (want != "") {
-				t.Errorf("formatOf(%q) = %q, %v, want %q", tmpl, got, ok, want)
+				t.Errorf("formatOf(%q) = %q, %v, want %q", rawURL, got, ok, want)
 			}
 		})
+	}
+}
+
+// TestNewJudgesTheFormatOnTheResolvedURL pins that the format New records is the
+// one of the URL it fetches: an arch token that moves the last path segment
+// moves the format with it.
+func TestNewJudgesTheFormatOnTheResolvedURL(t *testing.T) {
+	m := newFakeEnv(t).manager(func(c *Config) {
+		c.URLTemplate = "https://x.example/dl/{version}/{arch}.zip"
+		c.ArchTokens["amd64"] = "kiro.tar.gz?v="
+	})
+	if want := "https://x.example/dl/2.14.2/kiro.tar.gz?v=.zip"; m.archiveURL != want {
+		t.Errorf("archiveURL = %q, want %q", m.archiveURL, want)
+	}
+	if m.format != formatTarGz {
+		t.Errorf("format = %q, want %q: the fetched path ends in .tar.gz", m.format, formatTarGz)
 	}
 }
 
@@ -136,27 +155,6 @@ func TestPurgeValidationRejectsAnEscapingSweep(t *testing.T) {
 				t.Fatalf("validate accepted %s", name)
 			case !strings.Contains(err.Error(), tc.wantErr):
 				t.Errorf("error = %v, want one mentioning %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-// TestPrimaryArtifactIsAlwaysRequired pins that the artifact the probe runs cannot be
-// configured out of the required set, whatever a deployment passes.
-func TestPrimaryArtifactIsAlwaysRequired(t *testing.T) {
-	tests := map[string]struct {
-		require []string
-		want    []string
-	}{
-		"empty gets just the primary":      {require: nil, want: []string{"tool"}},
-		"primary already present is kept":  {require: []string{"tool"}, want: []string{"tool"}},
-		"primary is prepended when absent": {require: []string{"tool-helper"}, want: []string{"tool", "tool-helper"}},
-		"order is otherwise preserved":     {require: []string{"tool-helper", "tool"}, want: []string{"tool-helper", "tool"}},
-	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			if got := withPrimaryArtifact(tc.require, "tool"); !slices.Equal(got, tc.want) {
-				t.Errorf("withPrimaryArtifact = %v, want %v", got, tc.want)
 			}
 		})
 	}

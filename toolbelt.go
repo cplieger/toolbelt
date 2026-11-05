@@ -219,9 +219,9 @@ func (cfg *Config) validate() error {
 	}
 	// The root-integrity walk resolves ".." after a symlink while every managed
 	// path is Join-cleaned, so the two would judge and write different directories.
-	for field, dir := range map[string]string{"ConfigDir": cfg.ConfigDir, "ToolsDir": cfg.ToolsDir} {
-		if slices.Contains(strings.Split(dir, "/"), "..") {
-			return fmt.Errorf("toolbelt: %s %q must not contain a \"..\" component", field, dir)
+	for _, f := range []struct{ name, dir string }{{"ConfigDir", cfg.ConfigDir}, {"ToolsDir", cfg.ToolsDir}} {
+		if slices.Contains(strings.Split(f.dir, "/"), "..") {
+			return fmt.Errorf("toolbelt: %s %q must not contain a \"..\" component", f.name, f.dir)
 		}
 	}
 	for _, uid := range cfg.TrustedUIDs {

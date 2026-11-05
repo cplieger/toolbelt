@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/cplieger/toolbelt/v3/internal/unpack"
@@ -161,14 +160,6 @@ type readerFunc func(p []byte) (int, error)
 
 func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
 
-// archiveURL is the pinned archive's absolute URL. The version is pinned rather
-// than a floating "latest" so a given deployment is reproducible and the digest
-// check is meaningful.
-func (m *Manager) archiveURL() string {
-	url := strings.ReplaceAll(m.urlTemplate, versionPlaceholder, m.cfg.Version)
-	return strings.ReplaceAll(url, archPlaceholder, m.archToken)
-}
-
 // The staging tree's fixed layout under its own root. Named so the absolute paths
 // below and the root-relative names [Manager.assemble] and [Manager.publish] hand
 // to an [os.Root] have one source rather than two spellings that can drift.
@@ -281,7 +272,7 @@ func (m *Manager) downloadArchive(ctx context.Context) (*verifiedArchive, error)
 	}
 	sum := sha256.New()
 	// Digest the bytes as they land, so a large archive is read once.
-	if fetchErr := m.fetch(ctx, m.archiveURL(), io.MultiWriter(f, sum)); fetchErr != nil {
+	if fetchErr := m.fetch(ctx, m.archiveURL, io.MultiWriter(f, sum)); fetchErr != nil {
 		_ = f.Close()
 		return nil, fetchErr
 	}
@@ -400,11 +391,11 @@ func (m *Manager) gateStaged(ctx context.Context, staged string) error {
 	return m.applyRequiredAssertions(ctx, staged)
 }
 
-// assemble moves the artifacts out of src into the staged version directory and
-// makes the result durable: every file synced, then the ".complete" sentinel
+// assemble moves the artifact out of src into the staged version directory and
+// makes the result durable: the file synced, then the ".complete" sentinel
 // written and synced last, then the directory synced; only then may publish
 // rename it. Any sync failure fails the install and leaves every complete
-// version untouched. The moves go through an [os.Root] on the staging tree, so an
+// version untouched. The move goes through an [os.Root] on the staging tree, so an
 // archive symlink at ArtifactDir cannot pull a file from outside it.
 func (m *Manager) assemble(stage *stageTree, src string) error {
 	root, err := os.OpenRoot(stage.root)
@@ -419,14 +410,12 @@ func (m *Manager) assemble(stage *stageTree, src string) error {
 	if mkErr := root.MkdirAll(stageVersionDir, dirMode); mkErr != nil {
 		return fmt.Errorf("creating the staged version directory: %w", mkErr)
 	}
-	moved, err := m.moveArtifacts(root, srcRel)
+	moved, err := m.moveArtifact(root, srcRel)
 	if err != nil {
-		return err
+		return fmt.Errorf("artifact %s: %w", m.primary, err)
 	}
-	for _, path := range moved {
-		if err := m.fsync(path); err != nil {
-			return fmt.Errorf("syncing %s: %w", filepath.Base(path), err)
-		}
+	if err := m.fsync(moved); err != nil {
+		return fmt.Errorf("syncing %s: %w", m.primary, err)
 	}
 	if err := m.writeSentinel(stage.versionDir); err != nil {
 		return err
@@ -437,7 +426,7 @@ func (m *Manager) assemble(stage *stageTree, src string) error {
 	// OpenZFS), and publishing it would install a version selection refuses forever,
 	// each attempt reporting success.
 	if wide, reason := m.wideArtifact(stage.versionDir); wide != "" {
-		// Same wording discipline as selectActive's refusal twenty lines away, because
+		// Same wording discipline as selectActive's refusal in versions.go, because
 		// this is the same verdict reached one step earlier: name what is wrong in terms
 		// the operator can act on rather than echoing wideArtifact's "." marker. The
 		// reason travels with the name so the operator is not told an entry is writable
@@ -446,8 +435,8 @@ func (m *Manager) assemble(stage *stageTree, src string) error {
 		if wide == "." {
 			what = "the directory itself"
 		}
-		return fmt.Errorf("the installation root is not under this process's exclusive control: refusing to publish the version directory %s because %s %s, and selection would therefore never activate it%s",
-			stage.versionDir, what, reason, m.trustHint())
+		return fmt.Errorf("the installation root is not under this process's exclusive control: refusing to publish the version directory %s, which selection would never activate, because %s %s",
+			stage.versionDir, what, reason)
 	}
 	if err := m.fsync(stage.versionDir); err != nil {
 		return fmt.Errorf("syncing the staged version directory: %w", err)
@@ -455,41 +444,13 @@ func (m *Manager) assemble(stage *stageTree, src string) error {
 	return nil
 }
 
-// moveArtifacts moves every declared artifact out of srcRel into the staged version
-// directory and returns their absolute paths, in the order they were moved.
-//
-// The asymmetry between the two sets is the whole reason they are one function
-// rather than one loop: a required artifact that will not move fails the install,
-// while an optional one only warns, because "installed when the archive provides it"
-// is the contract [Config.Optional] states.
-func (m *Manager) moveArtifacts(root *os.Root, srcRel string) ([]string, error) {
-	moved := make([]string, 0, len(m.cfg.Require)+len(m.cfg.Optional))
-	for _, name := range m.cfg.Require {
-		dst, err := m.moveArtifact(root, srcRel, name)
-		if err != nil {
-			return nil, fmt.Errorf("required artifact %s: %w", name, err)
-		}
-		moved = append(moved, dst)
-	}
-	for _, name := range m.cfg.Optional {
-		dst, err := m.moveArtifact(root, srcRel, name)
-		if err != nil {
-			m.log.Warn("optional artifact not installed",
-				"package", m.cfg.Name, "artifact", name, "error", err)
-			continue
-		}
-		moved = append(moved, dst)
-	}
-	return moved, nil
-}
-
-// moveArtifact moves one artifact out of srcRel into the staged version
+// moveArtifact moves the primary artifact out of srcRel into the staged version
 // directory, both inside root, refusing anything but a self-contained
 // executable, and returns its absolute path. Containment is proved first with
 // root.Lstat, because the ownership and access-list checks below read an
 // absolute path and would otherwise judge a file outside the staging tree.
-func (m *Manager) moveArtifact(root *os.Root, srcRel, name string) (string, error) {
-	fromRel := filepath.Join(srcRel, name)
+func (m *Manager) moveArtifact(root *os.Root, srcRel string) (string, error) {
+	fromRel := filepath.Join(srcRel, m.primary)
 	if _, err := root.Lstat(fromRel); err != nil {
 		return "", fmt.Errorf("is not reachable inside the staging tree: %w", err)
 	}
@@ -501,19 +462,19 @@ func (m *Manager) moveArtifact(root *os.Root, srcRel, name string) (string, erro
 	// refused: a writable artifact in a published version directory is a binary
 	// another principal can rewrite. It is refused, not repaired, with the
 	// predicate's own diagnosis.
-	if reason, private := m.trust.EntryPrivate(from, false, os.Geteuid()); !private {
-		return "", fmt.Errorf("%s, and this package will not publish an artifact it executes that it cannot prove is private", reason)
+	if reason, private := m.trust.EntryPrivate(from, os.Geteuid()); !private {
+		return "", errors.New("this package will not publish an artifact it executes that it cannot prove is private: it " + reason)
 	}
-	toRel := filepath.Join(stageVersionDir, name)
+	toRel := filepath.Join(stageVersionDir, m.primary)
 	if err := m.rename(root, fromRel, toRel); err != nil {
 		return "", err
 	}
 	return filepath.Join(root.Name(), toRel), nil
 }
 
-// writeSentinel writes the ".complete" marker LAST, holding the version whose
-// full artifact set the directory contains. It lives inside the directory it
-// describes, so it cannot drift from those artifacts.
+// writeSentinel writes the ".complete" marker LAST, holding the version of the
+// artifact the directory contains. It lives inside the directory it describes,
+// so it cannot drift from that artifact.
 //
 // It is a plain file and therefore forgeable by anyone who can write into the
 // tree, which is exactly what custody excludes; see custody.Trust.Verify for why that
@@ -531,12 +492,8 @@ func (m *Manager) writeSentinel(dir string) error {
 
 // publish renames the staged version directory to its final name and syncs the
 // parent, completing the durability protocol. Pruning may only run after this
-// returns nil.
-//
-// Both halves now go through the same [os.Root]: the delete always did, and the
-// rename that follows it lands at the same name in the same untrusted directory, so
-// leaving it on an absolute path was the delete's own reasoning applied to one of
-// the two operations.
+// returns nil. The delete and the rename go through one [os.Root], because both
+// land at the same name in a directory another principal may write.
 func (m *Manager) publish(stage *stageTree) error {
 	// The destination exists only when the pinned directory failed the version
 	// probe and is being replaced; the retained predecessor covers the crash window

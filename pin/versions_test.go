@@ -26,26 +26,20 @@ func TestVersionDirCompleteRejectsEveryIncompleteShape(t *testing.T) {
 	}{
 		"complete set": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName, toolSidecar)
+				writeSet(t, dir, pinnedVersion, toolName)
 				writeSentinelFile(t, dir, pinnedVersion)
 			},
 			want: true,
 		},
 		"artifacts but no sentinel (interrupted install)": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName, toolSidecar)
+				writeSet(t, dir, pinnedVersion, toolName)
 			},
 		},
 		"sentinel names another version": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName, toolSidecar)
-				writeSentinelFile(t, dir, prevVersion)
-			},
-		},
-		"missing required sidecar": {
-			setup: func(t *testing.T, dir string) {
 				writeSet(t, dir, pinnedVersion, toolName)
-				writeSentinelFile(t, dir, pinnedVersion)
+				writeSentinelFile(t, dir, prevVersion)
 			},
 		},
 		"missing primary artifact": {
@@ -54,23 +48,21 @@ func TestVersionDirCompleteRejectsEveryIncompleteShape(t *testing.T) {
 				writeSentinelFile(t, dir, pinnedVersion)
 			},
 		},
-		"required artifact is a symlink": {
+		"primary artifact is a symlink": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName)
 				target := filepath.Join(t.TempDir(), "elsewhere")
 				if err := writeFakeBinary(target, pinnedVersion); err != nil {
 					t.Fatalf("writeFakeBinary: %v", err)
 				}
-				if err := os.Symlink(target, filepath.Join(dir, toolSidecar)); err != nil {
+				if err := os.Symlink(target, filepath.Join(dir, toolName)); err != nil {
 					t.Fatalf("Symlink: %v", err)
 				}
 				writeSentinelFile(t, dir, pinnedVersion)
 			},
 		},
-		"required artifact is not executable": {
+		"primary artifact is not executable": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName)
-				if err := os.WriteFile(filepath.Join(dir, toolSidecar), []byte("x"), 0o600); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, toolName), []byte("x"), 0o600); err != nil {
 					t.Fatalf("WriteFile: %v", err)
 				}
 				writeSentinelFile(t, dir, pinnedVersion)
@@ -78,7 +70,7 @@ func TestVersionDirCompleteRejectsEveryIncompleteShape(t *testing.T) {
 		},
 		"sentinel is a symlink": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName, toolSidecar)
+				writeSet(t, dir, pinnedVersion, toolName)
 				other := filepath.Join(t.TempDir(), "sentinel")
 				if err := os.WriteFile(other, []byte(pinnedVersion+"\n"), 0o600); err != nil {
 					t.Fatalf("WriteFile: %v", err)
@@ -90,7 +82,7 @@ func TestVersionDirCompleteRejectsEveryIncompleteShape(t *testing.T) {
 		},
 		"sentinel is a directory": {
 			setup: func(t *testing.T, dir string) {
-				writeSet(t, dir, pinnedVersion, toolName, toolSidecar)
+				writeSet(t, dir, pinnedVersion, toolName)
 				if err := os.MkdirAll(filepath.Join(dir, sentinelName), 0o755); err != nil {
 					t.Fatalf("MkdirAll: %v", err)
 				}
@@ -168,7 +160,7 @@ func TestSelectActiveExcludesAReplacedArtifactUnderAnIntactSentinel(t *testing.T
 		if err := writeFakeBinary(filepath.Join(tampered, toolName), "6.6.6"); err != nil {
 			t.Fatalf("writeFakeBinary: %v", err)
 		}
-		env.installerFails = true
+		env.archiveLacksArtifacts = true
 		m := env.manager()
 
 		if err := m.Ensure(t.Context()); err == nil {
@@ -273,11 +265,11 @@ func TestEnsureFailedInstallPrunesNothing(t *testing.T) {
 	env := newFakeEnv(t)
 	env.placeVersion(prevVersion)
 	env.placeVersion(oldVersion)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager()
 
 	if err := m.Ensure(t.Context()); err == nil {
-		t.Fatal("Ensure returned nil although the installer produced nothing")
+		t.Fatal("Ensure returned nil although the archive held no artifact")
 	}
 	got := slices.Sorted(slices.Values(env.versionDirs()))
 	want := slices.Sorted(slices.Values([]string{oldVersion, prevVersion}))
@@ -458,14 +450,11 @@ func TestWideArtifactNamesTheSymlinkItRefuses(t *testing.T) {
 }
 
 // TestSelectionAndRetentionAgreeOnEveryRefusal is the coupling test for the shared
-// predicate, and it is the whole reason there is one.
-//
-// Retention's claim about itself is that it counts a version towards the retained set only
-// when selection would activate it. Nothing enforced that claim while the two ran their own
-// copies of the same three checks: a fourth check added to selection would have silently
-// missed retention, which prunes on this answer and would then have deleted the fallback
-// selection would have kept — in exactly the situation the fallback exists for. The
-// property is agreement, so the test asserts agreement rather than either answer.
+// predicate. Retention counts a version towards the retained set only when
+// selection would activate it; with two copies of the checks, a check added to
+// selection alone would let retention delete the fallback selection keeps, exactly
+// when the fallback is needed. The property is agreement, so the test asserts
+// agreement rather than either answer.
 func TestSelectionAndRetentionAgreeOnEveryRefusal(t *testing.T) {
 	tests := map[string]struct {
 		setup       func(t *testing.T, env *fakeEnv, dir string)
@@ -673,15 +662,12 @@ func writeSentinelFile(t *testing.T, dir, version string) {
 	}
 }
 
-// TestRetentionBoundsAnUntrustedTree is the defect Config.Untrusted used to document as
-// a limitation: a directory this process did not install is not activatable, so it went
-// into the immune set and NOTHING pruned it. keep never filled, every predecessor was
-// immune, and the tree grew one version per pin bump forever — ~240 MB a time for a
-// package the size of the ones this library installs.
-//
-// The bound must come from the prunable set having no immunity, NEVER from letting a
-// non-activatable directory count against Retain: that shape keeps a corrupt newer
-// directory while pruning the good older one, exactly when the pin has already failed.
+// TestRetentionBoundsAnUntrustedTree pins that a tree of directories this process
+// did not install still has a bounded size. Such a directory is not activatable;
+// were it immune, nothing would prune it and the tree would grow by one version per
+// pin bump. The bound comes from the prunable set having no immunity, never from a
+// non-activatable directory counting against retainPredecessors: that would keep a
+// corrupt newer directory and prune the good older one, just when the pin failed.
 func TestRetentionBoundsAnUntrustedTree(t *testing.T) {
 	env := newFakeEnv(t)
 	// Three predecessors this process did not install, plus the pin it did.

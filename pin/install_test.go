@@ -35,10 +35,9 @@ func TestEnsureInstallsPinnedVersion(t *testing.T) {
 		t.Errorf("fetches = %d, want 1", env.fetchCount())
 	}
 	dir := env.versionDir(pinnedVersion)
-	for _, name := range []string{toolName, toolSidecar, toolExtra, sentinelName} {
-		if !exists(filepath.Join(dir, name)) {
-			t.Errorf("%s missing from the published version directory", name)
-		}
+	// The archive also holds toolSidecar and a NOTICE: only the primary is installed.
+	if got, want := dirNames(t, dir), []string{sentinelName, toolName}; !slices.Equal(got, want) {
+		t.Errorf("the published version directory holds %v, want %v", got, want)
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, sentinelName))
 	if err != nil {
@@ -76,8 +75,8 @@ func TestArchiveURLRendersBothPlaceholders(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := newFakeEnv(t)
 			m := env.manager(func(c *Config) { c.goarch = tc.goarch })
-			if got := m.archiveURL(); got != tc.want {
-				t.Errorf("archiveURL() = %q, want %q", got, tc.want)
+			if got := m.archiveURL; got != tc.want {
+				t.Errorf("archiveURL = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -85,14 +84,14 @@ func TestArchiveURLRendersBothPlaceholders(t *testing.T) {
 	t.Run("Config.URLTemplate overrides the release's", func(t *testing.T) {
 		env := newFakeEnv(t)
 		m := env.manager(func(c *Config) { c.URLTemplate = "http://mirror.invalid/{arch}/{version}/a.zip" })
-		if got, want := m.archiveURL(), "http://mirror.invalid/x86_64-linux/2.14.2/a.zip"; got != want {
-			t.Errorf("archiveURL() = %q, want %q", got, want)
+		if got, want := m.archiveURL, "http://mirror.invalid/x86_64-linux/2.14.2/a.zip"; got != want {
+			t.Errorf("archiveURL = %q, want %q", got, want)
 		}
 	})
 }
 
 // TestEnsureDigestMismatchPlacesNothing pins the refusal: a body that does not
-// match the pinned digest yields a typed ErrDigestMismatch, and NOTHING is placed
+// match the pinned digest yields the SHA-256 mismatch error, and NOTHING is placed
 // under the installation root -- no version directory, no staging tree.
 // Verification happens before anything reaches the persistent volume, so a mismatch
 // cannot leave a candidate behind for a later start to trust.
@@ -110,9 +109,6 @@ func TestEnsureDigestMismatchPlacesNothing(t *testing.T) {
 	}
 	if entries, rerr := os.ReadDir(env.versionsRoot()); rerr == nil && len(entries) != 0 {
 		t.Errorf("installation root holds %v, want nothing placed on a digest mismatch", entries)
-	}
-	if env.countCalls("installer") != 0 {
-		t.Error("the archive's installer ran despite the digest mismatch")
 	}
 	if ready, why := m.Ready(); ready || why != ReasonInstalling {
 		t.Errorf("Ready() = (%v, %v), want (false, %v)", ready, why, ReasonInstalling)
@@ -175,14 +171,9 @@ func TestEnsureSyncFailureAtEveryProtocolPointRetainsPreviousVersion(t *testing.
 		// entry, which the next start re-probes.
 		published bool
 	}{
-		"a required artifact": {
+		"the artifact": {
 			match: func(_, path string) bool {
 				return filepath.Base(path) == toolName && strings.Contains(path, stagePrefix)
-			},
-		},
-		"an optional artifact": {
-			match: func(_, path string) bool {
-				return filepath.Base(path) == toolExtra && strings.Contains(path, stagePrefix)
 			},
 		},
 		"the completion sentinel": {
@@ -276,11 +267,11 @@ func TestEnsurePublishRenameFailureKeepsPreviousActive(t *testing.T) {
 // is left for a later start to trust.
 func TestEnsureFailedInstallWithNoPreviousVersionIsUnready(t *testing.T) {
 	env := newFakeEnv(t)
-	env.installerFails = true
+	env.archiveLacksArtifacts = true
 	m := env.manager()
 
 	if err := m.Ensure(t.Context()); err == nil {
-		t.Fatal("Ensure returned nil although the installer produced nothing")
+		t.Fatal("Ensure returned nil although the archive held no artifact")
 	}
 	if ready, why := m.Ready(); ready || why != ReasonInstalling {
 		t.Errorf("Ready() = (%v, %v), want (false, %v)", ready, why, ReasonInstalling)
@@ -328,10 +319,10 @@ func TestEnsureRefusesToPublishWhenARequiredAssertionFails(t *testing.T) {
 	}
 }
 
-// TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts pins that the
-// artifacts come straight out of ArtifactDir in the archive, nothing else from it
+// TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifact pins that the
+// artifact comes straight out of ArtifactDir in the archive, nothing else from it
 // is published, and NO subprocess runs except the version probe and the assertions.
-func TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts(t *testing.T) {
+func TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifact(t *testing.T) {
 	env := newFakeEnv(t)
 	env.release.ArtifactDir = "payload"
 	env.useArchive(buildZip(t, map[string]zipEntry{
@@ -339,7 +330,7 @@ func TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts(t *testing.T) {
 		"payload/" + toolSidecar: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 		"payload/NOTICE":         {body: "docs\n", mode: 0o644},
 	}))
-	m := env.manager(func(c *Config) { c.Optional = nil })
+	m := env.manager()
 
 	if err := m.Ensure(t.Context()); err != nil {
 		t.Fatalf("Ensure: %v", err)
@@ -351,14 +342,8 @@ func TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts(t *testing.T) {
 			t.Errorf("unexpected boundary crossing %q", call)
 		}
 	}
-	dir := env.versionDir(pinnedVersion)
-	for _, name := range []string{toolName, toolSidecar, sentinelName} {
-		if !exists(filepath.Join(dir, name)) {
-			t.Errorf("%s missing from the published version directory", name)
-		}
-	}
-	if exists(filepath.Join(dir, "NOTICE")) {
-		t.Error("a non-artifact archive entry was published into the version directory")
+	if got, want := dirNames(t, env.versionDir(pinnedVersion)), []string{sentinelName, toolName}; !slices.Equal(got, want) {
+		t.Errorf("the published version directory holds %v, want only %v", got, want)
 	}
 	if ready, why := m.Ready(); !ready {
 		t.Errorf("Ready() = false (%s), want true", why)
@@ -498,33 +483,6 @@ func TestCopyWithStallGuardAbortsAStalledTransfer(t *testing.T) {
 	}
 }
 
-// TestEnsureInstallsEveryOptionalArtifactAnArchiveProvides pins the Optional contract
-// on the ordinary shape for a package whose extras ship in the same archive: more
-// optional artifacts than required ones. "Installed when the archive provides it" is
-// the contract Optional's own doc states, and it is per artifact rather than per
-// archive.
-func TestEnsureInstallsEveryOptionalArtifactAnArchiveProvides(t *testing.T) {
-	const secondExtra = "toolkit-doc"
-	env := newEnv(t, toolRelease(), nil, nil, []string{toolSidecar, toolExtra, secondExtra})
-	env.produces = map[string]string{
-		toolName:    pinnedVersion,
-		toolSidecar: pinnedVersion,
-		toolExtra:   pinnedVersion,
-		secondExtra: pinnedVersion,
-	}
-	m := env.manager()
-
-	if err := m.Ensure(t.Context()); err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	dir := env.versionDir(pinnedVersion)
-	for _, name := range []string{toolName, toolSidecar, toolExtra, secondExtra} {
-		if !exists(filepath.Join(dir, name)) {
-			t.Errorf("%s missing from the published version directory", name)
-		}
-	}
-}
-
 // TestCopyWithStallGuardKeepsASlowButProgressingTransfer pins the other side of the
 // watchdog. The bound is LACK of progress, not elapsed time, so a transfer slower than
 // the window overall must run to completion: aborting it would turn the guard back into
@@ -656,8 +614,7 @@ func TestWriteFileDurablyLeavesNoTempOnFailure(t *testing.T) {
 
 // TestExecRunnerBoundsAndIsolatesASubprocess pins the production runner, the one
 // boundary the harness replaces everywhere else. Every subprocess this library
-// spawns — the archive's installer, the version probe, every assertion — goes
-// through it, so its three properties are worth pinning directly: the argv is
+// spawns, the version probe and every assertion, goes through it, so its three properties are worth pinning directly: the argv is
 // passed as separate elements with no shell in the path, the extra environment is
 // appended rather than replacing the process environment, and the timeout bounds a
 // command that never returns.
@@ -753,15 +710,12 @@ func TestExecRunnerBoundsAndIsolatesASubprocess(t *testing.T) {
 	})
 }
 
-// TestPublishClearsASymlinkedDestinationThroughTheRoot pins the confinement of the one
-// delete in this package that used to bypass it.
-//
-// publish clears the pinned version directory before renaming the staged tree into place,
-// and that entry is the one entry there another principal may have replaced — it is
-// reachable precisely when the probe rejected what was sitting under an intact sentinel. So
-// the delete goes through an [os.Root] on the installation root, like every other removal
-// inside the tree, and a symlink at that name is unlinked rather than followed: what it
-// points at is outside the tree and is not this package's to delete.
+// TestPublishClearsASymlinkedDestinationThroughTheRoot pins the confinement of the
+// delete publish runs before renaming the staged tree into place. The pinned
+// directory is the one entry another principal may have replaced, reachable when
+// the probe rejected what sat under an intact sentinel, so the delete goes through
+// an [os.Root] and a symlink at that name is unlinked rather than followed: its
+// target is outside the tree and not this package's to delete.
 func TestPublishClearsASymlinkedDestinationThroughTheRoot(t *testing.T) {
 	env := newFakeEnv(t)
 	// A tree outside the installation root, with something in it that must survive.
@@ -802,18 +756,12 @@ func TestPublishClearsASymlinkedDestinationThroughTheRoot(t *testing.T) {
 }
 
 // TestMoveArtifactRefusesASymlinkedSourceDirectory pins the artifact move inside the
-// staging tree.
-//
-// The source directory is the extracted archive. os.Root PERMITS creating a symlink
-// whose target leaves the root (it validates the name being created, not the text the
-// link carries) and refuses to FOLLOW one, so an archive symlink can leave one at
-// ArtifactDir.
-//
-// Before the confinement, filepath.Join followed it and os.Rename moved a file from
-// outside the staging tree INTO the version directory this package is about to
-// publish — which makes the one claim everything here reduces to (the artifact came
-// out of the digest-verified archive) false, and destroys the file at its original
-// location, since a rename is not a copy.
+// staging tree. os.Root permits creating a symlink whose target leaves the root (it
+// validates the name created, not the link text) and refuses to follow one, so an
+// archive can leave one at ArtifactDir. Followed, the rename would move a file from
+// outside the staging tree into the version directory about to be published: the
+// artifact would no longer come from the verified archive, and the original file
+// would be gone, since a rename is not a copy.
 func TestMoveArtifactRefusesASymlinkedSourceDirectory(t *testing.T) {
 	env := newFakeEnv(t)
 	stage := t.TempDir()
@@ -838,7 +786,7 @@ func TestMoveArtifactRefusesASymlinkedSourceDirectory(t *testing.T) {
 		t.Fatalf("MkdirAll the staged version directory: %v", err)
 	}
 
-	to, err := env.manager().moveArtifact(root, srcRel, toolName)
+	to, err := env.manager().moveArtifact(root, srcRel)
 	if err == nil {
 		t.Errorf("moveArtifact = %q, want a refusal: the source directory leaves the staging tree", to)
 	} else if !strings.Contains(err.Error(), "not reachable inside the staging tree") {

@@ -169,10 +169,12 @@ type Manager struct {
 	trust custody.Trust
 	log   *slog.Logger
 
+	// archiveURL is the pinned archive's absolute URL, both placeholders
+	// substituted. The version is pinned rather than a floating "latest" so a
+	// deployment is reproducible and the digest check is meaningful.
+	archiveURL  string
 	format      string
-	archToken   string
 	digest      string
-	urlTemplate string
 	primary     string
 	versionsDir string
 	// stateName is the state record's single path component under Root, which is
@@ -212,8 +214,8 @@ type Manager struct {
 }
 
 // New validates cfg and returns a manager. It resolves the architecture from
-// runtime.GOARCH, requires a well-formed digest for it, and refuses a config
-// with no Required assertion. Nothing the manager keeps shares memory with
+// runtime.GOARCH, requires a well-formed digest for it and an archive URL whose
+// extension names a format, and refuses a config with no Required assertion. Nothing the manager keeps shares memory with
 // cfg: the snapshot is taken before validation, so what was validated is what
 // the manager uses.
 func New(cfg *Config) (*Manager, error) {
@@ -241,9 +243,13 @@ func New(cfg *Config) (*Manager, error) {
 	if err := validateDigest(digest); err != nil {
 		return nil, fmt.Errorf("pin: %s digest: %w", goarch, err)
 	}
-	format, _ := formatOf(c.URLTemplate)
+	resolved := strings.NewReplacer(versionPlaceholder, c.Version, archPlaceholder, token).Replace(c.URLTemplate)
+	format, ok := formatOf(resolved)
+	if !ok {
+		return nil, fmt.Errorf("pin: URLTemplate resolves to %q for %s, whose last path segment must end in .zip, .tar, .tar.gz, .tgz, .tar.bz2, .tbz2 or .tbz",
+			resolved, goarch)
+	}
 	c.goarch = goarch
-	c.Require = withPrimaryArtifact(c.Require, c.Name)
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = defaultMaxAttempts
 	}
@@ -257,12 +263,11 @@ func New(cfg *Config) (*Manager, error) {
 		sleep:       sleepCtx,
 		installed:   map[string]bool{},
 		cfg:         c,
-		trust:       custody.Trust{UIDs: slices.Clone(c.TrustedUIDs)},
+		trust:       custody.Trust{UIDs: c.TrustedUIDs},
 		log:         cmp.Or(c.Logger, slog.Default()),
 		format:      format,
-		archToken:   token,
 		digest:      digest,
-		urlTemplate: c.URLTemplate,
+		archiveURL:  resolved,
 		primary:     c.Name,
 		versionsDir: filepath.Join(c.Root, c.Name+versionsSuffix),
 		stateName:   c.Name + stateSuffix,
@@ -357,10 +362,9 @@ func (m *Manager) finish(ctx context.Context, sel selection, installErr error) e
 	if m.mayMutateTree() {
 		m.markActivated(sel.version)
 		m.publishConvenienceLinks(sel)
-		// Pruning runs only after a successful install, and therefore only after
-		// publish has synced the parent directory. A FAILED install prunes nothing:
-		// the versions on the volume are the fallback set that makes the failure
-		// survivable.
+		// A failed install prunes nothing: the versions on the volume are the
+		// fallback set that makes the failure survivable. Every other run prunes,
+		// a rescan and a start that found the pin installed included.
 		if installErr == nil {
 			m.pruneSuperseded(ctx, sel.version)
 		}
@@ -558,10 +562,11 @@ func pathEnv(entry string) []string {
 }
 
 // binPathEnv leads PATH with bin's own directory under [pathEnv]'s rule. Every
-// command run against an installed or staged binary carries it, because a
-// primary executable may resolve its sidecars by bare name on PATH (kiro-cli
-// settings execs kiro-cli-chat that way). exec.Cmd keeps the last of duplicate
-// Env entries, so the caller's environment still applies.
+// command run against an installed or staged binary carries it, so the probe
+// and the assertions run the binary under the PATH a consumer gives it through
+// [Manager.PathEnv]: a bare-name exec it makes finds its own version directory
+// first. exec.Cmd keeps the last of duplicate Env entries, so the caller's
+// environment still applies.
 func binPathEnv(bin string) []string {
 	return pathEnv(filepath.Dir(bin))
 }

@@ -59,11 +59,3 @@ func (m *Manager) custodyVerdict() error {
 	defer m.mu.Unlock()
 	return m.custodyErr
 }
-
-// trustHint points at TrustedUIDs while the caller has declared none.
-func (m *Manager) trustHint() string {
-	if len(m.cfg.TrustedUIDs) > 0 {
-		return ""
-	}
-	return ". If that user is already privileged on this host, declare it in TrustedUIDs"
-}
