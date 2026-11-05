@@ -177,7 +177,7 @@ func TestExtractAndSwap_verifiesTheStoredModeOfThePublishedVersionTree(t *testin
 	}
 
 	spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "rg"}}}
-	versDir, _, err := in.extractAndSwap(t.Context(), "rg", "1.0.0", spec, artifact)
+	versDir, _, err := in.extractAndSwap(t.Context(), "rg", "1.0.0", spec, openArtifact(t, artifact))
 	if err != nil {
 		t.Fatalf("extractAndSwap: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t 
 			t.Fatal(err)
 		}
 		liveSpec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "tool"}}}
-		versDir, declared, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", liveSpec, live)
+		versDir, declared, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", liveSpec, openArtifact(t, live))
 		if err != nil {
 			t.Fatalf("baseline publish: %v", err)
 		}
@@ -803,7 +803,7 @@ func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t 
 			t.Fatal(err)
 		}
 
-		_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+		_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, artifact))
 		if err == nil || !strings.Contains(err.Error(), "missing after extract") {
 			t.Fatalf("reinstall from a defective artifact = %v, want the missing declared file refused", err)
 		}
@@ -834,7 +834,7 @@ func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t 
 			t.Fatal(err)
 		}
 
-		_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+		_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, artifact))
 		if err == nil || !strings.Contains(err.Error(), "missing after extract") {
 			t.Fatalf("install from a defective artifact = %v, want the missing declared file refused", err)
 		}
@@ -880,7 +880,7 @@ func TestExtractAndSwap_RefusesADeclaredNameThatIsNotAPathComponent(t *testing.T
 			}
 			spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: name}}}
 
-			_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+			_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, artifact))
 			if err == nil || !strings.Contains(err.Error(), "not a path component") {
 				t.Fatalf("extractAndSwap(name %q) = %v, want the name refused", name, err)
 			}
@@ -905,7 +905,7 @@ func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *test
 	if err := os.WriteFile(first, []byte("#!/bin/sh\necho live\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	versDir, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, first)
+	versDir, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, first))
 	if err != nil {
 		t.Fatalf("baseline publish: %v", err)
 	}
@@ -923,7 +923,7 @@ func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *test
 		t.Fatal(err)
 	}
 
-	_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, second)
+	_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, second))
 	if err == nil || !strings.Contains(err.Error(), "commit install") {
 		t.Fatalf("reinstall = %v, want the commit barrier failure", err)
 	}

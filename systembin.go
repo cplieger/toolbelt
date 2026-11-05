@@ -74,9 +74,8 @@ func systemCommand(ctx context.Context, name string, args ...string) (*exec.Cmd,
 // systemEnvPATH returns an environment whose PATH is the trusted set alone, for
 // a child needing nothing from the managed tree.
 //
-// Pinning argv[0] does not pin what the child resolves: /usr/bin/gunzip is a
-// #!/bin/sh script calling gzip by bare name, and GNU tar shells out to its own
-// decompressor.
+// Pinning argv[0] does not pin what the child resolves: a system binary can be
+// a script calling others by bare name (/usr/bin/gunzip calls gzip).
 func systemEnvPATH() []string {
 	return []string{"PATH=" + strings.Join(systemBinDirs, string(os.PathListSeparator))}
 }
