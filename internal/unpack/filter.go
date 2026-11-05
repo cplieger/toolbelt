@@ -39,10 +39,9 @@ func (c *stderrCap) suffix() string {
 	return ": " + s
 }
 
-// filtered runs consume over the output of the system decompressor name fed
-// with src, and reaps the decompressor on every return. Output after consume
-// returns is read through the same meter, so a filter that never stops
-// writing ends at the byte limit.
+// filtered runs consume, which must read to the end of its stream, over the
+// output of the system decompressor name fed with src, and reaps the
+// decompressor on every return.
 func (x *extractor) filtered(ctx context.Context, filter FilterFunc, name string, src io.Reader, consume func(io.Reader) error) error {
 	if filter == nil {
 		return fmt.Errorf("unpack: %s: no decompression filter is configured", name)
@@ -54,25 +53,28 @@ func (x *extractor) filtered(ctx context.Context, filter FilterFunc, name string
 		return fmt.Errorf("unpack: %s: %w", name, err)
 	}
 	var stderr stderrCap
+	// stdout is an io.Pipe, not StdoutPipe: exec then copies it in a goroutine
+	// WaitDelay can cut, so a descendant holding stdout cannot block the drain.
+	out, pw := io.Pipe()
 	cmd.Stdin = src
+	cmd.Stdout = pw
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = filterWaitDelay
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("unpack: %s: %w", name, err)
-	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("unpack: %s: %w", name, err)
 	}
-	stream := x.stream(out)
-	uerr := consume(stream)
-	if uerr == nil {
-		_, uerr = io.Copy(io.Discard, stream)
+	waited := make(chan error, 1)
+	go func() {
+		werr := cmd.Wait()
+		_ = pw.Close()
+		waited <- werr
+	}()
+	// consume reads to the end of the stream, so a filter that never stops
+	// writing ends at the byte limit.
+	if uerr := consume(x.stream(out)); uerr != nil {
+		return reapFailed(ctx, cmd, out, waited, cancel, name, &stderr, uerr)
 	}
-	if uerr != nil {
-		return reapFailed(ctx, cmd, out, cancel, name, &stderr, uerr)
-	}
-	werr := cmd.Wait()
+	werr := <-waited
 	cancel()
 	switch {
 	case ctx.Err() != nil:
@@ -89,12 +91,13 @@ func (x *extractor) filtered(ctx context.Context, filter FilterFunc, name string
 // gets filterWaitDelay to exit with its own status: a non-zero exit is the
 // cause, and its status and stderr lead the error. Any other failure is this
 // package's decision, so the filter is killed and its status dropped.
-func reapFailed(ctx context.Context, cmd *exec.Cmd, out io.Closer, cancel context.CancelFunc, name string, stderr *stderrCap, uerr error) error {
+func reapFailed(ctx context.Context, cmd *exec.Cmd, out io.Closer, waited <-chan error, cancel context.CancelFunc, name string, stderr *stderrCap, uerr error) error {
 	se, isRead := errors.AsType[*streamError](uerr)
 	if !isRead {
 		cancel()
 		_ = out.Close()
-		_ = cmd.Wait()
+		killed := <-waited
+		_ = killed // the kill this function caused
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -102,7 +105,8 @@ func reapFailed(ctx context.Context, cmd *exec.Cmd, out io.Closer, cancel contex
 	}
 	_ = out.Close()
 	kill := time.AfterFunc(filterWaitDelay, cancel)
-	_ = cmd.Wait()
+	exited := <-waited
+	_ = exited // cmd.ProcessState carries the status
 	kill.Stop()
 	cancel()
 	if err := ctx.Err(); err != nil {

@@ -195,8 +195,8 @@ func (m *meter) Read(p []byte) (int, error) {
 	if *m.total > m.limit {
 		return 0, m.exceeded()
 	}
-	if room := m.limit - *m.total + 1; int64(len(p)) > room {
-		p = p[:room]
+	if room := m.limit - *m.total; int64(len(p))-1 > room {
+		p = p[:room+1]
 	}
 	n, err := m.r.Read(p)
 	*m.total += int64(n)

@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -691,5 +692,170 @@ func TestCheckTree(t *testing.T) {
 				t.Errorf("checkTree = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestFilter_DescendantHoldingStdout pins R4.7 for a descendant that keeps
+// the filter's stdout open: the call returns within the 2 s WaitDelay.
+func TestFilter_DescendantHoldingStdout(t *testing.T) {
+	t.Parallel()
+	t.Run("Archive", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeFilter(t, `cat "$1"; sleep 30 &`, tarOf(t, reg("tool", "x", 0o755)))
+		took, err := filterArchive(t, f.run, oneMiB)
+		if err != nil || took > 5*time.Second {
+			t.Errorf("Archive = %v after %v, want nil within 5s", err, took)
+		}
+	})
+	t.Run("Single", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeFilter(t, `cat "$1"; sleep 30 &`, []byte("binary"))
+		root, err := os.OpenRoot(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer root.Close()
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		start := time.Now()
+		err = Single(ctx, io.NewSectionReader(strings.NewReader("x"), 0, 1), formatXz, root, "tool", oneMiB, f.run)
+		if took := time.Since(start); err != nil || took > 5*time.Second {
+			t.Errorf("Single = %v after %v, want nil within 5s", err, took)
+		}
+	})
+}
+
+// TestArchive_ChecksTheGzipTrailer pins that a tar.gz whose content was
+// corrupted after compression is refused by gzip's CRC, which sits after
+// tar's end-of-archive blocks.
+func TestArchive_ChecksTheGzipTrailer(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.NoCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zw.Write(tarOf(t, reg("tool", "echo genuine\n", 0o755))); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	i := bytes.Index(data, []byte("echo genuine"))
+	if i < 0 {
+		t.Fatal("INVALID: stored gzip does not hold the content verbatim")
+	}
+	data[i+5] = 'G'
+	_, err = extract(t, formatTarGz, data, generous)
+	if err == nil || !strings.Contains(err.Error(), "gzip: invalid checksum") {
+		t.Errorf("Archive = %v, want the gzip checksum refusal", err)
+	}
+}
+
+// TestArchive_SkipsAGlobalHeader pins that git archive's pax global header
+// (its commit id) is metadata, not an entry.
+func TestArchive_SkipsAGlobalHeader(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeXGlobalHeader, Name: "pax_global_header", PAXRecords: map[string]string{"comment": "0123abcd"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "a", Mode: 0o644}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dst, err := extract(t, formatTar, buf.Bytes(), generous)
+	if err != nil {
+		t.Fatalf("Archive = %v, want nil", err)
+	}
+	entries, err := os.ReadDir(dst)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "a" {
+		t.Errorf("dst holds %v, %v; want a alone", entries, err)
+	}
+}
+
+// TestArchive_DirectoryModeIgnoresTheUmask changes the process umask, so it
+// is not parallel: parallel tests wait until sequential ones finish.
+func TestArchive_DirectoryModeIgnoresTheUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	dst, err := extract(t, formatTar, tarOf(t, dir("d/"), reg("e/f", "x", 0o644)), generous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{"d", "e"} {
+		if got := lstatMode(t, filepath.Join(dst, d)); got != fs.ModeDir|0o755 {
+			t.Errorf("%s: mode %v under umask 077, want drwxr-xr-x", d, got)
+		}
+	}
+}
+
+func TestArchive_RefusesAnOverlongZipSymlinkTarget(t *testing.T) {
+	t.Parallel()
+	_, err := extract(t, formatZip, zipOf(t, sym("l", strings.Repeat("a", maxLinkTarget+1))), generous)
+	if err == nil || !strings.Contains(err.Error(), "symlink target is over 4096 bytes") {
+		t.Errorf("Archive = %.120v, want the target length refused", err)
+	}
+}
+
+func TestSingle_SanitizesErrors(t *testing.T) {
+	t.Parallel()
+	f := newFakeFilter(t, `printf '\033[31m\nbad' >&2; exit 1`, nil)
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	err = Single(t.Context(), io.NewSectionReader(strings.NewReader("x"), 0, 1), formatXz, root, "tool", oneMiB, f.run)
+	if err == nil || strings.ContainsAny(err.Error(), "\x1b\n") || !strings.Contains(err.Error(), "bad") {
+		t.Errorf("Single = %q, want the filter's stderr on one line with no escape", err)
+	}
+}
+
+// cancelAfter reports no error for its first n Err calls, then Canceled.
+type cancelAfter struct {
+	context.Context
+	n int
+}
+
+func (c *cancelAfter) Err() error {
+	if c.n == 0 {
+		return context.Canceled
+	}
+	c.n--
+	return nil
+}
+
+// TestArchive_ZipStopsWhenCancelled uses directory entries, which read
+// nothing through the meter, so only the per-entry check sees the cancel.
+func TestArchive_ZipStopsWhenCancelled(t *testing.T) {
+	t.Parallel()
+	data := zipOf(t, dir("a/"), dir("b/"), dir("c/"))
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx := &cancelAfter{Context: t.Context(), n: 2}
+	err = Archive(ctx, io.NewSectionReader(bytes.NewReader(data), 0, int64(len(data))), formatZip, root, generous, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Archive = %v, want context.Canceled", err)
+	}
+	if _, serr := root.Lstat("c"); !errors.Is(serr, fs.ErrNotExist) {
+		t.Errorf("c was extracted after the cancellation: %v", serr)
+	}
+}
+
+// TestMeter_HandlesAnUnboundedLimit pins that the largest limit does not
+// overflow the read cap.
+func TestMeter_HandlesAnUnboundedLimit(t *testing.T) {
+	t.Parallel()
+	_, err := extract(t, formatTar, tarOf(t, reg("a", "x", 0o644)), Limits{MaxBytes: 1<<63 - 1, MaxEntries: 10})
+	if err != nil {
+		t.Errorf("Archive = %v, want nil", err)
 	}
 }

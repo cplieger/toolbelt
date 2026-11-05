@@ -511,10 +511,9 @@ func ownerOf(t *testing.T, path string) (uid, gid int) {
 	return int(st.Uid), int(st.Gid)
 }
 
-// TestExtractArtifact_RawEnforcesTheStoredExecutableMode pins that a plain
-// binary lands as binExecMode whatever mode the download carries: it is
-// published as bin/<name> on PATH next, where 0775 is writable by a group.
-func TestExtractArtifact_RawEnforcesTheStoredExecutableMode(t *testing.T) {
+// TestExtractArtifact_RawLandsAsBinExecMode pins that a plain binary lands
+// with its bytes and as binExecMode whatever mode the download carries.
+func TestExtractArtifact_RawLandsAsBinExecMode(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	destDir := filepath.Join(base, "dest")

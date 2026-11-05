@@ -119,13 +119,9 @@ func extractArtifact(ctx context.Context, artifact *io.SectionReader, format, de
 		})
 	case formatRaw, formatGz, formatBz2, formatXz, formatZst:
 		name := filepath.Base(binName)
-		err := withRoot(destDir, func(root *os.Root) error {
+		return withRoot(destDir, func(root *os.Root) error {
 			return unpack.Single(ctx, artifact, format, root, name, lim, filterCommand)
 		})
-		if err != nil {
-			return err
-		}
-		return enforceExecutable(filepath.Join(destDir, name))
 	default:
 		return fmt.Errorf("unsupported archive format %q", format)
 	}
@@ -154,18 +150,12 @@ func filterCommand(ctx context.Context, name string, args ...string) (*exec.Cmd,
 // anyone who can reach the tools dir, writable only by its owner.
 const binExecMode os.FileMode = 0o755
 
-// enforceExecutable makes path runnable and PROVES the filesystem stored
-// exactly binExecMode, refusing the install when it stored anything else.
-//
-// A pathname chmod is only a REQUEST: a filesystem with an inheritable
-// group ACE can override it (measured on ZFS nfs4acl, a 0o600 create
-// comes back 0770), and a 0775 binary published to bin/ on PATH is then
-// writable by its whole group. filesafe.EnforceMode fchmods and fstats
-// the SAME descriptor, so it cannot certify a different file than it
-// chmod'd (a chmod-name-then-stat-name sequence can, if the name is
-// swapped in between). O_NOFOLLOW makes the kernel refuse a symlink at
-// the final component rather than follow it. O_NONBLOCK avoids blocking
-// forever opening a FIFO tar recreated with no writer.
+// enforceExecutable makes path binExecMode and proves the filesystem stored
+// exactly that, refusing the install otherwise: a chmod is only a request, and
+// an inheritable group ACE can widen it (measured on ZFS nfs4acl, a 0o600
+// create comes back 0770). filesafe.EnforceMode fchmods and fstats the same
+// descriptor, so it certifies the file it changed. O_NOFOLLOW refuses a
+// symlink at the name and O_NONBLOCK keeps a FIFO there from blocking the open.
 func enforceExecutable(path string) error {
 	return enforceStoredMode(path, binExecMode, 0)
 }
@@ -196,15 +186,11 @@ func enforceStoredMode(path string, mode os.FileMode, extraFlags int) error {
 	return err
 }
 
-// insideStrictly reports whether target lies STRICTLY beneath root:
-// lexically within the tree, and not root itself.
-//
-// pathinside.Root.Contains admits root as part of its own tree by
-// contract; the equality check here is this package's own rule, because
-// resolveDeclaredFiles chmods the result and it is published as bin/<name>,
-// so a registry entry naming the version directory itself must be
-// refused. The judgment is LEXICAL — resolveDeclaredFiles resolves with
-// filepath.EvalSymlinks first and tests the resolved path.
+// insideStrictly reports whether target lies lexically beneath root and is
+// not root itself: pathinside.Root.Contains admits root, but the result is
+// chmodded and published as bin/<name>, so a registry entry naming the
+// version directory must be refused. resolveDeclaredFiles resolves symlinks
+// with filepath.EvalSymlinks first and tests the resolved path.
 func insideStrictly(root pathinside.Root, target string) bool {
 	return root.Contains(target) && filepath.Clean(target) != filepath.Clean(string(root))
 }

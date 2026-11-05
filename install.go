@@ -395,8 +395,8 @@ func (in *installer) stageArtifact(ctx context.Context, name, version string, sp
 }
 
 // publishStaged swaps the staged tree in as the live version directory and
-// stamps it with the current time, which retention ranks predecessors by: a rename
-// keeps the staged root's mtime, which an archive's "./" member may have set.
+// stamps it with the current time, which retention ranks predecessors by: a
+// rename keeps the staged root's mtime.
 func (in *installer) publishStaged(name, version, staging, versDir string) error {
 	backup := residue(versDir, backupSuffix)
 	if err := os.RemoveAll(backup); err != nil {

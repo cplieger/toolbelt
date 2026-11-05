@@ -52,12 +52,12 @@ func (x *extractor) count() error {
 func (x *extractor) untar(stream io.Reader) error {
 	tr := tar.NewReader(stream)
 	for {
-		if err := x.ctxErr(); err != nil {
-			return err
-		}
-		hdr, err := tr.Next()
+		hdr, err := tr.Next() // reads through the meter, which checks ctx
 		if errors.Is(err, io.EOF) {
-			return nil
+			// Read past the end-of-archive blocks so a decompressor checks its
+			// trailer (gzip's CRC and length); the meter counts what follows.
+			_, err = io.Copy(io.Discard, stream)
+			return err
 		}
 		if err != nil {
 			return tagRead(err)
