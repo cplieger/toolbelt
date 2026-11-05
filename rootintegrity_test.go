@@ -126,7 +126,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 		"tools dir is group-writable": {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, toolsDir)
-				groupWritable(t, toolsDir, 0o775)
+				chmod(t, toolsDir, 0o775)
 				return []wantFinding{{toolsDir, "mode 0775, can be modified by gid"}}
 			},
 		},
@@ -134,7 +134,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				dir := filepath.Join(toolsDir, "python", "interpreters")
 				mkdirs(t, configDir, dir)
-				groupWritable(t, dir, 0o775)
+				chmod(t, dir, 0o775)
 				return []wantFinding{{dir, "mode 0775, can be modified by gid"}}
 			},
 		},
@@ -142,7 +142,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				dir := filepath.Join(toolsDir, "npm", "lib", "node_modules")
 				mkdirs(t, configDir, dir)
-				groupWritable(t, dir, 0o770)
+				chmod(t, dir, 0o770)
 				return []wantFinding{{dir, "mode 0770, can be modified by gid"}}
 			},
 		},
@@ -161,7 +161,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				dir := filepath.Join(toolsDir, "python", "tools")
 				mkdirs(t, configDir, dir)
-				groupWritable(t, dir, 0o770)
+				chmod(t, dir, 0o770)
 				return []wantFinding{{dir, "mode 0770, can be modified by gid"}}
 			},
 		},
@@ -177,6 +177,19 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				mkdirs(t, configDir, toolsDir)
 				chmod(t, configDir, 0o707)
 				return []wantFinding{{configDir, "mode 0707, can be modified by everyone"}}
+			},
+		},
+		"bin dir is writable by group 0": {
+			// gid 0 is trusted only above a managed root: a non-root member of
+			// group 0 could otherwise write the bin the engine executes.
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				if os.Getegid() != 0 {
+					t.Skip("needs gid 0 for the fixture's group")
+				}
+				bin := filepath.Join(toolsDir, "bin")
+				mkdirs(t, configDir, bin)
+				chmod(t, bin, 0o775)
+				return []wantFinding{{bin, "can be modified by gid 0"}}
 			},
 		},
 		"tools dir is owned by another user": {
@@ -313,9 +326,9 @@ func TestNew_VerifyRootIntegrityErrorIsClassifiable(t *testing.T) {
 	configDir := filepath.Join(root, "config")
 	toolsDir := filepath.Join(root, "tools")
 	mkdirs(t, configDir, filepath.Join(toolsDir, "bin"), filepath.Join(toolsDir, "npm"))
-	groupWritable(t, configDir, 0o770)
+	chmod(t, configDir, 0o770)
 	chmod(t, filepath.Join(toolsDir, "bin"), 0o777)
-	groupWritable(t, filepath.Join(toolsDir, "npm"), 0o775)
+	chmod(t, filepath.Join(toolsDir, "npm"), 0o775)
 
 	_, err := New(&Config{
 		ConfigDir: configDir, ToolsDir: toolsDir,
@@ -398,7 +411,7 @@ func TestNew_VerifyRootIntegrityLeavesNothingBehind(t *testing.T) {
 	configDir := filepath.Join(root, "config")
 	toolsDir := filepath.Join(root, "tools")
 	mkdirs(t, toolsDir)
-	groupWritable(t, toolsDir, 0o775)
+	chmod(t, toolsDir, 0o775)
 
 	before := runtime.NumGoroutine()
 	e, err := New(&Config{
@@ -460,7 +473,7 @@ func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
 			orig := probeWritable
 			t.Cleanup(func() { probeWritable = orig })
 			probeWritable = func(ctx context.Context, dir string, opts ...filesafe.Option) (filesafe.ProbeResult, error) {
-				groupWritable(t, widened, 0o770)
+				chmod(t, widened, 0o770)
 				return orig(ctx, dir, opts...)
 			}
 
@@ -551,18 +564,6 @@ func chmod(t *testing.T, path string, mode os.FileMode) {
 
 // strangerID is a uid and gid no test process holds.
 const strangerID = 54321
-
-// groupWritable sets mode on path and, as root, hands its group to strangerID:
-// root's own group 0 is trusted, so it would make the fixture vacuous.
-func groupWritable(t *testing.T, path string, mode os.FileMode) {
-	t.Helper()
-	if os.Geteuid() == 0 {
-		if err := os.Chown(path, -1, strangerID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	chmod(t, path, mode)
-}
 
 func symlink(t *testing.T, target, link string) {
 	t.Helper()

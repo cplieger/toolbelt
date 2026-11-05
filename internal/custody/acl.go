@@ -228,8 +228,8 @@ func readACL(path string) (*aclDialect, []byte, error) {
 		found, readErr := getxattrAll(path, dialect)
 		switch {
 		case readErr == nil && dialect.parse == nil:
-			return nil, nil, fmt.Errorf("%w: %s holds %s, %s. If the users allowed to write it are already privileged on this host, declare them in TrustedUIDs",
-				errACLDialectUnsupported, path, dialect.xattr, dialect.undecodable)
+			return nil, nil, fmt.Errorf("%w: %s holds %s, %s. Remove the list, or serve the directory over a filesystem that exposes %s",
+				errACLDialectUnsupported, path, dialect.xattr, dialect.undecodable, xattrNFS4XDR)
 		case readErr == nil:
 			return dialect, found, nil
 		case errors.Is(readErr, syscall.ENODATA), errors.Is(readErr, syscall.ENOTSUP),
@@ -481,22 +481,23 @@ func (t Trust) allowsOwner(uid, euid int) bool {
 	return uid == euid || uid == 0 || slices.Contains(t.UIDs, uid)
 }
 
-// allows reports whether p may write. Everyone never may. Group 0 may, though
-// its members do not hold root: refusing it would refuse every root:root 0775
-// ancestor (Debian's /usr/local), and the walk judges every ancestor.
-func (t Trust) allows(p principal, euid int) bool {
+// allows reports whether p may write. Everyone never may. Group 0 may write an
+// ancestor, though its members do not hold root, because the walk judges every
+// directory up to "/" and a root:root 0775 one is common; it may not write the
+// protected directory itself (leaf), which this process creates 0755.
+func (t Trust) allows(p principal, euid int, leaf bool) bool {
 	switch p.kind {
 	case principalUser:
 		return p.id == euid || p.id == 0 || slices.Contains(t.UIDs, p.id)
 	case principalGroup:
-		return p.id == 0
+		return p.id == 0 && !leaf
 	}
 	return false
 }
 
-func (t Trust) firstStranger(writers []principal, euid int) (principal, bool) {
+func (t Trust) firstStranger(writers []principal, euid int, leaf bool) (principal, bool) {
 	for _, p := range writers {
-		if !t.allows(p, euid) {
+		if !t.allows(p, euid, leaf) {
 			return p, true
 		}
 	}

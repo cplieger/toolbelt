@@ -99,9 +99,9 @@ type Config struct {
 	// Inventory's System group (informational; not managed).
 	System []string
 	// TrustedUIDs lists users, beside root and this process's uid, whose
-	// write access to a managed root or a directory above it
-	// VerifyRootIntegrity accepts: an account the operator knows is already
-	// privileged on the host. New rejects a negative entry.
+	// ownership of, or write access to, a managed root or a directory above
+	// it VerifyRootIntegrity accepts: an account the operator knows is
+	// already privileged on the host. New rejects a negative entry.
 	TrustedUIDs []int
 	// KeepVersions is how many SUPERSEDED versions of a tool to retain
 	// under <ToolsDir>/opt/<name>/ (the current version is always kept),

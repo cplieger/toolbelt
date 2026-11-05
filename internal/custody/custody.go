@@ -25,6 +25,12 @@ var errNoCustody = errors.New("not under this process's exclusive control")
 // sticky bit does not exempt; an ancestor's sticky bit does, unless its
 // access-control list lets another principal take it or rewrite the list.
 func (t Trust) Verify(dir string, leafIsRoot bool) error {
+	// The walk starts at "/": a relative path would stop at the working directory.
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("%w: resolving %s: %w", errNoCustody, dir, err)
+	}
+	dir = abs
 	euid := os.Geteuid()
 	path := dir
 	for range maxSymlinkHops + 1 {
@@ -110,7 +116,7 @@ func sharedSticky(path string, euid int, trust Trust) bool {
 	if err != nil {
 		return true
 	}
-	_, shared := trust.firstStranger(writers, euid)
+	_, shared := trust.firstStranger(writers, euid, false)
 	return shared
 }
 
@@ -161,7 +167,7 @@ func checkComponent(path string, euid int, leafIsRoot, parentShared bool, trust 
 		if ctlErr != nil {
 			return fmt.Errorf("%w: %w", errNoCustody, ctlErr)
 		}
-		if stranger, found := trust.firstStranger(controllers, euid); found {
+		if stranger, found := trust.firstStranger(controllers, euid, false); found {
 			return fmt.Errorf("%w: %s, mode %#o, is sticky, but its access-control list lets %s take its ownership or rewrite that list, and either removes the protection the sticky bit was providing%s",
 				errNoCustody, path, mode.Perm(), stranger, trust.hintFor(stranger))
 		}
@@ -171,7 +177,7 @@ func checkComponent(path string, euid int, leafIsRoot, parentShared bool, trust 
 	if err != nil {
 		return fmt.Errorf("%w: %w", errNoCustody, err)
 	}
-	if stranger, found := trust.firstStranger(writers, euid); found {
+	if stranger, found := trust.firstStranger(writers, euid, leafIsRoot); found {
 		return fmt.Errorf("%w: %s, mode %#o, can be modified by %s%s%s",
 			errNoCustody, path, mode.Perm(), stranger, stickyNote(mode, leafIsRoot), trust.hintFor(stranger))
 	}

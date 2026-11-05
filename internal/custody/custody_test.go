@@ -108,21 +108,63 @@ func TestVerifyCustodyRefusesAWritableComponent(t *testing.T) {
 	}
 }
 
-// TestVerifyCustodyAcceptsAGroupOnlyRootCanUse pins that a root:root 0775
-// directory passes: group 0 is trusted (Trust.allows).
-func TestVerifyCustodyAcceptsAGroupOnlyRootCanUse(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs to run as root for the root group to be the fixture's group")
+// TestVerifyCustodyTrustsGroupZeroOnlyAboveTheRoot pins that a root:root
+// 0775 ancestor passes and a root:root 0775 protected directory does not: a
+// non-root member of group 0 could write it.
+func TestVerifyCustodyTrustsGroupZeroOnlyAboveTheRoot(t *testing.T) {
+	if os.Geteuid() != 0 || os.Getegid() != 0 {
+		t.Skip("needs root for the fixture's group to be group 0")
 	}
-	root := filepath.Join(t.TempDir(), "pkg-versions")
+	parent := filepath.Join(t.TempDir(), "shared")
+	root := filepath.Join(parent, "pkg-versions")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.Chmod(root, 0o775); err != nil {
+	if err := os.Chmod(parent, 0o775); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
 	if err := (Trust{}).Verify(root, true); err != nil {
-		t.Fatalf("Verify refused a directory writable only by the root group: %v", err)
+		t.Fatalf("Verify refused a root under a root:root 0775 ancestor: %v", err)
+	}
+	if err := (Trust{}).Verify(parent, true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), "can be modified by gid 0") {
+		t.Fatalf("Verify(root:root 0775 protected directory) = %v, want gid 0 refused", err)
+	}
+}
+
+// TestVerifyCustodyJudgesARelativePathFromRoot pins that a relative path is
+// walked from "/", not from the working directory.
+func TestVerifyCustodyJudgesARelativePathFromRoot(t *testing.T) {
+	open := filepath.Join(t.TempDir(), "open")
+	if err := os.MkdirAll(filepath.Join(open, "work", "tools"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(open, "work"))
+	if err := (Trust{}).Verify("tools", true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), open+", mode 0777") {
+		t.Errorf("Verify(relative) = %v, want the world-writable ancestor above the working directory refused", err)
+	}
+}
+
+// TestVerifyCustodyExemptsAStickyDirectoryOnlyAsAnAncestor pins leafIsRoot:
+// a 1777 directory passes when judged as the parent of the tree and is
+// refused as the tree itself.
+func TestVerifyCustodyExemptsAStickyDirectoryOnlyAsAnAncestor(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Trust{}).Verify(dir, false); err != nil {
+		t.Errorf("Verify(1777, ancestor) = %v, want nil", err)
+	}
+	err := (Trust{}).Verify(dir, true)
+	if !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), "sticky bit stops") {
+		t.Errorf("Verify(1777, protected) = %v, want the refusal naming the sticky bit", err)
 	}
 }
 
@@ -342,11 +384,9 @@ func TestVerifyCustodyJudgesTheResolvedChain(t *testing.T) {
 	}
 }
 
-// TestVerifyCustodyJudgesTheDirectoryHoldingAnIntermediateSymlink pins the hops in the
-// MIDDLE of a chain, which had no judge at all while the resolution was delegated whole to
-// filepath.EvalSymlinks: the path as written was walked, the path it fully resolved to was
-// walked, and the directories holding every link in between were visited by EvalSymlinks
-// internally and then forgotten.
+// TestVerifyCustodyJudgesTheDirectoryHoldingAnIntermediateSymlink pins the
+// directory holding a link in the middle of a chain, which filepath.EvalSymlinks
+// would visit and discard, so a walk of the endpoints alone misses it.
 func TestVerifyCustodyJudgesTheDirectoryHoldingAnIntermediateSymlink(t *testing.T) {
 	base := t.TempDir()
 	priv := filepath.Join(base, "priv")
@@ -974,20 +1014,21 @@ func TestCheckSymlinkJudgesWhoOwnsTheLink(t *testing.T) {
 	}
 }
 
-// TestAllowsTrustsGroupZeroWithoutPrivilege is the unprivileged witness for the
-// gid-0 rule, whose end-to-end test skips unless the runner is root.
-func TestAllowsTrustsGroupZeroWithoutPrivilege(t *testing.T) {
+// TestAllowsTrustsGroupZeroOnlyInAnAncestor is the unprivileged witness for
+// the gid-0 rule, whose end-to-end tests need root.
+func TestAllowsTrustsGroupZeroOnlyInAnAncestor(t *testing.T) {
 	const euid = 1000
 	trust := Trust{}
-
-	if !trust.allows(principal{kind: principalGroup, id: 0}, euid) {
-		t.Error("group 0 is not trusted; refusing it turns a root:root 0775 ancestor into an install outage")
+	if !trust.allows(principal{kind: principalGroup, id: 0}, euid, false) {
+		t.Error("group 0 is not trusted in an ancestor")
 	}
-	// The neighbouring rules, so a mutant that widens this one is caught here too.
-	if trust.allows(principal{kind: principalGroup, id: 1}, euid) {
+	if trust.allows(principal{kind: principalGroup, id: 0}, euid, true) {
+		t.Error("group 0 is trusted in the protected directory, which its non-root members could then write")
+	}
+	if trust.allows(principal{kind: principalGroup, id: 1}, euid, false) {
 		t.Error("group 1 is trusted, but only group 0 is")
 	}
-	if trust.allows(principal{kind: principalEveryone}, euid) {
+	if trust.allows(principal{kind: principalEveryone}, euid, false) {
 		t.Error("everyone is trusted, which nothing may ever make true")
 	}
 }

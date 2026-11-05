@@ -29,7 +29,8 @@ type RootIntegrityFinding struct {
 	// ConfigDir, ToolsDir, or one of the directories beneath ToolsDir.
 	Path string
 	// Reason states the first thing that disqualified it, in operator
-	// terms ("is a symlink", "is group- or other-writable (mode 0775)").
+	// terms ("is a symlink", "is not under this process's exclusive
+	// control: /tools, mode 0775, can be modified by gid 1001").
 	Reason string
 }
 
@@ -65,9 +66,8 @@ func findingLines(findings []RootIntegrityFinding) []string {
 // verifyRootIntegrity inspects the managed roots and, when any of them
 // is unfit, logs the refusal where an operator will see it and returns
 // the *RootIntegrityError naming every one. Nil means every root that
-// exists is a real directory, writable by its owner alone, under the
-// exclusive control of this process (custody.Trust.Verify), that still
-// resolves inside the tool tree.
+// exists is a real directory under the exclusive control of this process
+// (custody.Trust.Verify) that still resolves inside the tool tree.
 func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string, trust custody.Trust) error {
 	findings := inspectRoots(configDir, toolsDir, trust)
 	if len(findings) == 0 {

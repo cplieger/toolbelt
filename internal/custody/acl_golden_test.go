@@ -459,14 +459,8 @@ func TestParsePOSIXACLNamesTheOwningGroupFromTheList(t *testing.T) {
 	}
 }
 
-// TestParsePOSIXACLExemptsOnlyOtherFromTheMask pins the split the OTHER fix rests on, which
-// the fix's own table could not: every case there omits the MASK entry, so posixMask returns
-// all-permissions and masked and unmasked are indistinguishable.
-//
-// OTHER is genuinely outside the mask in POSIX.1e -- the mask caps named entries and the
-// owning group, never OTHER -- so a write grant there counts however restrictive the mask
-// is. GROUP_OBJ is the opposite and must stay capped. Getting either backwards is a silent
-// error in one direction or the other, and the two are one line apart.
+// TestParsePOSIXACLExemptsOnlyOtherFromTheMask pins, with a mask present, that
+// other:: write counts however restrictive the mask and group:: stays capped.
 func TestParsePOSIXACLExemptsOnlyOtherFromTheMask(t *testing.T) {
 	const rwx, rw, rx = 7, 6, 5
 	const owningGid = 8888
@@ -519,13 +513,9 @@ func TestParsePOSIXACLExemptsOnlyOtherFromTheMask(t *testing.T) {
 	}
 }
 
-// TestControllersOfAnswersOnlyForNFSv4 pins both branches the sticky fix added and neither of
-// which had a witness: an unreadable list must propagate, and POSIX.1e must answer "nothing"
-// because the dialect genuinely cannot express either control grant -- chmod and chown stay
-// with the owner, whom the caller checks separately.
-//
-// The second half is the one worth pinning: answering "nothing" for POSIX.1e looks exactly
-// like a fail-open and is not one, so a later cycle needs to see the distinction stated.
+// TestControllersOfAnswersOnlyForNFSv4 pins that controllersOf propagates an
+// unreadable list and answers nothing for POSIX.1e, which cannot grant chmod or
+// chown: those stay with the owner the caller checks.
 func TestControllersOfAnswersOnlyForNFSv4(t *testing.T) {
 	const stranger = 4242
 	const rwx = 7
@@ -713,7 +703,7 @@ func TestReadACLRefusesTheStringPrincipalDialect(t *testing.T) {
 	blob := append(binary.BigEndian.AppendUint32(nil, 0), binary.BigEndian.AppendUint32(nil, 1)...)
 	blob = append(blob, []byte("\x00\x00\x00\x00root@example.com")...)
 
-	t.Run("readACL names the dialect and the knob", func(t *testing.T) {
+	t.Run("readACL names the dialect and the remedy", func(t *testing.T) {
 		old := getxattrFn
 		getxattrFn = serveOne(xattrNFS4ACL, blob)
 		defer func() { getxattrFn = old }()
@@ -728,7 +718,7 @@ func TestReadACLRefusesTheStringPrincipalDialect(t *testing.T) {
 		if !errors.Is(err, errACLUnreadable) {
 			t.Errorf("readACL error = %v, want it to wrap errACLUnreadable so existing matchers keep working", err)
 		}
-		for _, want := range []string{xattrNFS4ACL, "TrustedUIDs"} {
+		for _, want := range []string{xattrNFS4ACL, "Remove the list"} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("readACL error %q does not mention %s", err, want)
 			}

@@ -17,7 +17,7 @@ This page lists every `Config` field, the helpers that fill `Config.Refresh` fro
 | `System` | Binaries baked into your image, reported read-only in `Inventory` |
 | `KeepVersions` | How many replaced versions stay under `opt/<name>/` for rollback, the most recently installed first. 0 means the default of 1, and a negative value keeps none |
 | `VerifyRootIntegrity` | Refuse to start over an unsafe tools tree. Off by default. See below |
-| `TrustedUIDs` | Users whose write access the root integrity check accepts, beside root and the account the engine runs as: an account you know is already privileged on the host. A negative entry makes `New` fail |
+| `TrustedUIDs` | Users whose ownership of, or write access to, a checked directory the root integrity check accepts, beside root and the account the engine runs as: an account you know is already privileged on the host. A negative entry makes `New` fail |
 | `OnJobChanged` | Receives every job state change. Must not block. Nil is silent |
 | `OnJobOutput` | Receives a running job's output lines in batches. Must not block. Nil is silent |
 | `GitHubToken` | Returns the token for each `api.github.com` request, the engine's only token source. Nil or `""` sends none. An error fails the request. See [Security](security-model.md#network) |
@@ -32,8 +32,8 @@ An overlay patch carries display fields and `essential`, which makes the engine 
 With `VerifyRootIntegrity` set, `New` refuses to start when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `npm/lib`, `npm/lib/node_modules`, `python/`, `python/bin`, `python/tools` and `python/interpreters` exists and fails a check. A path that does not exist yet is skipped. Every listed path must:
 
 - be a directory and not a symlink, that the engine can inspect;
-- belong to root or to the account the engine runs as, and so must every directory above it, through every symlink on the way;
-- be writable by nobody else, by its mode or by a POSIX.1e or NFSv4 access-control list, and so must every directory above it. A sticky directory above it, such as `/tmp`, may be writable by others, unless its list lets another account take it or rewrite the list. Group 0 counts as root, and so does each user in `TrustedUIDs`;
+- belong to root, to the account the engine runs as or to a user in `TrustedUIDs`, and so must every directory above it, through every symlink on the way;
+- be writable by nobody else, by its mode or by a POSIX.1e or NFSv4 access-control list, and so must every directory above it. A sticky directory above it, such as `/tmp`, may be writable by others, unless its list lets another account take it or rewrite the list. Each user in `TrustedUIDs` counts as root, and so does group 0 in a directory above a checked one, not in the checked directory itself;
 - for `ToolsDir`'s managed subdirectories, resolve inside the tools tree. `ConfigDir` may live outside it.
 
 `New` checks again after it has created `ConfigDir`, `ToolsDir` and `bin/`, so a root it created and the filesystem stored as writable by another account refuses to start as well, leaving what it created in place.

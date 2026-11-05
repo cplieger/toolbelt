@@ -36,9 +36,9 @@ var (
 	ErrUnknownJob = errors.New("unknown job")
 	// ErrRootIntegrity marks a New refused by the opt-in root-integrity
 	// check (Config.VerifyRootIntegrity): a managed root is a symlink,
-	// is not a directory, is group- or other-writable, cannot be
-	// inspected, or resolves outside the tool tree. *RootIntegrityError
-	// names each one.
+	// is not a directory, is owned or writable by another account (itself
+	// or a directory above it), cannot be inspected, or resolves outside
+	// the tool tree. *RootIntegrityError names each one.
 	ErrRootIntegrity = errors.New("managed root failed the integrity check")
 	// ErrQueueFull marks a job refused because the queue already holds its
 	// cap of waiting jobs. Transient: the request may be retried, and a

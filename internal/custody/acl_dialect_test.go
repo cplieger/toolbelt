@@ -100,8 +100,7 @@ func TestACLDialectsTableIsWellFormed(t *testing.T) {
 		byName[aclDialects[i].xattr] = &aclDialects[i]
 	}
 
-	// POSIX.1e: the mode is the list's MASK, not a grant, so no floor. This is the
-	// fail-closed bug writersOf documents; it now lives in exactly one place.
+	// POSIX.1e: the mode is the list's MASK, not a grant, so no floor.
 	if posix := byName[xattrPOSIXACL]; posix.modeFloor {
 		t.Error("the POSIX.1e row claims a mode floor; the mode's group bits are that list's mask, so a floor names a group the list denies")
 	}
