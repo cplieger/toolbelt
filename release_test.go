@@ -787,7 +787,7 @@ func TestSearchInstallTree(t *testing.T) {
 			guess: "tool", base: "tool", wantErr: true,
 		},
 		// A non-executable of the right shape is not a program, and the
-		// modes are upstream's own statement: tar and unzip preserve them.
+		// modes are upstream's own statement: extraction keeps execute bits.
 		{
 			name:  "a non-executable file is not the artifact's executable",
 			plain: []string{"data.bin"},

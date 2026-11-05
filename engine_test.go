@@ -1881,8 +1881,8 @@ func TestInstallAqua_SymlinkEscapeRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	final := waitJob(t, e, job.ID)
-	if final.State != JobFailed || !strings.Contains(final.Error, "escapes") {
-		t.Errorf("job = %+v, want symlink-escape failure", final)
+	if final.State != JobFailed || !strings.Contains(final.Error, "unpack: bin/tool: symlink target") {
+		t.Errorf("job = %+v, want the extraction to refuse the symlink", final)
 	}
 	if _, err := os.Lstat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
 		t.Error("escaping symlink was published to bin/")
@@ -2297,7 +2297,7 @@ func TestVerifyArtifact_DeclaredWithoutSourceRefuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := in.verifyArtifact(t.Context(), "tool", "v1", artifact, tc.spec)
+			got, err := in.verifyArtifact(t.Context(), "tool", "v1", downloaded{data: openArtifact(t, artifact), asset: "artifact"}, tc.spec)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Errorf("verifyArtifact = %q, %v; want error containing %q", got, err, tc.wantErr)

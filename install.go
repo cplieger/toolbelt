@@ -241,16 +241,28 @@ func (in *installer) installFromSpec(ctx context.Context, name, version string, 
 	}
 	defer os.RemoveAll(tmp)
 
-	artifact := filepath.Join(tmp, lastPathSegment(spec.URL))
-	if derr := in.download(ctx, spec.URL, artifact); derr != nil {
+	dl := filepath.Join(tmp, lastPathSegment(spec.URL))
+	if derr := in.download(ctx, spec.URL, dl); derr != nil {
 		return nil, "", derr
 	}
-	checksum, err = in.verifyArtifact(ctx, name, version, artifact, spec)
+	f, err := os.Open(dl)
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	// One descriptor for the digest and the extraction: what is unpacked is
+	// what was verified, whatever happens to the name in between.
+	art := downloaded{data: io.NewSectionReader(f, 0, fi.Size()), asset: filepath.Base(dl)}
+	checksum, err = in.verifyArtifact(ctx, name, version, art, spec)
 	if err != nil {
 		return nil, "", err
 	}
 
-	versDir, declared, err := in.extractAndSwap(ctx, name, version, spec, artifact)
+	versDir, declared, err := in.extractAndSwap(ctx, name, version, spec, art.data)
 	if err != nil {
 		return nil, "", err
 	}
@@ -273,16 +285,23 @@ func (in *installer) installAqua(ctx context.Context, name, version string, aq *
 	return in.installFromSpec(ctx, name, version, spec)
 }
 
+// downloaded is a fetched artifact: its content, read through the descriptor
+// the digest covers, and its asset name, which a checksum list keys on.
+type downloaded struct {
+	data  *io.SectionReader
+	asset string
+}
+
 // verifyArtifact enforces the checksum invariant before the download is
 // extracted or published, and reports how integrity was established. A
 // declared checksum source that fails to resolve, fetch, parse or match
 // REFUSES the install; a definition declaring none still installs, but
 // logs the tool/version/URL at Warn so the gap is observable rather than
 // inferred.
-func (in *installer) verifyArtifact(ctx context.Context, name, version, artifact string, spec *InstallSpec) (string, error) {
+func (in *installer) verifyArtifact(ctx context.Context, name, version string, art downloaded, spec *InstallSpec) (string, error) {
 	switch {
 	case spec.ChecksumURL != "":
-		if verr := in.verifyChecksum(ctx, artifact, spec); verr != nil {
+		if verr := in.verifyChecksum(ctx, art, spec); verr != nil {
 			return "", in.refuseUnverified(name, version, spec.URL, verr)
 		}
 		in.logf("checksum verified (%s)", spec.ChecksumAlg)
@@ -318,7 +337,7 @@ func (in *installer) refuseUnverified(name, version, url string, cause error) er
 // publish keeps a backup so a same-version reinstall has no window with the
 // tool absent, flushes staging before the rename and the parent after it,
 // and restores the backup when a barrier fails.
-func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, []declaredBin, error) {
+func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact *io.SectionReader) (string, []declaredBin, error) {
 	// The version is a path component from here on, and only the sources
 	// routed through this function have that constraint (see
 	// versionpolicy.go). Asserting it here is what stops a wider
@@ -342,7 +361,7 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 // stageArtifact extracts the artifact into staging and resolves the
 // declared executables against that tree, so a refusal happens before
 // anything is published.
-func (in *installer) stageArtifact(ctx context.Context, name, version string, spec *InstallSpec, artifact, staging string) ([]declaredBin, error) {
+func (in *installer) stageArtifact(ctx context.Context, name, version string, spec *InstallSpec, artifact *io.SectionReader, staging string) ([]declaredBin, error) {
 	// Declared names come from a registry and are published as bin/<name>,
 	// which the publish clears before linking.
 	for _, f := range spec.Files {
@@ -491,8 +510,8 @@ func (in *installer) linkDeclaredBins(versDir string, bins []declaredBin) ([]str
 
 // resolveInsideInstall resolves one declared file to a real path proven
 // to sit inside the install dir, and leaves it executable. Symlinks are
-// resolved BEFORE stat/chmod/link, because tar/unzip faithfully recreate
-// symlink members even though they sanitize .. and absolute paths.
+// resolved BEFORE stat/chmod/link, because extraction keeps an archive's
+// in-tree symlink members and a declared name can be one.
 // Residual gap: containment is a name-based TOCTOU, since no inode
 // identity carries into enforceExecutable's open or linkBin's publish.
 func resolveInsideInstall(installRoot pathinside.Root, target, src string) (string, error) {
@@ -557,8 +576,8 @@ func searchInstallTree(root, guess, base string) (string, error) {
 }
 
 // walkInstallTree returns the regular files under root named base, and
-// separately every regular file carrying an execute bit. tar and unzip
-// both preserve archive modes, so the executable set is upstream's own
+// separately every regular file carrying an execute bit. Extraction keeps
+// a member's execute bits, so the executable set is upstream's own
 // statement about which members are programs.
 func walkInstallTree(root, base string) (named, executable []string, err error) {
 	// WalkDir does not follow symlinks, so a link planted by the archive
@@ -662,15 +681,15 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 // verifyChecksum fetches the checksum artifact and compares the
 // download's digest. The checksum file may be a bare digest or the
 // standard "digest  filename" list (sha256sum style).
-func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *InstallSpec) error {
+func (in *installer) verifyChecksum(ctx context.Context, art downloaded, spec *InstallSpec) error {
 	body, err := httpclient.GetBytes(ctx, in.client, spec.ChecksumURL,
 		httpclient.WithMaxAttempts(3), httpclient.WithMaxBodyBytes(1<<20))
 	if err != nil {
 		return fmt.Errorf("fetch checksum: %w", err)
 	}
-	want := findChecksum(string(body), filepath.Base(artifact), spec.ChecksumAlg)
+	want := findChecksum(string(body), art.asset, spec.ChecksumAlg)
 	if want == "" {
-		return fmt.Errorf("checksum file has no entry for %s", filepath.Base(artifact))
+		return fmt.Errorf("checksum file has no entry for %s", art.asset)
 	}
 
 	var h hash.Hash
@@ -682,12 +701,7 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 	default:
 		return fmt.Errorf("unsupported checksum algorithm %q", spec.ChecksumAlg)
 	}
-	f, err := os.Open(artifact)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, io.NewSectionReader(art.data, 0, art.data.Size())); err != nil {
 		return err
 	}
 	got := hex.EncodeToString(h.Sum(nil))

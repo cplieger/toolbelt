@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/cplieger/go/filesafe"
 	"github.com/cplieger/go/pathinside"
+	"github.com/cplieger/toolbelt/v3/internal/unpack"
 )
 
 // Aqua format names: what a definition's format field holds, what an asset
@@ -95,54 +97,57 @@ func canonicalFormat(format string) string {
 	return format
 }
 
-// extractArtifact unpacks a downloaded artifact into destDir according
-// to the aqua format, canonical long names only (see canonicalFormat).
-// Archive extraction shells out to the system tar and unzip, which the
-// consumer image must bake in (tar, xz-utils, bzip2, zstd, unzip) — no Go
-// decompression dependencies. destDir must exist and be empty. A format
-// the image cannot extract is an error, never a raw install: an archive
-// written out as the binary passes every later check.
-//
-// Every tar extraction passes --no-same-owner: GNU tar run as root (the
-// engine's normal case) otherwise restores each member's recorded owner, so
-// a release tarball built by uid 1001 installs files owned by uid 1001, an
-// identity the host may hand to anyone. unzip restores owners only under -X,
-// which is never passed.
-func extractArtifact(ctx context.Context, artifact, format, destDir, binName string) error {
+// Engine extraction limits, sanity bounds against a hostile or corrupt
+// archive. The largest catalog archives measured on 2026-11-05: codeql 2.27.4
+// (zip, 3,831 entries, 772 MB), zig 0.17.1 (20,792 entries, 374 MB), temurin
+// 21 (542 entries, 362 MB); the Go 1.27.3 toolchain tree is 17,374 entries.
+const (
+	maxExtractBytes   int64 = 16 << 30
+	maxExtractEntries       = 250_000
+)
+
+// extractArtifact unpacks a verified artifact into destDir, an empty
+// directory, through internal/unpack, by its canonical format (see
+// canonicalFormat). A format it cannot extract is an error, never a raw
+// install: an archive written out as the binary passes every later check.
+func extractArtifact(ctx context.Context, artifact *io.SectionReader, format, destDir, binName string) error {
+	lim := unpack.Limits{MaxBytes: maxExtractBytes, MaxEntries: maxExtractEntries}
 	switch format {
-	case formatTarGz:
-		return runQuiet(ctx, "tar", "--no-same-owner", "-xzf", artifact, "-C", destDir)
-	case formatTarXz:
-		return runQuiet(ctx, "tar", "--no-same-owner", "-xJf", artifact, "-C", destDir)
-	case formatTarBz2:
-		return runQuiet(ctx, "tar", "--no-same-owner", "-xjf", artifact, "-C", destDir)
-	case formatTarZst:
-		return runQuiet(ctx, "tar", "--no-same-owner", "--zstd", "-xf", artifact, "-C", destDir)
-	case formatTar:
-		return runQuiet(ctx, "tar", "--no-same-owner", "-xf", artifact, "-C", destDir)
-	case formatZip:
-		return runQuiet(ctx, "unzip", "-q", artifact, "-d", destDir)
-	case formatGz:
-		return decompressTo(ctx, filepath.Join(destDir, binName), "gunzip", "-c", artifact)
-	case formatBz2:
-		return decompressTo(ctx, filepath.Join(destDir, binName), "bzip2", "-dc", artifact)
-	case formatXz:
-		return decompressTo(ctx, filepath.Join(destDir, binName), "xz", "-dc", artifact)
-	case formatZst:
-		return decompressTo(ctx, filepath.Join(destDir, binName), "zstd", "-dc", artifact)
-	case formatRaw:
-		// filepath.Base strips directory components so binName cannot escape destDir.
-		out := filepath.Join(destDir, filepath.Base(binName))
-		if rerr := os.Rename(artifact, out); rerr != nil {
-			// Cross-device rename fails; stream-copy instead of buffering in memory.
-			if cerr := copyFile(artifact, out); cerr != nil {
-				return cerr
-			}
+	case formatTarGz, formatTarXz, formatTarBz2, formatTarZst, formatTar, formatZip:
+		return withRoot(destDir, func(root *os.Root) error {
+			return unpack.Archive(ctx, artifact, format, root, lim, filterCommand)
+		})
+	case formatRaw, formatGz, formatBz2, formatXz, formatZst:
+		name := filepath.Base(binName)
+		err := withRoot(destDir, func(root *os.Root) error {
+			return unpack.Single(ctx, artifact, format, root, name, lim, filterCommand)
+		})
+		if err != nil {
+			return err
 		}
-		return enforceExecutable(out)
+		return enforceExecutable(filepath.Join(destDir, name))
 	default:
 		return fmt.Errorf("unsupported archive format %q", format)
 	}
+}
+
+func withRoot(dir string, fn func(*os.Root) error) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return fn(root)
+}
+
+// filterCommand is the decompressor internal/unpack runs for xz and zstd.
+func filterCommand(ctx context.Context, name string, args ...string) (*exec.Cmd, error) {
+	cmd, err := systemCommand(ctx, name, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Env = systemEnvPATH()
+	return cmd, nil
 }
 
 // binExecMode is the mode an installed binary is pinned to: runnable by
@@ -189,65 +194,6 @@ func enforceStoredMode(path string, mode os.FileMode, extraFlags int) error {
 	defer func() { _ = f.Close() }()
 	_, err = filesafe.EnforceMode(f, mode)
 	return err
-}
-
-// copyFile stream-copies src to dst (mode 0o600; callers chmod to add
-// exec bits). The cross-device fallback when os.Rename can't move a file.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	return err
-}
-
-// decompressTo runs a decompressor with its stdout wired straight to
-// the output file — no shell, no quoting concerns.
-func decompressTo(ctx context.Context, out, name string, args ...string) error {
-	f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return err
-	}
-	cmd, err := systemCommand(ctx, name, args...)
-	if err != nil {
-		_ = f.Close()
-		return err
-	}
-	cmd.Env = systemEnvPATH()
-	cmd.Stdout = f
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-	if cerr := f.Close(); runErr == nil {
-		runErr = cerr
-	}
-	if runErr != nil {
-		return commandFailed(name, runErr, stderr.String())
-	}
-	return nil
-}
-
-// runQuiet runs a command, returning combined output only on failure.
-func runQuiet(ctx context.Context, name string, args ...string) error {
-	cmd, err := systemCommand(ctx, name, args...)
-	if err != nil {
-		return err
-	}
-	cmd.Env = systemEnvPATH()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return commandFailed(name, err, string(out))
-	}
-	return nil
 }
 
 // insideStrictly reports whether target lies STRICTLY beneath root:
