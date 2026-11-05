@@ -557,13 +557,11 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 		if !ok {
 			return "", nil, errUnsupported
 		}
+		// backendSkip decides which loadAquaDef errors leave the tool
+		// unavailable, exactly as for aqua:.
 		aq, err := loadAquaDef(aquaDir, aquaRef)
 		if err != nil {
-			// The translation table names a package the pinned aqua
-			// registry does not carry, or carries in a shape the runtime
-			// cannot evaluate. Not fatal: the tool is simply unavailable,
-			// exactly as it was before the table existed.
-			return "", nil, errUnsupported
+			return "", nil, err
 		}
 		return "aqua:" + aquaRef, aq, nil
 	case "github":
