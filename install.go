@@ -26,6 +26,7 @@ import (
 	"github.com/cplieger/go/httpclient"
 	"github.com/cplieger/go/pathinside"
 	"github.com/cplieger/go/textsafe"
+	"github.com/cplieger/toolbelt/v3/internal/retain"
 )
 
 // installer executes install/uninstall plans for every source kind.
@@ -170,7 +171,8 @@ const (
 )
 
 // DefaultKeepVersions is how many superseded versions of a tool the
-// engine retains when Config.KeepVersions is unset: one, so a bad update
+// engine retains when Config.KeepVersions is unset (retain.Keep's zero
+// value): one, so a bad update
 // always has a previous tree under <ToolsDir>/opt/<name>/ to fall back
 // to instead of only a re-download.
 const DefaultKeepVersions = 1
@@ -322,7 +324,7 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 	staging := versDir + stagingSuffix
 	declared, err := in.stageArtifact(ctx, name, version, spec, artifact, staging)
 	if err == nil {
-		err = publishStaged(name, version, staging, versDir)
+		err = in.publishStaged(name, version, staging, versDir)
 	}
 	if err != nil {
 		_ = os.RemoveAll(staging)
@@ -367,8 +369,10 @@ func (in *installer) stageArtifact(ctx context.Context, name, version string, sp
 	return declared, nil
 }
 
-// publishStaged swaps the staged tree in as the live version directory.
-func publishStaged(name, version, staging, versDir string) error {
+// publishStaged swaps the staged tree in as the live version directory and
+// stamps it with the time, which retention ranks predecessors by: a rename
+// keeps the staged root's mtime, which an archive's "./" member may have set.
+func (in *installer) publishStaged(name, version, staging, versDir string) error {
 	backup := versDir + backupSuffix
 	if err := os.RemoveAll(backup); err != nil {
 		return err
@@ -388,6 +392,11 @@ func publishStaged(name, version, staging, versDir string) error {
 		_ = os.RemoveAll(versDir)
 		restoreBackup(versDir, backup)
 		return fmt.Errorf("commit install of %s %s: %w", name, version, err)
+	}
+	// Not fatal: a mis-ranked predecessor costs only which superseded tree is kept.
+	now := time.Now()
+	if err := os.Chtimes(versDir, now, now); err != nil {
+		in.logger().Warn("toolbelt: could not record the install time of a version directory", "path", versDir, "error", err)
 	}
 	_ = os.RemoveAll(backup)
 	return nil
@@ -740,72 +749,39 @@ func isHexDigest(s string, n int) bool {
 	return true
 }
 
-// pruneOldVersions removes superseded versioned install dirs, keeping the
-// current version plus the `keep` most recent previous ones (see
-// retained) so a bad update has a fallback. Best-effort: a failure is
-// logged and disk is left as-is.
+// pruneOldVersions removes a tool's transient .staging and .old residue,
+// then the superseded version dirs retain.Victims names, keeping the current
+// version and the `keep` most recently activated previous ones so a bad
+// update has a fallback. Best-effort: a failure is logged and disk is left
+// as-is.
 func (in *installer) pruneOldVersions(name, current string, keep int) {
 	root := filepath.Join(in.optDir(), name)
-	entries, err := os.ReadDir(root)
+	dirents, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
-	for _, victim := range prunable(entries, current, keep) {
-		if err := os.RemoveAll(filepath.Join(root, victim)); err != nil {
-			in.logf("could not prune %s/%s: %v", name, victim, err)
-			continue
-		}
-		in.logf("pruned old version %s/%s", name, victim)
-	}
-}
-
-// prunable selects entries under a tool's opt root that go: never the
-// current version, always transient .staging/.old residue, and the
-// remaining superseded versions newest-first (mtime, name tiebreak)
-// past the first `retained`.
-func prunable(entries []os.DirEntry, current string, keep int) []string {
-	type candidate struct {
-		modTime time.Time
-		name    string
-	}
 	var victims []string
-	var supers []candidate
-	for _, e := range entries {
-		switch name := e.Name(); {
-		case name == current:
-		case strings.HasSuffix(name, stagingSuffix), strings.HasSuffix(name, backupSuffix):
-			victims = append(victims, name)
+	entries := make([]retain.Entry, 0, len(dirents))
+	for _, e := range dirents {
+		switch n := e.Name(); {
+		case strings.HasSuffix(n, stagingSuffix), strings.HasSuffix(n, backupSuffix):
+			victims = append(victims, n)
 		default:
 			var mod time.Time
 			if fi, err := e.Info(); err == nil {
 				mod = fi.ModTime()
 			}
-			supers = append(supers, candidate{modTime: mod, name: name})
+			entries = append(entries, retain.Entry{Name: n, Activated: mod})
 		}
 	}
-	slices.SortFunc(supers, func(a, b candidate) int {
-		if !a.modTime.Equal(b.modTime) {
-			return b.modTime.Compare(a.modTime)
+	// Every engine tree can serve: the engine does not probe its predecessors.
+	victims = append(victims, retain.Victims(entries, current, keep, func(string) retain.Role { return retain.Fallback })...)
+	for _, victim := range victims {
+		if err := os.RemoveAll(filepath.Join(root, victim)); err != nil {
+			in.logf("could not prune %s/%s: %v", name, victim, err)
+			continue
 		}
-		return strings.Compare(b.name, a.name)
-	})
-	for _, c := range supers[min(retained(keep), len(supers)):] {
-		victims = append(victims, c.name)
-	}
-	return victims
-}
-
-// retained normalizes a configured retention count: 0 (unset) means
-// DefaultKeepVersions, and a negative value keeps none (the
-// prune-everything-superseded behavior).
-func retained(keep int) int {
-	switch {
-	case keep == 0:
-		return DefaultKeepVersions
-	case keep < 0:
-		return 0
-	default:
-		return keep
+		in.logf("pruned old version %s/%s", name, victim)
 	}
 }
 

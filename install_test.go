@@ -19,6 +19,8 @@ import (
 	"testing/synctest"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cplieger/toolbelt/v3/internal/retain"
 )
 
 // setgidParent returns a temp directory with S_ISGID set, having first
@@ -1233,5 +1235,109 @@ func TestInstallNpm_CreatesTheModuleTreeFirst(t *testing.T) {
 		if got := storedDirMode(t, d); got != managedDirStoredMode {
 			t.Errorf("mode of %s = %v, want %v", d, got, managedDirStoredMode)
 		}
+	}
+}
+
+// TestPruneSuperseded_prunesReleaseTrees pins that a release: source's
+// versioned trees are retained like aqua's: release installs publish
+// opt/<name>/<version> too, so each update without a prune leaked a tree.
+func TestPruneSuperseded_prunesReleaseTrees(t *testing.T) {
+	e := newTestEngine(t, nil)
+	root := filepath.Join(e.inst.optDir(), "r")
+	for name, age := range map[string]time.Duration{"v3.0.0": 0, "v2.0.0": time.Hour, "v1.0.0": 2 * time.Hour} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(p, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e.pruneSuperseded("r", &Tool{Source: "release:github/o/r", Version: "v3.0.0"})
+
+	if _, err := os.Stat(filepath.Join(root, "v2.0.0")); err != nil {
+		t.Errorf("the retained predecessor was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "v1.0.0")); !os.IsNotExist(err) {
+		t.Errorf("stat of the oldest release tree = %v, want it pruned", err)
+	}
+}
+
+// tarGzWithRoot is tarGz with a "./" directory member dated mtime first, the
+// shape a release built with `tar -C dir .` carries.
+func tarGzWithRoot(t *testing.T, mtime time.Time, members map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: mtime}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	for _, name := range slices.Sorted(maps.Keys(members)) {
+		content := members[name]
+		if err := tw.WriteHeader(&tar.Header{Name: "./" + name, Mode: 0o755, Size: int64(len(content)), ModTime: mtime}); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestInstallFromSpec_recordsTheActivationTime pins that a published version
+// directory carries its install time: retention ranks predecessors by it, and an
+// archive whose "./" member is dated 2019 otherwise left the newer predecessor
+// ranked oldest and pruned.
+func TestInstallFromSpec_recordsTheActivationTime(t *testing.T) {
+	old := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
+	assets := map[string][]byte{
+		"/v1.0.0.tar.gz": tarGz(t, map[string]string{"tool": "#!/bin/sh\necho 1\n"}),
+		"/v2.0.0.tar.gz": tarGzWithRoot(t, old, map[string]string{"tool": "#!/bin/sh\necho 2\n"}),
+		"/v3.0.0.tar.gz": tarGz(t, map[string]string{"tool": "#!/bin/sh\necho 3\n"}),
+	}
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(assets[r.URL.Path])
+	}))
+	in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: func(string) {}}
+	root := filepath.Join(in.optDir(), "tool")
+	for _, v := range []string{"v1.0.0", "v2.0.0", "v3.0.0"} {
+		spec := &InstallSpec{URL: srv.URL + "/" + v + ".tar.gz", Format: "tar.gz", Files: []AquaFile{{Name: "tool", Src: "tool"}}}
+		if _, _, err := in.installFromSpec(t.Context(), "tool", v, spec); err != nil {
+			t.Fatalf("installFromSpec(%s): %v", v, err)
+		}
+		if v == "v2.0.0" {
+			fi, err := os.Stat(filepath.Join(root, v))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(fi.ModTime()); d < 0 || d > time.Minute {
+				t.Errorf("%s's directory mtime is %v, want its install time", v, fi.ModTime())
+			}
+		}
+	}
+
+	in.pruneOldVersions("tool", "v3.0.0", 1)
+
+	if _, err := os.Stat(filepath.Join(root, "v2.0.0")); err != nil {
+		t.Errorf("the most recently installed predecessor was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "v1.0.0")); !os.IsNotExist(err) {
+		t.Errorf("stat of the oldest install = %v, want it pruned", err)
+	}
+}
+
+// DefaultKeepVersions is the count retain.Keep gives an unset KeepVersions.
+func TestDefaultKeepVersions_isRetainsDefault(t *testing.T) {
+	if got := retain.Keep(0); got != DefaultKeepVersions {
+		t.Errorf("retain.Keep(0) = %d, want DefaultKeepVersions (%d)", got, DefaultKeepVersions)
 	}
 }
