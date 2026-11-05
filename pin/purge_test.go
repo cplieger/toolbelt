@@ -1,3 +1,5 @@
+//go:build linux
+
 package pin
 
 import (
@@ -754,8 +756,8 @@ func TestConvenienceLinksFollowAVersionSwitch(t *testing.T) {
 	if err := m.Ensure(t.Context()); err != nil {
 		t.Fatalf("Ensure %s: %v", nextVersion, err)
 	}
-	if st, _ := m.Active(); st.ActiveVersion != nextVersion {
-		t.Fatalf("active version = %q, want %q", st.ActiveVersion, nextVersion)
+	if got := m.Version(); got != nextVersion {
+		t.Fatalf("active version = %q, want %q", got, nextVersion)
 	}
 
 	for _, name := range []string{toolName, toolSidecar} {

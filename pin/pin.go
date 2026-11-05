@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cplieger/toolbelt/v3/internal/custody"
 )
 
 // Layout and protocol constants.
@@ -38,7 +40,7 @@ const (
 	stagePrefix = ".stage-"
 
 	// dirMode and fileMode are what this package REQUESTS. Nothing reads them
-	// back: whether the filesystem stored something wider is [verifyCustody]'s
+	// back: whether the filesystem stored something wider is custody's
 	// question, asked once about the tree rather than per directory, and answered
 	// with a verdict rather than a repair.
 	dirMode  os.FileMode = 0o755
@@ -48,17 +50,17 @@ const (
 // Bounded deadlines for every external command. A wedged artifact must not stall
 // a start forever.
 const (
-	probeTimeout            = 10 * time.Second
-	assertionTimeout        = 10 * time.Second
-	defaultInstallerTimeout = 120 * time.Second
+	probeTimeout     = 10 * time.Second
+	assertionTimeout = 10 * time.Second
 )
 
-// Defaults applied by New.
+// Retry and retention policy. One retained predecessor is what makes a bad
+// activation recoverable without a rollback journal.
 const (
-	defaultMaxAttempts  = 4
-	defaultRetryBackoff = 30 * time.Second
-	maxRetryBackoff     = 10 * time.Minute
-	defaultRetain       = 1
+	defaultMaxAttempts = 4
+	retryBackoff       = 30 * time.Second
+	maxRetryBackoff    = 10 * time.Minute
+	retainPredecessors = 1
 )
 
 // Reason explains a withheld readiness verdict. It is an enum rather than a
@@ -116,14 +118,11 @@ const (
 	phaseFailed
 )
 
-// State is the manager's persisted record, written to
-// <Root>/<Name>-state.json. It is DIAGNOSTIC ONLY: every field is there for an
-// operator reading the volume, and none of them is an input to
-// [Manager.Ready]. AssertionsOK in particular records the last result as
-// history — the assertion THIS process performed is the only thing that gates
-// readiness, because an assertion's effect lives in the package's own mutable
-// configuration rather than in the immutable version directory.
-type State struct {
+// stateRecord is the diagnostic record written to <Root>/<Name>-state.json for
+// an operator reading the volume. None of it is an input to [Manager.Ready]:
+// an assertion's effect lives in the package's mutable configuration, so only
+// the assertion THIS process performed gates readiness.
+type stateRecord struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 	ActiveVersion string    `json:"active_version"`
 	Dir           string    `json:"dir"`
@@ -146,20 +145,16 @@ type selection struct {
 //
 //nolint:govet // fieldalignment: the field order IS this struct's lock-ownership documentation (seams, then the resolved facts, then each lock immediately above what it guards). Packing it for the ~48 bytes fieldalignment can reclaim separates both mutexes from the fields they protect, which is the wrong trade for a struct allocated exactly once per manager.
 type Manager struct {
-	// Seams. Every one of these is a boundary the tests replace; none is part
-	// of the public surface, because a consumer configures behaviour through
-	// Release and Config, not by substituting the filesystem.
+	// Seams the tests replace; a consumer configures behaviour through Config.
 	fetch func(ctx context.Context, url string, dst io.Writer) error
 	run   runCommand
 	fsync func(path string) error
 	// rename is root-RELATIVE, so every rename this package performs is confined
 	// by the kernel rather than by the caller having built the two paths
 	// correctly. See [Manager.renameIn] for why that is the seam's shape.
-	rename       func(root *os.Root, oldname, newname string) error
-	now          func() time.Time
-	sleep        func(ctx context.Context, d time.Duration) error
-	unpack       Unpacker
-	parseVersion func(out string) string
+	rename func(root *os.Root, oldname, newname string) error
+	now    func() time.Time
+	sleep  func(ctx context.Context, d time.Duration) error
 
 	// installed records the versions this process published from a verified
 	// archive, so an untrusted tree can still become ready after a reinstall.
@@ -171,8 +166,10 @@ type Manager struct {
 	// maps or slices afterwards cannot change what this manager installs.
 	// trust is the caller's declared writer set, copied at construction so a later
 	// mutation of the Config's slices cannot change what this manager accepts.
-	trust trustedWriters
+	trust custody.Trust
+	log   *slog.Logger
 
+	format      string
 	archToken   string
 	digest      string
 	urlTemplate string
@@ -184,25 +181,18 @@ type Manager struct {
 	stateName string
 	statePath string
 
-	// opSem serialises the long filesystem operations (Ensure, Rescan). It is
-	// deliberately NOT the state lock: it IS held across I/O, which is the whole
-	// point, so the readers must never take it.
-	//
-	// A buffered channel rather than a sync.Mutex because the WAIT must be
-	// cancellable. A mutex's Lock is not selectable, so a second caller parked
-	// behind a running operation could not abandon: an HTTP handler driving
-	// Rescan would hold its goroutine inside the library until the operation it
-	// never started finished. Consumers were compensating for that with their own
-	// admission gates; the wait belongs here, with the lock it is waiting on.
+	// opSem serialises Ensure and Rescan and is held across I/O, so readers never
+	// take it. A buffered channel rather than a mutex because the wait must be
+	// cancellable: a parked HTTP handler driving Rescan must be able to give up.
 	opSem chan struct{}
 
 	// mu guards active, state, custodyErr, phase, assertionsOK and purged, and is
 	// never held across I/O.
 	mu     sync.Mutex
 	active selection
-	state  State
+	state  stateRecord
 
-	// custodyErr is the last [verifyCustody] verdict on the installation tree,
+	// custodyErr is the last custody.Trust.Verify verdict on the installation tree,
 	// re-evaluated at the start of every operation because a volume can be
 	// remounted or re-permissioned under a running process. nil means this
 	// process has exclusive control, which is what makes a sentinel in that tree
@@ -221,169 +211,71 @@ type Manager struct {
 	purged bool
 }
 
-// New validates cfg and returns a manager.
-//
-// It resolves the architecture from runtime.GOARCH when [Config.GOARCH] is
-// empty, requires a well-formed digest for the resolved architecture, merges
-// [Release.Mandatory] into [Config.Assert], and refuses a profile that declares
-// no mandatory assertions.
-//
-// The caller's Config is not modified, and nothing the manager keeps shares memory
-// with it: the snapshot is taken BEFORE validation, so what was validated is what
-// the manager will use. That covers the two POINTERS as well as the maps and slices
-// — [Config.Purge] and [Release.Installer] — and the argv inside every
-// [Assertion], which is what a later mutation would otherwise have been able to
-// rewrite. See [Config.snapshot].
+// New validates cfg and returns a manager. It resolves the architecture from
+// runtime.GOARCH, requires a well-formed digest for it, and refuses a config
+// with no Required assertion. Nothing the manager keeps shares memory with
+// cfg: the snapshot is taken before validation, so what was validated is what
+// the manager uses.
 func New(cfg *Config) (*Manager, error) {
 	if cfg == nil {
-		return nil, errors.New("pinstall: Config is required")
+		return nil, errors.New("pin: Config is required")
 	}
 	c := cfg.snapshot()
-	if err := c.Release.validate(); err != nil {
-		return nil, err
-	}
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
-	goarch := c.GOARCH
+	goarch := c.goarch
 	if goarch == "" {
 		goarch = runtime.GOARCH
 	}
-	token, ok := c.Release.ArchTokens[goarch]
+	token, ok := c.ArchTokens[goarch]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s has no published archive (Release.ArchTokens covers %v)",
-			ErrUnsupportedArch, goarch, slices.Sorted(maps.Keys(c.Release.ArchTokens)))
+		return nil, fmt.Errorf("pin: unsupported architecture: %s has no published archive (ArchTokens covers %v)",
+			goarch, slices.Sorted(maps.Keys(c.ArchTokens)))
 	}
 	digest, ok := c.Digests[goarch]
 	if !ok {
-		return nil, fmt.Errorf("%w: %s has no pinned digest (Config.Digests covers %v)",
-			ErrUnsupportedArch, goarch, slices.Sorted(maps.Keys(c.Digests)))
+		return nil, fmt.Errorf("pin: unsupported architecture: %s has no pinned digest (Digests covers %v)",
+			goarch, slices.Sorted(maps.Keys(c.Digests)))
 	}
 	if err := validateDigest(digest); err != nil {
-		return nil, fmt.Errorf("pinstall: %s digest: %w", goarch, err)
+		return nil, fmt.Errorf("pin: %s digest: %w", goarch, err)
 	}
-	primary := c.Release.binary()
-	c.GOARCH = goarch
-	c.Assert = mergeAssertions(c.Assert, c.Release.Mandatory)
-	c.Require = withPrimaryArtifact(c.Require, primary)
-	applyConfigDefaults(&c)
-	template := cmp.Or(c.URLTemplate, c.Release.URLTemplate)
-	return &Manager{
-		opSem:        make(chan struct{}, 1),
-		fetch:        httpFetch,
-		run:          execRunner,
-		fsync:        fsyncPath,
-		rename:       renameIn,
-		now:          time.Now,
-		sleep:        sleepCtx,
-		unpack:       orDefaultUnpacker(c.Release.Unpack),
-		parseVersion: orDefaultParser(c.Release.ParseVersion),
-		installed:    map[string]bool{},
-		cfg:          c,
-		trust:        trustedWriters{uids: slices.Clone(c.TrustedUIDs), gids: slices.Clone(c.TrustedGIDs)},
-		archToken:    token,
-		digest:       digest,
-		urlTemplate:  template,
-		primary:      primary,
-		versionsDir:  filepath.Join(c.Root, c.Release.Name+versionsSuffix),
-		stateName:    c.Release.Name + stateSuffix,
-		statePath:    filepath.Join(c.Root, c.Release.Name+stateSuffix),
-		phase:        phaseIdle,
-		state:        State{Pinned: c.Version},
-	}, nil
-}
-
-// applyConfigDefaults fills the zero-valued knobs with the library's policy.
-func applyConfigDefaults(c *Config) {
+	format, _ := formatOf(c.URLTemplate)
+	c.goarch = goarch
+	c.Require = withPrimaryArtifact(c.Require, c.Name)
 	if c.MaxAttempts <= 0 {
 		c.MaxAttempts = defaultMaxAttempts
 	}
-	if c.RetryBackoff <= 0 {
-		c.RetryBackoff = defaultRetryBackoff
-	}
-	if c.Retain <= 0 {
-		c.Retain = defaultRetain
-	}
+	return &Manager{
+		opSem:       make(chan struct{}, 1),
+		fetch:       httpFetch,
+		run:         execRunner,
+		fsync:       fsyncPath,
+		rename:      renameIn,
+		now:         time.Now,
+		sleep:       sleepCtx,
+		installed:   map[string]bool{},
+		cfg:         c,
+		trust:       custody.Trust{UIDs: slices.Clone(c.TrustedUIDs)},
+		log:         cmp.Or(c.Logger, slog.Default()),
+		format:      format,
+		archToken:   token,
+		digest:      digest,
+		urlTemplate: c.URLTemplate,
+		primary:     c.Name,
+		versionsDir: filepath.Join(c.Root, c.Name+versionsSuffix),
+		stateName:   c.Name + stateSuffix,
+		statePath:   filepath.Join(c.Root, c.Name+stateSuffix),
+		phase:       phaseIdle,
+		state:       stateRecord{Pinned: c.Version},
+	}, nil
 }
 
-// orDefaultUnpacker returns u, or [UnpackZip] when u is nil.
-func orDefaultUnpacker(u Unpacker) Unpacker {
-	if u != nil {
-		return u
-	}
-	return UnpackZip
-}
-
-// orDefaultParser returns p, or [LastFieldOfFirstLine] when p is nil.
-func orDefaultParser(p func(string) string) func(string) string {
-	if p != nil {
-		return p
-	}
-	return LastFieldOfFirstLine
-}
-
-// validateRoot refuses a Root that is empty, relative or holds a ".." component.
-// Join cleans ".." lexically while an open resolves it after a symlink, so the
-// custody verdict and the operations it authorises could reach two directories.
-func validateRoot(root string) error {
-	switch {
-	case root == "":
-		return errors.New("pinstall: Root is required")
-	case !filepath.IsAbs(root):
-		return fmt.Errorf("pinstall: Root %q must be absolute, because its paths are handed to a subprocess", root)
-	case slices.Contains(strings.Split(root, "/"), ".."):
-		return fmt.Errorf("pinstall: Root %q must not contain a \"..\" component", root)
-	}
-	return nil
-}
-
-// validate checks the deployment half of the configuration.
-func (c *Config) validate() error {
-	if err := validateVersion(c.Version); err != nil {
-		return fmt.Errorf("pinstall: Version %q: %w", c.Version, err)
-	}
-	if err := validateRoot(c.Root); err != nil {
-		return err
-	}
-	if len(c.Digests) == 0 {
-		return errors.New("pinstall: Digests is required. Map a GOARCH to that archive's lowercase hex SHA-256")
-	}
-	if c.URLTemplate != "" {
-		if err := validateURLTemplate("URLTemplate", c.URLTemplate); err != nil {
-			return err
-		}
-	}
-	if err := validateRelPath("LinkDir", c.LinkDir, true); err != nil {
-		return err
-	}
-	// root.MkdirAll and the listing resolve ".." after a symlink, while every link,
-	// fsync and log path is Join-cleaned, so the two would reach different directories.
-	if slices.Contains(strings.Split(c.LinkDir, "/"), "..") {
-		return fmt.Errorf("pinstall: LinkDir %q must not contain a \"..\" component", c.LinkDir)
-	}
-	for _, group := range [][]string{c.Require, c.Optional} {
-		for _, name := range group {
-			if err := validateIdentifier("artifact name", name); err != nil {
-				return err
-			}
-		}
-	}
-	if c.Purge != nil {
-		return c.Purge.validate(c.LinkDir)
-	}
-	return nil
-}
-
-// acquireOp waits for the single operation slot, honouring ctx while WAITING.
-// Returns ctx.Err() if the caller gave up first, in which case nothing was
-// acquired and the caller must not release.
-//
-// The free slot is probed FIRST, non-blocking, and that ordering is load-bearing:
-// a select with both cases ready chooses pseudo-randomly, so a single select
-// would sometimes refuse a slot nobody is holding to a caller whose context is
-// already done. Cancellation is meant to end a WAIT, never to deny immediate
-// service — an already-expired deadline would otherwise make an uncontended
-// operation fail at random.
+// acquireOp waits for the single operation slot, honouring ctx while waiting,
+// and returns ctx.Err() with nothing acquired if the caller gave up. The free
+// slot is probed first, non-blocking: a select with both cases ready picks at
+// random, so an expired deadline would otherwise fail an uncontended operation.
 func (m *Manager) acquireOp(ctx context.Context) error {
 	select {
 	case m.opSem <- struct{}{}:
@@ -402,17 +294,12 @@ func (m *Manager) acquireOp(ctx context.Context) error {
 // may call it.
 func (m *Manager) releaseOp() { <-m.opSem }
 
-// Ensure brings the pinned version online and is idempotent: on a start that
-// already has the pin complete and activatable it downloads nothing and still
-// re-asserts every assertion.
-//
-// The order is the design. The one-shot purge runs first (it deletes a previous
-// layout outright, so nothing downstream can be fooled by it), then partial
-// directories go (a partial is never a selection candidate), then selection
-// probes each candidate's own version before accepting it, then — only when the
-// pin is not already activatable — the install runs, then the assertions are
-// re-asserted against whatever was selected, then the convenience links are
-// republished, and only then may pruning run.
+// Ensure brings the pinned version online and is idempotent: a start that
+// already has the pin activatable downloads nothing and still re-asserts every
+// assertion. The order is the design: the one-shot purge, the partial sweep, a
+// selection that probes each candidate, the install only when the pin is not
+// activatable, the assertions against what was selected, the links, and only
+// then pruning.
 func (m *Manager) Ensure(ctx context.Context) error {
 	// Cancellable wait, then the work keeps the caller's context: Ensure is
 	// driven by boot and shutdown, where cancelling a long download is exactly
@@ -430,8 +317,8 @@ func (m *Manager) Ensure(ctx context.Context) error {
 		m.purgeOnce()
 		m.prunePartials()
 	} else {
-		slog.Warn("skipping the legacy purge and the partial sweep: both are deletes, and this process does not exclusively control the installation tree",
-			"package", m.cfg.Release.Name, "root", m.versionsDir, "reason", m.custodyVerdict())
+		m.log.Warn("skipping the legacy purge and the partial sweep: both are deletes, and this process does not exclusively control the installation tree",
+			"package", m.cfg.Name, "root", m.versionsDir, "reason", m.custodyVerdict())
 	}
 
 	sel, ok := m.selectActive(ctx)
@@ -441,8 +328,8 @@ func (m *Manager) Ensure(ctx context.Context) error {
 		if installErr == nil {
 			sel, ok = m.selectActive(ctx)
 		} else {
-			slog.Warn("install failed; keeping any previously complete version",
-				"package", m.cfg.Release.Name, "pinned", m.cfg.Version, "error", installErr)
+			m.log.Warn("install failed; keeping any previously complete version",
+				"package", m.cfg.Name, "pinned", m.cfg.Version, "error", installErr)
 		}
 	}
 	if !ok {
@@ -451,17 +338,11 @@ func (m *Manager) Ensure(ctx context.Context) error {
 	return m.finish(ctx, sel, installErr)
 }
 
-// mayMutateTree reports whether this process may delete inside the installation tree
-// or write its state record there.
-//
-// A clean custody verdict is one answer. [Config.InstallWithoutCustody] is the other, and it
-// has
-// to be: with the waiver set the library installs into the tree anyway, so refusing to
-// sweep it would leave the documented [Config.Purge] knob silently dead and let
-// partial directories and orphan staging trees accumulate without bound. The waiver is
-// the operator saying they accept this library operating there.
+// mayMutateTree reports whether this process may delete inside the
+// installation tree or write its state record there: only under a clean
+// custody verdict.
 func (m *Manager) mayMutateTree() bool {
-	return m.custodyVerdict() == nil || m.cfg.InstallWithoutCustody
+	return m.custodyVerdict() == nil
 }
 
 // finish activates sel: it re-asserts the assertions against the SELECTED
@@ -471,12 +352,10 @@ func (m *Manager) mayMutateTree() bool {
 func (m *Manager) finish(ctx context.Context, sel selection, installErr error) error {
 	assertErr := m.applyAssertions(ctx, sel.bin)
 	m.commit(sel, installErr, assertErr)
-	// The last two mutations of the tree, and both go through the same gate as the
-	// sweeps. They are reachable with a failed verdict — this process installs under a
-	// clean one, the volume is re-permissioned, and the next Rescan selects through
-	// the waiver's installed set — and a run that has just logged that it will not
-	// touch the tree must not then delete directories and write a symlink in it.
+	// The last mutations of the tree go through the same gate as the sweeps: a run
+	// that has just logged that it will not touch the tree must not then write in it.
 	if m.mayMutateTree() {
+		m.markActivated(sel.version)
 		m.publishConvenienceLinks(sel)
 		// Pruning runs only after a successful install, and therefore only after
 		// publish has synced the parent directory. A FAILED install prunes nothing:
@@ -486,8 +365,8 @@ func (m *Manager) finish(ctx context.Context, sel selection, installErr error) e
 			m.pruneSuperseded(ctx, sel.version)
 		}
 	} else {
-		slog.Warn("skipping the convenience links and the retention prune: both write inside a tree this process does not exclusively control",
-			"package", m.cfg.Release.Name, "root", m.versionsDir, "reason", m.custodyVerdict())
+		m.log.Warn("skipping the convenience links and the retention prune: both write inside a tree this process does not exclusively control",
+			"package", m.cfg.Name, "root", m.versionsDir, "reason", m.custodyVerdict())
 	}
 	switch {
 	case assertErr != nil:
@@ -496,6 +375,24 @@ func (m *Manager) finish(ctx context.Context, sel selection, installErr error) e
 		return installErr
 	}
 	return nil
+}
+
+// markActivated sets the version directory's mtime to now, which is the
+// activation time retention orders predecessors by. Only the directory's own
+// time changes, never an artifact's. A failure only warns.
+func (m *Manager) markActivated(version string) {
+	root, err := os.OpenRoot(m.versionsDir)
+	if err != nil {
+		m.log.Warn("failed to open the installation root to record the activation",
+			"package", m.cfg.Name, "error", err)
+		return
+	}
+	defer root.Close()
+	now := m.now()
+	if err := root.Chtimes(version, now, now); err != nil {
+		m.log.Warn("failed to record the activation time; retention may keep an older predecessor",
+			"package", m.cfg.Name, "version", version, "error", err)
+	}
 }
 
 // EnsureWithRetry drives [Manager.Ensure] with bounded exponential backoff. A
@@ -516,8 +413,8 @@ func (m *Manager) EnsureWithRetry(ctx context.Context) error {
 		}
 		m.setPhase(phaseRetrying)
 		wait := m.backoff(attempt)
-		slog.Warn("retrying the install after a failure",
-			"package", m.cfg.Release.Name, "attempt", attempt, "of", m.cfg.MaxAttempts,
+		m.log.Warn("retrying the install after a failure",
+			"package", m.cfg.Name, "attempt", attempt, "of", m.cfg.MaxAttempts,
 			"retry_in", wait.String(), "error", lastErr)
 		if err := m.sleep(ctx, wait); err != nil {
 			lastErr = err
@@ -526,22 +423,17 @@ func (m *Manager) EnsureWithRetry(ctx context.Context) error {
 	}
 	m.settlePhase()
 	if ready, _ := m.Ready(); !ready && lastErr != nil {
-		slog.Error("no usable version is installed and the bounded install retries are exhausted; the installation can still be repaired in place and picked up by a rescan",
-			"package", m.cfg.Release.Name, "pinned", m.cfg.Version,
+		m.log.Error("no usable version is installed and the bounded install retries are exhausted; the installation can still be repaired in place and picked up by a rescan",
+			"package", m.cfg.Name, "pinned", m.cfg.Version,
 			"attempts", m.cfg.MaxAttempts, "root", m.versionsDir, "error", lastErr)
 	}
 	return lastErr
 }
 
 // backoff returns the wait before the attempt after n, doubling from
-// [Config.RetryBackoff] up to a ten minute cap.
-//
-// The cap is applied on ENTRY as well as after each doubling, because the first wait is
-// [Config.RetryBackoff] itself and nothing else clamps it: the field is validated only for
-// being positive, so a caller configuring an hour got an hour before the first retry from a
-// function documented to cap at ten minutes.
+// retryBackoff up to maxRetryBackoff.
 func (m *Manager) backoff(n int) time.Duration {
-	wait := min(m.cfg.RetryBackoff, maxRetryBackoff)
+	wait := retryBackoff
 	for range n - 1 {
 		wait *= 2
 		if wait >= maxRetryBackoff {
@@ -557,19 +449,10 @@ func (m *Manager) backoff(n int) time.Duration {
 // wedged artifact — observable without a fresh process. It returns whether a
 // version is active afterwards.
 func (m *Manager) Rescan(ctx context.Context) (bool, error) {
-	// Waiting is cancellable; the admitted work is NOT. Both halves are
-	// load-bearing and neither is sufficient alone.
-	//
-	// Cancellable wait: a queued caller (a second POST to a repair hook) must be
-	// able to give up without holding a goroutine inside the library.
-	//
-	// Detached work: every candidate probe runs through exec.CommandContext, and
-	// a probe sweep that fails records the release UNAVAILABLE, clearing the
-	// active version. So a caller that cancels mid-rescan — a curl --max-time, a
-	// browser tab closing — would convert a healthy manager into one that reports
-	// itself unready until the next successful rescan. A rescan that has STARTED
-	// must therefore finish on its own terms. Nothing is lost by detaching: the
-	// probes are individually bounded by probeTimeout, so this cannot hang.
+	// Waiting is cancellable, so a queued caller can give up. The admitted work is
+	// not: a failed probe sweep records the release unavailable, so a caller that
+	// cancels mid-rescan would turn a healthy manager unready. Each probe is bounded
+	// by probeTimeout, so detaching cannot hang.
 	if err := m.acquireOp(ctx); err != nil {
 		return false, err
 	}
@@ -592,10 +475,9 @@ func (m *Manager) Rescan(ctx context.Context) (bool, error) {
 // not.
 //
 // It is true only when a version is active AND this process asserted every
-// required assertion against that exact artifact. The persisted
-// [State.AssertionsOK] is never consulted: an assertion's effect lives in the
-// package's own mutable configuration, so remembering that it once succeeded is
-// stale evidence.
+// required assertion against that exact artifact. The persisted record is never
+// consulted: an assertion's effect lives in the package's own mutable
+// configuration, so remembering that it once succeeded is stale evidence.
 func (m *Manager) Ready() (ready bool, why Reason) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -621,11 +503,11 @@ func reasonFor(p phase) Reason {
 	return ReasonUnavailable
 }
 
-// Active returns the diagnostic state record and whether a version is active.
-func (m *Manager) Active() (State, bool) {
+// Version returns the active version, or "" when none is active.
+func (m *Manager) Version() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.state, m.active.bin != ""
+	return m.active.version
 }
 
 // PathEntry returns the absolute directory to lead PATH with, or "" when no
@@ -637,17 +519,10 @@ func (m *Manager) PathEntry() string {
 	return m.active.dir
 }
 
-// PathEnv returns the environment overlay to append to [os.Environ] before
-// spawning anything that must resolve this release's artifacts, or nil when no
-// version is active — [Manager.PathEntry] already composed into [pathEnv]'s
-// rule, so a consumer satisfying the lead-PATH contract does not restate it.
-//
-// It is exported because stating a contract is not the same as shipping it. Both
-// of this library's consumers were told to lead PATH with [Manager.PathEntry]
-// and each wrote its own composer, which with this package's own [binPathEnv]
-// made three copies of one rule; the library's copy is the one that drifted,
-// appending an empty inherited PATH and so producing the trailing separator
-// [pathEnv] exists to avoid.
+// PathEnv returns the overlay to append to [os.Environ] before spawning anything
+// that must resolve this release's artifacts, or nil when no version is active:
+// [Manager.PathEntry] composed under [pathEnv]'s rule, so consumers do not each
+// write their own composer.
 func (m *Manager) PathEnv() []string {
 	return pathEnv(m.PathEntry())
 }
@@ -667,25 +542,11 @@ func (m *Manager) versionDir(version string) string {
 }
 
 // pathEnv is the one PATH rule this package owns: entry leads, and the inherited
-// PATH follows only when there is one. The result is the single-assignment
-// overlay a caller appends to [os.Environ].
-//
-// Refusing to append an EMPTY inherited value is the whole reason this is a
-// function rather than a concatenation at each site. A PATH element that is
-// empty names the CURRENT WORKING DIRECTORY, so the trailing separator left by
-// appending nothing makes the child search whatever directory the calling
-// process happened to be standing in — for a server that is its own work tree,
-// and a bare-name sidecar lookup lands on anything a user put there. Leading
-// with a directory that holds only this release's verified artifacts exists to
-// NARROW that lookup, so the degenerate case does not merely fail to help, it
-// inverts the guarantee. An empty entry is the same failure with one element
-// instead of two, so it yields no overlay at all rather than a PATH that is
-// nothing but the cwd.
-//
-// It is a package-level function, not a method, because the rule is needed for
-// a directory the manager cannot name: [binPathEnv] applies it to a STAGED
-// binary, before any version is active and therefore before [Manager.PathEntry]
-// has an answer.
+// PATH follows only when there is one. An empty element names the working
+// directory, so a trailing separator would make the child search wherever the
+// caller stands, inverting the narrowing the lead entry exists for; an empty
+// entry therefore yields no overlay at all. A function, not a method, because
+// [binPathEnv] applies it to a staged binary before any version is active.
 func pathEnv(entry string) []string {
 	if entry == "" {
 		return nil
@@ -696,15 +557,11 @@ func pathEnv(entry string) []string {
 	return []string{"PATH=" + entry}
 }
 
-// binPathEnv returns the environment overlay that leads PATH with bin's own
-// directory, under [pathEnv]'s rule. Every command pinstall runs AGAINST an
-// installed or staged binary carries it, because a multi-binary release's
-// primary executable may resolve its sidecars by BARE NAME on PATH rather than
-// beside its own executable — kiro-cli is the live case: `kiro-cli settings`
-// delegates to the kiro-cli-chat sidecar via PATH only, so without this overlay
-// every settings assertion fails with ENOENT even though the sidecar sits right
-// next to the asserted binary. The caller's process environment keeps working
-// because exec.Cmd deduplicates Env taking the LAST entry.
+// binPathEnv leads PATH with bin's own directory under [pathEnv]'s rule. Every
+// command run against an installed or staged binary carries it, because a
+// primary executable may resolve its sidecars by bare name on PATH (kiro-cli
+// settings execs kiro-cli-chat that way). exec.Cmd keeps the last of duplicate
+// Env entries, so the caller's environment still applies.
 func binPathEnv(bin string) []string {
 	return pathEnv(filepath.Dir(bin))
 }
@@ -714,7 +571,7 @@ func binPathEnv(bin string) []string {
 // warns.
 func (m *Manager) applyAssertions(ctx context.Context, bin string) error {
 	var required error
-	for _, a := range m.cfg.Assert {
+	for _, a := range m.cfg.Assertions {
 		_, err := m.run(ctx, &command{
 			Path:    bin,
 			Env:     binPathEnv(bin),
@@ -725,11 +582,11 @@ func (m *Manager) applyAssertions(ctx context.Context, bin string) error {
 		case err == nil:
 			continue
 		case !a.Required:
-			slog.Warn("a best-effort assertion failed; a dependent feature may misbehave",
-				"package", m.cfg.Release.Name, "assertion", a.Name, "error", err)
+			m.log.Warn("a best-effort assertion failed; a dependent feature may misbehave",
+				"package", m.cfg.Name, "assertion", a.Name, "error", err)
 		default:
-			slog.Error("failed to assert a required assertion; withholding readiness because a guarantee the install depends on does not hold",
-				"package", m.cfg.Release.Name, "assertion", a.Name, "path", bin, "error", err)
+			m.log.Error("failed to assert a required assertion; withholding readiness because a guarantee the install depends on does not hold",
+				"package", m.cfg.Name, "assertion", a.Name, "path", bin, "error", err)
 			if required == nil {
 				required = fmt.Errorf("required assertion %s: %w", a.Name, err)
 			}
@@ -741,7 +598,7 @@ func (m *Manager) applyAssertions(ctx context.Context, bin string) error {
 // applyRequiredAssertions runs only the required assertions, for the staged gate
 // where the best-effort ones are applied later against the published artifact.
 func (m *Manager) applyRequiredAssertions(ctx context.Context, bin string) error {
-	for _, a := range m.cfg.Assert {
+	for _, a := range m.cfg.Assertions {
 		if !a.Required {
 			continue
 		}
@@ -777,10 +634,10 @@ func (m *Manager) commit(sel selection, installErr, assertErr error) {
 	m.mu.Unlock()
 
 	if installErr != nil {
-		slog.Warn("serving a previously installed version; the pinned version could not be installed",
-			"package", m.cfg.Release.Name, "active", sel.version, "pinned", m.cfg.Version, "path", sel.bin)
+		m.log.Warn("serving a previously installed version; the pinned version could not be installed",
+			"package", m.cfg.Name, "active", sel.version, "pinned", m.cfg.Version, "path", sel.bin)
 	} else {
-		slog.Info("version active", "package", m.cfg.Release.Name, "version", sel.version, "path", sel.bin)
+		m.log.Info("version active", "package", m.cfg.Name, "version", sel.version, "path", sel.bin)
 	}
 	m.saveState(&snapshot)
 }
@@ -794,13 +651,7 @@ func (m *Manager) recordUnavailable(installErr error) error {
 	// installed": it names the volume and the thing to change, where ErrNoVersion
 	// points the operator at an install that is present and simply not trusted. This is
 	// the path a mid-process verdict flip takes, where no install was even tried.
-	//
-	// Only when the verdict is what BLOCKED activation, though. Under
-	// [Config.InstallWithoutCustody] a failed verdict is the accepted state rather than the
-	// exclusion cause, and reporting it there would send an operator to fix permissions
-	// they deliberately chose while hiding the real reason — a replaced artifact under
-	// an intact sentinel, say, which is ErrVersionMismatch's story to tell.
-	if err == nil && !m.cfg.InstallWithoutCustody {
+	if err == nil {
 		err = m.custodyVerdict()
 	}
 	if err == nil {
@@ -818,8 +669,8 @@ func (m *Manager) recordUnavailable(installErr error) error {
 	snapshot := m.state
 	m.mu.Unlock()
 
-	slog.Error("no usable version is installed; readiness stays withheld until one is",
-		"package", m.cfg.Release.Name, "pinned", m.cfg.Version, "error", err)
+	m.log.Error("no usable version is installed; readiness stays withheld until one is",
+		"package", m.cfg.Name, "pinned", m.cfg.Version, "error", err)
 	m.saveState(&snapshot)
 	return err
 }
@@ -861,23 +712,22 @@ func (m *Manager) settlePhase() {
 // the record is an input to readiness, so losing it must not fail an otherwise good
 // install.
 //
-// It is skipped entirely in a tree this process does not control and was not waived
-// into, because the record is a file written under Root and the refusal has to mean
+// It is skipped entirely in a tree this process does not control, because the record is a file written under Root and the refusal has to mean
 // what it says. Nothing is lost: the same facts are already in the returned error and
 // the log line.
-func (m *Manager) saveState(s *State) {
+func (m *Manager) saveState(s *stateRecord) {
 	if !m.mayMutateTree() {
 		return
 	}
 	blob, err := json.Marshal(s)
 	if err != nil {
-		slog.Warn("failed to encode the state record", "package", m.cfg.Release.Name, "error", err)
+		m.log.Warn("failed to encode the state record", "package", m.cfg.Name, "error", err)
 		return
 	}
 
 	if err := m.writeFileDurably(m.stateName, append(blob, '\n'), fileMode); err != nil {
-		slog.Warn("failed to persist the state record; it is diagnostic only, so readiness is unaffected",
-			"package", m.cfg.Release.Name, "path", m.statePath, "error", err)
+		m.log.Warn("failed to persist the state record; it is diagnostic only, so readiness is unaffected",
+			"package", m.cfg.Name, "path", m.statePath, "error", err)
 	}
 }
 

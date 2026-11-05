@@ -1,3 +1,5 @@
+//go:build linux
+
 package pin
 
 import (
@@ -28,15 +30,14 @@ const (
 	oldVersion    = "2.14.0"
 )
 
-// The harness's primary profile: a package whose archive ships an installer that
-// drops the artifacts into a private home. It is deliberately NOT a real
-// upstream — the library must name no vendor.
+// The harness's primary profile: a package whose archive holds the artifacts
+// under pkg/bin. It is deliberately NOT a real upstream: the library must name
+// no vendor.
 const (
 	toolName          = "toolkit"
 	toolSidecar       = "toolkit-chat"
 	toolExtra         = "toolkit-term"
-	toolInstaller     = "pkg/install.sh"
-	toolArtifactDir   = ".local/bin"
+	toolArtifactDir   = "pkg/bin"
 	mandatoryName     = "pkg.disableAutoupdates"
 	toolURLTemplate   = "https://example.invalid/{version}/tool-{arch}.zip"
 	testLinkDir       = "bin"
@@ -194,21 +195,16 @@ func TestCaptureLogsRestoresThePreviousHandler(t *testing.T) {
 	}
 }
 
-// toolRelease is the primary test profile.
-func toolRelease() Release {
-	return Release{
+// toolRelease is the release half of the primary test profile.
+func toolRelease() Config {
+	return Config{
 		Name:        toolName,
 		URLTemplate: toolURLTemplate,
 		ArchTokens:  map[string]string{"amd64": "x86_64-linux", "arm64": "aarch64-linux"},
-		Installer: &ArchiveInstaller{
-			Path:    toolInstaller,
-			Args:    []string{"--no-confirm"},
-			Timeout: time.Minute,
-		},
 		ArtifactDir: toolArtifactDir,
 		ProbeArgs:   []string{"--version"},
 		Notice:      "toolkit is third-party content; installing it accepts its licence",
-		Mandatory:   []Assertion{{Name: mandatoryName, Args: []string{"settings", mandatoryName, "true"}}},
+		Assertions:  []Assertion{{Name: mandatoryName, Args: []string{"settings", mandatoryName, "true"}, Required: true}},
 	}
 }
 
@@ -220,23 +216,22 @@ type fakeEnv struct {
 	t    *testing.T
 	root string
 
-	release  Release
+	release  Config
 	require  []string
 	optional []string
 
+	// fixed is an archive a test supplied; nil builds one from produces when the
+	// config is built, so the pinned digest always matches what fetch serves.
+	fixed   []byte
 	archive []byte
 	digest  string
 
-	// produces maps the artifact names the fake installer writes into the
-	// staging home to the version each one reports. Unused by a profile with no
-	// installer, whose artifacts come out of the archive itself.
+	// produces maps the artifact names the archive holds under ArtifactDir to
+	// the version each one reports.
 	produces map[string]string
-	// installerFails makes the installer report a failure AND write nothing, the
-	// shape that fails the staged gates.
+	// installerFails makes the archive hold no artifact at all, the shape that
+	// fails the staged gates.
 	installerFails bool
-	// wideArtifacts names the artifacts the fake installer leaves group- and
-	// other-writable, the shape a real installer choosing its own modes can produce.
-	wideArtifacts []string
 	// probeAnswerFor renders the version a fake artifact encodes into the shape
 	// that package's probe prints.
 	probeAnswerFor func(version string) string
@@ -254,26 +249,52 @@ type fakeEnv struct {
 }
 
 // newEnv wires an env to one profile and one archive.
-func newEnv(t *testing.T, release Release, archive []byte, require, optional []string) *fakeEnv {
+func newEnv(t *testing.T, release Config, archive []byte, require, optional []string) *fakeEnv {
 	t.Helper()
-	sum := sha256.Sum256(archive)
-	return &fakeEnv{
+	e := &fakeEnv{
 		t:              t,
 		root:           t.TempDir(),
 		release:        release,
 		require:        require,
 		optional:       optional,
-		archive:        archive,
-		digest:         hex.EncodeToString(sum[:]),
+		fixed:          archive,
 		probeAnswerFor: func(v string) string { return toolName + " " + v + "\n" },
 	}
+	if archive != nil {
+		e.setArchive(archive)
+	}
+	return e
 }
 
-// newFakeEnv is the primary env: the installer-shipping profile, one required
-// sidecar and one optional extra.
+// useArchive pins archive for this env, so config does not rebuild one.
+func (e *fakeEnv) useArchive(archive []byte) {
+	e.fixed = archive
+	e.setArchive(archive)
+}
+
+// setArchive makes archive what fetch serves and the pinned digest's subject.
+func (e *fakeEnv) setArchive(archive []byte) {
+	sum := sha256.Sum256(archive)
+	e.archive = archive
+	e.digest = hex.EncodeToString(sum[:])
+}
+
+// builtArchive is the archive the primary profile ships: every produced
+// artifact under ArtifactDir, beside a file no artifact list names.
+func (e *fakeEnv) builtArchive() []byte {
+	entries := map[string]zipEntry{"pkg/NOTICE": {body: "toolkit\n", mode: 0o644}}
+	if !e.installerFails {
+		for name, version := range e.produces {
+			entries[e.release.ArtifactDir+"/"+name] = zipEntry{body: fakeBinaryBody(version), mode: 0o755}
+		}
+	}
+	return buildZip(e.t, entries)
+}
+
+// newFakeEnv is the primary env: one required sidecar and one optional extra.
 func newFakeEnv(t *testing.T) *fakeEnv {
 	t.Helper()
-	env := newEnv(t, toolRelease(), installerArchive(t), []string{toolSidecar}, []string{toolExtra})
+	env := newEnv(t, toolRelease(), nil, []string{toolSidecar}, []string{toolExtra})
 	env.produces = map[string]string{
 		toolName:    pinnedVersion,
 		toolSidecar: pinnedVersion,
@@ -358,17 +379,6 @@ func zipWithRawName(name string) ([]byte, error) {
 	return encodeZip([]namedEntry{{name: name, body: "x", mode: 0o644}})
 }
 
-// installerArchive is an archive whose only useful content is the installer the
-// manager execs.
-func installerArchive(t *testing.T) []byte {
-	t.Helper()
-	return buildZip(t, map[string]zipEntry{
-		toolInstaller:  {body: "#!/bin/sh\nexit 0\n", mode: 0o755},
-		"pkg/NOTICE":   {body: "toolkit\n", mode: 0o644},
-		"pkg/lib/x.so": {body: "binary\n", mode: 0o644},
-	})
-}
-
 // manager builds a manager wired to this env, with every seam replaced.
 func (e *fakeEnv) manager(mutate ...func(*Config)) *Manager {
 	e.t.Helper()
@@ -382,22 +392,25 @@ func (e *fakeEnv) manager(mutate ...func(*Config)) *Manager {
 
 // config is the env's Config, before New validates it.
 func (e *fakeEnv) config(mutate ...func(*Config)) *Config {
-	cfg := &Config{
-		Release:      e.release,
-		Version:      pinnedVersion,
-		Digests:      map[string]string{"amd64": e.digest, "arm64": e.digest},
-		Root:         e.root,
-		GOARCH:       "amd64",
-		Require:      e.require,
-		Optional:     e.optional,
-		LinkDir:      testLinkDir,
-		RetryBackoff: time.Millisecond,
-		MaxAttempts:  1,
+	if e.fixed == nil {
+		e.setArchive(e.builtArchive())
 	}
+	cfg := e.release
+	cfg.ArchTokens = maps.Clone(e.release.ArchTokens)
+	cfg.ProbeArgs = slices.Clone(e.release.ProbeArgs)
+	cfg.Assertions = slices.Clone(e.release.Assertions)
+	cfg.Version = pinnedVersion
+	cfg.Digests = map[string]string{"amd64": e.digest, "arm64": e.digest}
+	cfg.Root = e.root
+	cfg.goarch = "amd64"
+	cfg.Require = e.require
+	cfg.Optional = e.optional
+	cfg.LinkDir = testLinkDir
+	cfg.MaxAttempts = 1
 	for _, f := range mutate {
-		f(cfg)
+		f(&cfg)
 	}
-	return cfg
+	return &cfg
 }
 
 // wire replaces every seam on m with this env's double.
@@ -450,13 +463,10 @@ func (e *fakeEnv) fetchCount() int {
 	return e.fetches
 }
 
-// run dispatches on the shape of the command: the archive's installer, the
-// release's own probe argv, or an assertion.
+// run dispatches on the shape of the command: the release's own probe argv, or
+// an assertion.
 func (e *fakeEnv) run(_ context.Context, c *command) ([]byte, error) {
 	switch {
-	case e.isInstaller(c.Path):
-		e.record("installer")
-		return e.runInstaller(c)
 	case slices.Equal(c.Args, e.release.ProbeArgs):
 		e.record("probe %s", c.Path)
 		if e.onProbe != nil {
@@ -470,49 +480,6 @@ func (e *fakeEnv) run(_ context.Context, c *command) ([]byte, error) {
 		}
 		return nil, nil
 	}
-}
-
-// isInstaller reports whether path is the profile's in-archive installer.
-func (e *fakeEnv) isInstaller(path string) bool {
-	inst := e.release.Installer
-	return inst != nil && strings.HasSuffix(path, filepath.FromSlash(inst.Path))
-}
-
-// runInstaller stands in for the archive's installer: it writes the configured
-// artifacts into the private staging home the manager handed it.
-func (e *fakeEnv) runInstaller(c *command) ([]byte, error) {
-	home := ""
-	want := e.release.Installer.HomeEnv
-	if want == "" {
-		want = "HOME"
-	}
-	for _, kv := range c.Env {
-		if rest, ok := strings.CutPrefix(kv, want+"="); ok {
-			home = rest
-		}
-	}
-	if home == "" {
-		return nil, fmt.Errorf("the installer ran without %s pointed at a private home: %v", want, c.Env)
-	}
-	if e.installerFails {
-		return []byte("boom\n"), fmt.Errorf("the installer failed")
-	}
-	binDir := filepath.Join(home, e.release.ArtifactDir)
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		return nil, err
-	}
-	for name, version := range e.produces {
-		path := filepath.Join(binDir, name)
-		if err := writeFakeBinary(path, version); err != nil {
-			return nil, err
-		}
-		if slices.Contains(e.wideArtifacts, name) {
-			if err := os.Chmod(path, 0o777); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return []byte("installed\n"), nil
 }
 
 func (e *fakeEnv) fsync(path string) error {
@@ -588,7 +555,7 @@ func (e *fakeEnv) placeVersion(version string, names ...string) string {
 	e.t.Helper()
 	dir := e.versionDir(version)
 	if len(names) == 0 {
-		names = append([]string{e.release.binary()}, e.require...)
+		names = append([]string{e.release.Name}, e.require...)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		e.t.Fatalf("MkdirAll(%s): %v", dir, err)
@@ -612,7 +579,7 @@ func (e *fakeEnv) placePartial(version string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		e.t.Fatalf("MkdirAll(%s): %v", dir, err)
 	}
-	for _, n := range append([]string{e.release.binary()}, e.require...) {
+	for _, n := range append([]string{e.release.Name}, e.require...) {
 		if err := writeFakeBinary(filepath.Join(dir, n), version); err != nil {
 			e.t.Fatalf("writeFakeBinary(%s): %v", n, err)
 		}
@@ -657,4 +624,15 @@ func exists(path string) bool {
 func digestOf(archive []byte) string {
 	sum := sha256.Sum256(archive)
 	return hex.EncodeToString(sum[:])
+}
+
+// openRoot opens dir as an os.Root closed when the test ends.
+func openRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("OpenRoot(%s): %v", dir, err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
 }

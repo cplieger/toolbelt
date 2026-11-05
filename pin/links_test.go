@@ -1,3 +1,5 @@
+//go:build linux
+
 package pin
 
 import (
@@ -19,11 +21,10 @@ const (
 	toolAliasChat       = "tkchat"
 )
 
-// shrinkRelease is the primary profile with no installer, so each archive alone decides
-// which artifacts a version holds.
-func shrinkRelease() Release {
+// shrinkRelease is the primary profile with its own ArtifactDir, so each archive
+// alone decides which artifacts a version holds.
+func shrinkRelease() Config {
 	r := toolRelease()
-	r.Installer = nil
 	r.ArtifactDir = shrinkArtifactDir
 	return r
 }

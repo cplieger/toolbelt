@@ -95,23 +95,6 @@ func TestParseIdentitiesKeepsRejectedTextOut(t *testing.T) {
 	}
 }
 
-// TestParseIdentitiesFeedsBothTrustFields pins the naming decision: the same list shape is
-// what both trust fields take, which is why this is not called ParseTrustedUIDs.
-func TestParseIdentitiesFeedsBothTrustFields(t *testing.T) {
-	t.Parallel()
-	ids, rejected := ParseIdentities("3000,4000")
-	if rejected != 0 {
-		t.Fatalf("rejected = %d, want 0", rejected)
-	}
-	cfg := Config{TrustedUIDs: ids, TrustedGIDs: ids}
-	if !slices.Equal(cfg.TrustedUIDs, []int{3000, 4000}) {
-		t.Errorf("TrustedUIDs = %v, want [3000 4000]", cfg.TrustedUIDs)
-	}
-	if !slices.Equal(cfg.TrustedGIDs, []int{3000, 4000}) {
-		t.Errorf("TrustedGIDs = %v, want [3000 4000]", cfg.TrustedGIDs)
-	}
-}
-
 func FuzzParseIdentities(f *testing.F) {
 	for _, seed := range []string{"", ",", "1000", "1000,1001", " 1000 , 0 ,-1", "root", "+7", "007"} {
 		f.Add(seed)

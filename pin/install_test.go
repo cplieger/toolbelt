@@ -1,8 +1,9 @@
+//go:build linux
+
 package pin
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -74,7 +75,7 @@ func TestArchiveURLRendersBothPlaceholders(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			env := newFakeEnv(t)
-			m := env.manager(func(c *Config) { c.GOARCH = tc.goarch })
+			m := env.manager(func(c *Config) { c.goarch = tc.goarch })
 			if got := m.archiveURL(); got != tc.want {
 				t.Errorf("archiveURL() = %q, want %q", got, tc.want)
 			}
@@ -104,8 +105,8 @@ func TestEnsureDigestMismatchPlacesNothing(t *testing.T) {
 	m := env.manager()
 
 	err := m.Ensure(t.Context())
-	if !errors.Is(err, ErrDigestMismatch) {
-		t.Fatalf("Ensure error = %v, want ErrDigestMismatch", err)
+	if err == nil || !strings.Contains(err.Error(), "archive SHA-256 mismatch") {
+		t.Fatalf("Ensure error = %v, want the digest mismatch", err)
 	}
 	if entries, rerr := os.ReadDir(env.versionsRoot()); rerr == nil && len(entries) != 0 {
 		t.Errorf("installation root holds %v, want nothing placed on a digest mismatch", entries)
@@ -138,15 +139,15 @@ func TestDigestIsSelectedPerArchitecture(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := newFakeEnv(t)
 			m, err := New(env.config(func(c *Config) {
-				c.GOARCH = tc.goarch
+				c.goarch = tc.goarch
 				c.Digests = map[string]string{"amd64": amd, "arm64": arm}
 			}))
 			switch {
 			case tc.ok && err != nil:
 				t.Fatalf("New: %v", err)
 			case !tc.ok:
-				if !errors.Is(err, ErrUnsupportedArch) {
-					t.Fatalf("error = %v, want ErrUnsupportedArch", err)
+				if err == nil || !strings.Contains(err.Error(), "unsupported architecture") {
+					t.Fatalf("error = %v, want the unsupported architecture", err)
 				}
 			case m.digest != tc.want:
 				t.Errorf("digest = %q, want %q", m.digest, tc.want)
@@ -222,10 +223,10 @@ func TestEnsureSyncFailureAtEveryProtocolPointRetainsPreviousVersion(t *testing.
 			if ready, why := m.Ready(); !ready {
 				t.Errorf("Ready() = false (%s), want true on the retained previous version", why)
 			}
-			if state, ok := m.Active(); !ok || state.ActiveVersion != prevVersion {
-				t.Errorf("active version = %q (ok=%v), want %q", state.ActiveVersion, ok, prevVersion)
-			} else if state.LastError == "" {
-				t.Error("State.LastError is empty; the failed install must be recorded for diagnosis")
+			if got := m.Version(); got != prevVersion {
+				t.Errorf("Version() = %q, want %q", got, prevVersion)
+			} else if m.state.LastError == "" {
+				t.Error("the state record's LastError is empty; the failed install must be recorded for diagnosis")
 			}
 			if got := exists(env.versionDir(pinnedVersion)); got != tc.published {
 				t.Errorf("pinned directory exists = %v, want %v", got, tc.published)
@@ -327,52 +328,27 @@ func TestEnsureRefusesToPublishWhenARequiredAssertionFails(t *testing.T) {
 	}
 }
 
-// TestEnsureRefusesAnArchiveWithNoInstaller pins the profile-vs-archive mismatch: a
-// release that declares an in-archive installer whose path the archive does not
-// carry fails loudly instead of publishing whatever happens to be in the staging
-// home.
-func TestEnsureRefusesAnArchiveWithNoInstaller(t *testing.T) {
-	env := newFakeEnv(t)
-	env.archive = buildZip(t, map[string]zipEntry{"pkg/README": {body: "docs\n", mode: 0o644}})
-	env.digest = digestOf(env.archive)
-	m := env.manager()
-
-	err := m.Ensure(t.Context())
-	if err == nil || !strings.Contains(err.Error(), "no executable installer") {
-		t.Fatalf("Ensure error = %v, want a refusal naming the missing installer", err)
-	}
-	if env.countCalls("installer") != 0 {
-		t.Error("a subprocess ran although the archive holds no installer")
-	}
-}
-
-// TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts pins the
-// Installer == nil axis, which no current consumer exercises. The artifacts come
-// straight out of the extraction directory, and NO subprocess runs except the
-// version probe and the assertions -- there is no installer to run.
+// TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts pins that the
+// artifacts come straight out of ArtifactDir in the archive, nothing else from it
+// is published, and NO subprocess runs except the version probe and the assertions.
 func TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts(t *testing.T) {
 	env := newFakeEnv(t)
-	env.release.Installer = nil
 	env.release.ArtifactDir = "payload"
-	env.archive = buildZip(t, map[string]zipEntry{
+	env.useArchive(buildZip(t, map[string]zipEntry{
 		"payload/" + toolName:    {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 		"payload/" + toolSidecar: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 		"payload/NOTICE":         {body: "docs\n", mode: 0o644},
-	})
-	env.digest = digestOf(env.archive)
+	}))
 	m := env.manager(func(c *Config) { c.Optional = nil })
 
 	if err := m.Ensure(t.Context()); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if got := env.countCalls("installer"); got != 0 {
-		t.Errorf("installer ran %d times, want 0 with no ArchiveInstaller configured", got)
-	}
 	for _, call := range env.called() {
 		if !strings.HasPrefix(call, "probe ") && !strings.HasPrefix(call, "assert ") &&
 			!strings.HasPrefix(call, "fetch ") && !strings.HasPrefix(call, "fsync ") &&
 			!strings.HasPrefix(call, "rename ") {
-			t.Errorf("unexpected boundary crossing %q with no installer configured", call)
+			t.Errorf("unexpected boundary crossing %q", call)
 		}
 	}
 	dir := env.versionDir(pinnedVersion)
@@ -386,251 +362,6 @@ func TestEnsureInstallsFromAnArchiveThatAlreadyHoldsTheArtifacts(t *testing.T) {
 	}
 	if ready, why := m.Ready(); !ready {
 		t.Errorf("Ready() = false (%s), want true", why)
-	}
-}
-
-// TestArtifactDirHasTwoMeanings pins the dual meaning of one field, the subtlest
-// knob on the surface: relative to the installer's private home when an installer
-// runs, relative to the extraction directory when none does, and the root of
-// whichever applies when it is empty.
-func TestArtifactDirHasTwoMeanings(t *testing.T) {
-	tests := []struct {
-		name        string
-		installer   bool
-		artifactDir string
-		wantUnder   string
-	}{
-		{name: "installer, nested dir", installer: true, artifactDir: ".local/bin", wantUnder: "home/.local/bin"},
-		{name: "installer, single dir", installer: true, artifactDir: "bin", wantUnder: "home/bin"},
-		{name: "installer, empty dir", installer: true, artifactDir: "", wantUnder: "home"},
-		{name: "no installer, nested dir", artifactDir: ".local/bin", wantUnder: "x/.local/bin"},
-		{name: "no installer, single dir", artifactDir: "bin", wantUnder: "x/bin"},
-		{name: "no installer, empty dir", artifactDir: "", wantUnder: "x"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			env := newFakeEnv(t)
-			env.release.ArtifactDir = tc.artifactDir
-			if !tc.installer {
-				env.release.Installer = nil
-			}
-			m := env.manager()
-			stage := &stageTree{
-				root:    filepath.Join(env.versionsRoot(), ".stage-x"),
-				extract: filepath.Join(env.versionsRoot(), ".stage-x", "x"),
-				home:    filepath.Join(env.versionsRoot(), ".stage-x", "home"),
-			}
-			if tc.installer {
-				// A real run would exec the script; here only the path matters,
-				// so plant an executable at the profile's installer path.
-				plantExecutable(t, filepath.Join(stage.extract, filepath.FromSlash(toolInstaller)))
-			}
-			got, err := m.runInstaller(t.Context(), stage)
-			if err != nil {
-				t.Fatalf("runInstaller: %v", err)
-			}
-			want := filepath.Join(stage.root, filepath.FromSlash(tc.wantUnder))
-			if got != want {
-				t.Errorf("artifact source = %q, want %q", got, want)
-			}
-		})
-	}
-}
-
-// plantExecutable creates an executable file at path, parents included.
-func plantExecutable(t *testing.T, path string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := writeFakeBinary(path, pinnedVersion); err != nil {
-		t.Fatalf("writeFakeBinary: %v", err)
-	}
-}
-
-// TestInstallerEnvAndArgsComeFromTheProfile pins the three facts a profile supplies
-// about an in-archive installer: the argv, the environment variable pointed at the
-// private home, and that the home is private (under the staging tree, never the
-// real one).
-func TestInstallerEnvAndArgsComeFromTheProfile(t *testing.T) {
-	env := newFakeEnv(t)
-	env.release.Installer = &ArchiveInstaller{
-		Path:    toolInstaller,
-		Args:    []string{"--quiet", "--prefix", "/opt"},
-		HomeEnv: "TOOLKIT_HOME",
-	}
-	var gotArgs, gotEnv []string
-	baseRun := env.run
-	m := env.manager()
-	m.run = func(ctx context.Context, c *command) ([]byte, error) {
-		if env.isInstaller(c.Path) {
-			gotArgs, gotEnv = slices.Clone(c.Args), slices.Clone(c.Env)
-		}
-		return baseRun(ctx, c)
-	}
-
-	if err := m.Ensure(t.Context()); err != nil {
-		t.Fatalf("Ensure: %v", err)
-	}
-	if want := []string{"--quiet", "--prefix", "/opt"}; !slices.Equal(gotArgs, want) {
-		t.Errorf("installer args = %v, want %v", gotArgs, want)
-	}
-	if len(gotEnv) != 1 || !strings.HasPrefix(gotEnv[0], "TOOLKIT_HOME=") {
-		t.Fatalf("installer env = %v, want exactly the profile's home variable", gotEnv)
-	}
-	home := strings.TrimPrefix(gotEnv[0], "TOOLKIT_HOME=")
-	if !strings.HasPrefix(home, env.versionsRoot()) || !strings.Contains(home, stagePrefix) {
-		t.Errorf("installer home = %q, want a private staging home under %q", home, env.versionsRoot())
-	}
-}
-
-// TestInstallContinuesPastAFailingInstallerAndLetsTheGatesDecide pins the
-// deliberate non-fatality of the installer's exit code: an upstream installer
-// commonly fails on shell profiles it cannot write, so what decides is the staged
-// artifact. A failure that also produces nothing still fails the install.
-func TestInstallContinuesPastAFailingInstallerAndLetsTheGatesDecide(t *testing.T) {
-	logs := captureLogs(t)
-	env := newFakeEnv(t)
-	baseRun := env.run
-	m := env.manager()
-	m.run = func(ctx context.Context, c *command) ([]byte, error) {
-		out, err := baseRun(ctx, c)
-		if env.isInstaller(c.Path) {
-			return out, errors.New("touching the shell profile failed")
-		}
-		return out, err
-	}
-
-	if err := m.Ensure(t.Context()); err != nil {
-		t.Fatalf("Ensure error = %v, want nil: the staged gates decide, not the installer's exit code", err)
-	}
-	if ready, why := m.Ready(); !ready {
-		t.Errorf("Ready() = false (%s), want true", why)
-	}
-	// Non-fatal is not the same as unrecorded: an installer that reported a failure and
-	// still passed the gates is exactly the case an operator wants to see afterwards.
-	if got := logs.at(slog.LevelWarn, "installer"); len(got) != 1 || got[0].attrs["installer"] != toolInstaller {
-		t.Errorf("Warn records naming the installer = %v, want one naming %s", got, toolInstaller)
-	}
-}
-
-// TestUnpackSeamIsHandedTheVerifiedArchiveAndItsErrorAborts pins the Unpacker
-// seam's CONTRACT rather than a second archive format: the library ships and tests
-// exactly one unpacker, and what a custom one can rely on is that it receives the
-// digest-verified archive, a destination whose own methods refuse to write outside
-// it, and that its error aborts the install with nothing published.
-func TestUnpackSeamIsHandedTheVerifiedArchiveAndItsErrorAborts(t *testing.T) {
-	t.Run("receives the verified archive and a root on the staging extraction dir", func(t *testing.T) {
-		env := newFakeEnv(t)
-		var gotArchive []byte
-		var gotDir string
-		env.release.Unpack = func(_ context.Context, archive *io.SectionReader, dst *os.Root) error {
-			gotDir = dst.Name()
-			raw, err := io.ReadAll(archive)
-			gotArchive = raw
-			return err
-		}
-		m := env.manager()
-
-		// The install fails later (nothing was extracted, so no installer runs),
-		// which is fine: the assertion is on what the seam was handed.
-		_ = m.Ensure(t.Context())
-		if string(gotArchive) != string(env.archive) {
-			t.Errorf("unpacker got %d bytes, want the %d verified archive bytes", len(gotArchive), len(env.archive))
-		}
-		if !strings.HasPrefix(gotDir, env.versionsRoot()) || !strings.Contains(gotDir, stagePrefix) {
-			t.Errorf("unpacker got a root on %q, want one inside a staging tree under %q", gotDir, env.versionsRoot())
-		}
-	})
-
-	t.Run("cannot write outside the destination it is handed", func(t *testing.T) {
-		// A custom implementation that names its way out through the root it was
-		// handed is refused by os.Root rather than trusted to have validated the
-		// name itself. It could still call os.OpenFile directly and escape — a
-		// callback is ordinary Go code — so what this pins is that the SUPPLIED
-		// path is contained, not that the seam is a sandbox.
-		env := newFakeEnv(t)
-		var escapeErr error
-		env.release.Unpack = func(_ context.Context, _ *io.SectionReader, dst *os.Root) error {
-			_, escapeErr = dst.OpenFile("../../pwn", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-			return escapeErr
-		}
-		m := env.manager()
-
-		_ = m.Ensure(t.Context())
-		if escapeErr == nil {
-			t.Fatal("the destination root accepted a traversing name")
-		}
-		if exists(filepath.Join(env.versionsRoot(), "pwn")) || exists(filepath.Join(env.root, "pwn")) {
-			t.Error("an unpacker wrote outside the destination it was handed")
-		}
-	})
-
-	t.Run("is never called on a digest mismatch", func(t *testing.T) {
-		env := newFakeEnv(t)
-		called := false
-		env.release.Unpack = func(context.Context, *io.SectionReader, *os.Root) error {
-			called = true
-			return nil
-		}
-		env.onFetch = func(dst io.Writer) error {
-			_, err := dst.Write([]byte("wrong bytes"))
-			return err
-		}
-		m := env.manager()
-
-		if err := m.Ensure(t.Context()); !errors.Is(err, ErrDigestMismatch) {
-			t.Fatalf("Ensure error = %v, want ErrDigestMismatch", err)
-		}
-		if called {
-			t.Error("the unpacker ran on an archive whose digest did not match")
-		}
-	})
-
-	t.Run("its error aborts the install and publishes nothing", func(t *testing.T) {
-		env := newFakeEnv(t)
-		injected := errors.New("unsupported archive format")
-		env.release.Unpack = func(context.Context, *io.SectionReader, *os.Root) error { return injected }
-		m := env.manager()
-
-		if err := m.Ensure(t.Context()); !errors.Is(err, injected) {
-			t.Fatalf("Ensure error = %v, want the unpacker's error", err)
-		}
-		if dirs := env.versionDirs(); len(dirs) != 0 {
-			t.Errorf("installation root holds %v, want nothing", dirs)
-		}
-	})
-}
-
-// TestDownloadedArchiveHasNoNameWhileItIsBeingUsed pins the strongest form of the
-// TOCTOU fix. The archive is unlinked the instant it exists, so there is no name to
-// substitute rather than a name that must not be re-resolved: while the unpacker
-// holds its reader, NOTHING in the installation tree refers to those bytes, and the
-// reader still yields exactly what the digest proved.
-//
-// The predecessor of this design digested a file and let the unpacker re-open its
-// PATH, which a second process could repoint between the two steps. Both halves are
-// asserted here because either alone would be satisfiable by the broken shape: a
-// nameless file whose reader returned other bytes, or the right bytes reached
-// through a name that still exists.
-func TestDownloadedArchiveHasNoNameWhileItIsBeingUsed(t *testing.T) {
-	env := newFakeEnv(t)
-	var gotArchive []byte
-	var namesDuringUnpack []string
-	env.release.Unpack = func(_ context.Context, archive *io.SectionReader, _ *os.Root) error {
-		namesDuringUnpack = archiveCandidateNames(t, env.versionsRoot())
-		raw, err := io.ReadAll(archive)
-		gotArchive = raw
-		return err
-	}
-	m := env.manager()
-
-	_ = m.Ensure(t.Context())
-	if !bytes.Equal(gotArchive, env.archive) {
-		t.Errorf("unpacker read %d bytes, want the %d verified archive bytes", len(gotArchive), len(env.archive))
-	}
-	if len(namesDuringUnpack) != 0 {
-		t.Errorf("the installation tree still names the archive as %v while it is being extracted; a name is something another principal can repoint", namesDuringUnpack)
 	}
 }
 
@@ -649,6 +380,43 @@ func archiveCandidateNames(t *testing.T, versionsRoot string) []string {
 		}
 	}
 	return out
+}
+
+// TestEnsureRefusesAnArchiveItCannotUnpack pins that an archive whose digest
+// matches but which internal/unpack refuses aborts the install and publishes
+// nothing.
+func TestEnsureRefusesAnArchiveItCannotUnpack(t *testing.T) {
+	env := newFakeEnv(t)
+	env.useArchive([]byte("not a zip archive"))
+	m := env.manager()
+
+	err := m.Ensure(t.Context())
+	if err == nil || !strings.Contains(err.Error(), "unpacking the archive") {
+		t.Fatalf("Ensure error = %v, want the unpack refusal", err)
+	}
+	if dirs := env.versionDirs(); len(dirs) != 0 {
+		t.Errorf("installation root holds %v, want nothing", dirs)
+	}
+}
+
+// TestDownloadedArchiveHasNoNameWhileItIsBeingUsed pins the TOCTOU fix: the
+// archive is unlinked the instant it exists, so while the staged artifact is
+// probed NOTHING in the installation tree refers to those bytes.
+func TestDownloadedArchiveHasNoNameWhileItIsBeingUsed(t *testing.T) {
+	env := newFakeEnv(t)
+	var namesDuringProbe []string
+	env.onProbe = func(path string) ([]byte, error) {
+		namesDuringProbe = append(namesDuringProbe, archiveCandidateNames(t, env.versionsRoot())...)
+		return env.probeAnswer(path)
+	}
+	m := env.manager()
+
+	if err := m.Ensure(t.Context()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if len(namesDuringProbe) != 0 {
+		t.Errorf("the installation tree still names the archive as %v; a name is something another principal can repoint", namesDuringProbe)
+	}
 }
 
 // TestHTTPFetchRefusesEmptyAndNonOK pins the fetch boundary's two cheap refusals.
@@ -730,43 +498,6 @@ func TestCopyWithStallGuardAbortsAStalledTransfer(t *testing.T) {
 	}
 }
 
-// TestInstallerTimeoutFallsBackToTheLibraryDefault pins which deadline bounds an
-// in-archive installer. A profile that declares one gets exactly that; a profile that
-// declares nothing gets the library's documented default, because a zero there would be
-// an UNBOUNDED subprocess — the one shape that can stall the start it exists to
-// complete, and the reason the timeout is not simply passed through.
-func TestInstallerTimeoutFallsBackToTheLibraryDefault(t *testing.T) {
-	tests := map[string]struct {
-		declared time.Duration
-		want     time.Duration
-	}{
-		"the profile declares none": {want: defaultInstallerTimeout},
-		"the profile declares one":  {declared: 7 * time.Second, want: 7 * time.Second},
-	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			env := newFakeEnv(t)
-			env.release.Installer = &ArchiveInstaller{Path: toolInstaller, Timeout: tc.declared}
-			baseRun := env.run
-			m := env.manager()
-			var got time.Duration
-			m.run = func(ctx context.Context, c *command) ([]byte, error) {
-				if env.isInstaller(c.Path) {
-					got = c.Timeout
-				}
-				return baseRun(ctx, c)
-			}
-
-			if err := m.Ensure(t.Context()); err != nil {
-				t.Fatalf("Ensure: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("installer timeout = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestEnsureInstallsEveryOptionalArtifactAnArchiveProvides pins the Optional contract
 // on the ordinary shape for a package whose extras ship in the same archive: more
 // optional artifacts than required ones. "Installed when the archive provides it" is
@@ -774,7 +505,7 @@ func TestInstallerTimeoutFallsBackToTheLibraryDefault(t *testing.T) {
 // archive.
 func TestEnsureInstallsEveryOptionalArtifactAnArchiveProvides(t *testing.T) {
 	const secondExtra = "toolkit-doc"
-	env := newEnv(t, toolRelease(), installerArchive(t), nil, []string{toolSidecar, toolExtra, secondExtra})
+	env := newEnv(t, toolRelease(), nil, nil, []string{toolSidecar, toolExtra, secondExtra})
 	env.produces = map[string]string{
 		toolName:    pinnedVersion,
 		toolSidecar: pinnedVersion,
@@ -888,28 +619,6 @@ func TestTheProfileNoticeIsLoggedOncePerInstall(t *testing.T) {
 	}
 }
 
-// TestTruncateBoundsADiagnosticString pins that a runaway installer log cannot
-// flood the log pipeline, and that a short one is passed through untouched.
-func TestTruncateBoundsADiagnosticString(t *testing.T) {
-	tests := map[string]struct {
-		in    string
-		limit int
-		want  string
-	}{
-		"under the limit": {in: "short", limit: 10, want: "short"},
-		"at the limit":    {in: "exactly", limit: 7, want: "exactly"},
-		"over the limit":  {in: "abcdefgh", limit: 3, want: "abc...(truncated)"},
-		"empty":           {in: "", limit: 4, want: ""},
-	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			if got := truncate(tc.in, tc.limit); got != tc.want {
-				t.Errorf("truncate(%q, %d) = %q, want %q", tc.in, tc.limit, got, tc.want)
-			}
-		})
-	}
-}
-
 // TestWriteFileDurablyLeavesNoTempOnFailure pins that the durable-write helper
 // cleans up after itself: a failed sync or rename must not leave a dot-prefixed
 // temp file next to the record it failed to write.
@@ -991,26 +700,6 @@ func TestExecRunnerBoundsAndIsolatesASubprocess(t *testing.T) {
 		}
 		if got, want := strings.TrimSpace(string(out)), "/private/home|set"; got != want {
 			t.Errorf("output = %q, want %q (the extra variable present AND PATH inherited)", got, want)
-		}
-	})
-
-	t.Run("stderr is folded in only when asked", func(t *testing.T) {
-		args := []string{"-c", `printf 'to-err\n' >&2; printf 'to-out\n'`}
-		quiet, err := execRunner(t.Context(), &command{Path: sh, Args: args, Timeout: 10 * time.Second})
-		if err != nil {
-			t.Fatalf("execRunner: %v", err)
-		}
-		if strings.Contains(string(quiet), "to-err") {
-			t.Errorf("output = %q, want stderr excluded without CaptureStderr", quiet)
-		}
-		loud, err := execRunner(t.Context(), &command{Path: sh, Args: args, Timeout: 10 * time.Second, CaptureStderr: true})
-		if err != nil {
-			t.Fatalf("execRunner: %v", err)
-		}
-		for _, want := range []string{"to-err", "to-out"} {
-			if !strings.Contains(string(loud), want) {
-				t.Errorf("combined output = %q, want it to carry %q", loud, want)
-			}
 		}
 	})
 
@@ -1115,12 +804,10 @@ func TestPublishClearsASymlinkedDestinationThroughTheRoot(t *testing.T) {
 // TestMoveArtifactRefusesASymlinkedSourceDirectory pins the artifact move inside the
 // staging tree.
 //
-// The source directory is territory something ELSE wrote: an in-archive installer
-// chose what it dropped into its private home, and with no installer it is the
-// extracted archive. os.Root PERMITS creating a symlink whose target leaves the root
-// (it validates the name being created, not the text the link carries) and refuses to
-// FOLLOW one, so a custom Unpacker reproducing an archive symlink can legitimately
-// leave one at ArtifactDir.
+// The source directory is the extracted archive. os.Root PERMITS creating a symlink
+// whose target leaves the root (it validates the name being created, not the text the
+// link carries) and refuses to FOLLOW one, so an archive symlink can leave one at
+// ArtifactDir.
 //
 // Before the confinement, filepath.Join followed it and os.Rename moved a file from
 // outside the staging tree INTO the version directory this package is about to
@@ -1138,10 +825,10 @@ func TestMoveArtifactRefusesASymlinkedSourceDirectory(t *testing.T) {
 	if err := os.WriteFile(planted, []byte("not from the archive\n"), 0o755); err != nil {
 		t.Fatalf("seed the file outside the staging tree: %v", err)
 	}
-	// What the unpacker or the installer left where a directory of artifacts belongs.
-	srcRel := filepath.Join(stageHomeDir, "artifacts")
-	if err := os.MkdirAll(filepath.Join(stage, stageHomeDir), 0o755); err != nil {
-		t.Fatalf("MkdirAll the staging home: %v", err)
+	// What the archive left where a directory of artifacts belongs.
+	srcRel := filepath.Join(stageExtractDir, "artifacts")
+	if err := os.MkdirAll(filepath.Join(stage, stageExtractDir), 0o755); err != nil {
+		t.Fatalf("MkdirAll the extraction directory: %v", err)
 	}
 	if err := os.Symlink(outside, filepath.Join(stage, srcRel)); err != nil {
 		t.Fatalf("Symlink the artifact dir out of the staging tree: %v", err)

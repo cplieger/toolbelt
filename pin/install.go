@@ -3,20 +3,20 @@
 package pin
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cplieger/toolbelt/v3/internal/unpack"
 )
 
 // The placeholders a URL template carries.
@@ -48,23 +48,14 @@ type command struct {
 	Args []string
 	// Timeout bounds the run; every call site sets one.
 	Timeout time.Duration
-	// CaptureStderr folds stderr into the returned output, for commands whose
-	// diagnostics are worth surfacing.
-	CaptureStderr bool
 }
 
 // runCommand is the manager's process-execution seam.
 type runCommand func(ctx context.Context, c *command) ([]byte, error)
 
-// waitDelay is the grace period after a timed-out command is killed, before its
-// output pipes are force-closed.
-//
-// It is what makes the timeout a real bound. exec.CommandContext kills the child
-// on the deadline, but the wait still blocks on the output pipes — and a child
-// that forked before dying leaves a grandchild holding the write end, so without
-// a delay the call returns only when that grandchild exits. An installer script
-// backgrounding a helper is exactly that shape, so a wedged one would stall a
-// start indefinitely despite the timeout. A package variable so the tests can
+// waitDelay bounds the wait for a killed command's output pipes: a child that
+// forked before dying leaves a grandchild holding them, and without the delay a
+// wedged one would stall a start despite the timeout. A variable so the tests can
 // shorten it.
 var waitDelay = 5 * time.Second
 
@@ -80,9 +71,6 @@ func execRunner(ctx context.Context, c *command) ([]byte, error) {
 	cmd.WaitDelay = waitDelay
 	if len(c.Env) > 0 {
 		cmd.Env = append(os.Environ(), c.Env...)
-	}
-	if c.CaptureStderr {
-		return cmd.CombinedOutput()
 	}
 	return cmd.Output()
 }
@@ -186,14 +174,16 @@ func (m *Manager) archiveURL() string {
 // to an [os.Root] have one source rather than two spellings that can drift.
 const (
 	stageExtractDir = "x"
-	stageHomeDir    = "home"
 	stageVersionDir = "v"
 )
 
-// stageTree is one in-progress installation: the extracted archive, a private
-// home for an in-archive installer, and the version directory that will be
-// renamed into place. All three live under the installation root, so the publish
-// stays a same-filesystem rename rather than a copy.
+// extractLimits bound one extraction: a pinned archive is commonly hundreds of
+// megabytes, so these are sanity bounds against a hostile or corrupt response.
+var extractLimits = unpack.Limits{MaxBytes: 3 << 30, MaxEntries: 20000}
+
+// stageTree is one in-progress installation: the extracted archive and the
+// version directory that will be renamed into place. Both live under the
+// installation root, so the publish stays a same-filesystem rename.
 type stageTree struct {
 	root string
 	// rel is root's own name relative to the installation root, which is what
@@ -201,26 +191,18 @@ type stageTree struct {
 	// on that root.
 	rel        string
 	extract    string
-	home       string
 	versionDir string
 }
 
-// install performs one complete installation attempt. On every failure path
-// nothing outside the staging tree is left behind and the versions already on the
-// volume keep serving.
-//
-// Custody of the installation root is proved FIRST, before a byte is fetched: the
-// digest gate downstream is only worth running on a tree nobody else can write to
-// (see [verifyCustody]). Then the archive is downloaded into a file that is
-// unlinked the instant it exists, so from that point on it has no name at all —
-// nothing to swap, nothing to rewrite by path, and nothing left on the volume if
-// this process dies mid-install. The same descriptor carries the bytes through the
-// digest check and into the extraction, so the proof and the use are about the
-// same bytes by construction.
+// install performs one complete installation attempt; on every failure path
+// nothing outside the staging tree is left and the versions on the volume keep
+// serving. Custody of the installation root is proved before a byte is fetched,
+// and the archive's bytes go from one unlinked descriptor through the digest
+// check into the extraction.
 func (m *Manager) install(ctx context.Context) error {
-	slog.Info("installing", "package", m.cfg.Release.Name, "version", m.cfg.Version, "arch", m.cfg.GOARCH)
-	if m.cfg.Release.Notice != "" {
-		slog.Info(m.cfg.Release.Notice, "package", m.cfg.Release.Name, "version", m.cfg.Version)
+	m.log.Info("installing", "package", m.cfg.Name, "version", m.cfg.Version, "arch", m.cfg.goarch)
+	if m.cfg.Notice != "" {
+		m.log.Info(m.cfg.Notice, "package", m.cfg.Name, "version", m.cfg.Version)
 	}
 
 	if err := m.ensureVersionsDir(); err != nil {
@@ -248,16 +230,13 @@ func (m *Manager) install(ctx context.Context) error {
 		return err
 	}
 	// The archive's blocks are the caller's disk, and nothing after the extraction
-	// reads them. Release them before the installer, the gates and the publish run,
+	// reads them. Release them before the gates and the publish run,
 	// rather than holding a copy of the download alongside the extracted tree and
 	// the version directory for the rest of the install.
 	if err := archive.close(); err != nil {
 		return fmt.Errorf("closing the archive: %w", err)
 	}
-	src, srcErr := m.runInstaller(ctx, stage)
-	if srcErr != nil {
-		return srcErr
-	}
+	src := filepath.Join(stage.extract, m.cfg.ArtifactDir)
 	if err := m.gateStaged(ctx, filepath.Join(src, m.primary)); err != nil {
 		return err
 	}
@@ -270,44 +249,31 @@ func (m *Manager) install(ctx context.Context) error {
 	m.mu.Lock()
 	m.installed[m.cfg.Version] = true
 	m.mu.Unlock()
-	slog.Info("installed", "package", m.cfg.Release.Name, "version", m.cfg.Version,
+	m.log.Info("installed", "package", m.cfg.Name, "version", m.cfg.Version,
 		"dir", m.versionDir(m.cfg.Version))
 	return nil
 }
 
-// extract unpacks the verified archive into the staging tree through an [os.Root],
-// so no archive entry can name its way out of the extraction directory.
+// extract unpacks the verified archive into the staging tree through
+// internal/unpack, which confines every entry to the extraction directory.
 func (m *Manager) extract(ctx context.Context, archive *verifiedArchive, stage *stageTree) error {
 	dst, err := os.OpenRoot(stage.extract)
 	if err != nil {
 		return fmt.Errorf("opening the extraction directory: %w", err)
 	}
 	defer func() { _ = dst.Close() }()
-	if err := m.unpack(ctx, archive.reader(), dst); err != nil {
+	if err := unpack.Archive(ctx, archive.reader(), m.format, dst, extractLimits, nil); err != nil {
 		return fmt.Errorf("unpacking the archive: %w", err)
 	}
 	return nil
 }
 
 // downloadArchive fetches the pinned archive and proves it is the artifact the
-// pin names. Verification is the whole point: nothing downstream re-checks the
-// digest, and nothing is placed on the persistent volume until it passes.
-//
-// The archive is created inside the installation root and UNLINKED immediately, so
-// for the entire time it holds bytes it has no name. That is a deletion rather than
-// a defence added: with no name there is nothing for another principal to point
-// elsewhere, nothing to rewrite by path, no temp directory whose permissions need
-// checking, no TMPDIR the caller controls in the threat surface, and no cleanup to
-// get right — the kernel reclaims the space when the last descriptor closes,
-// including when this process dies mid-download. The installation root is the right
-// home for it because custody there has just been proved, and it is the same
-// filesystem the extracted tree lands on.
-//
-// It returns the archive still OPEN, because the proof and the extraction have to
-// be about the same bytes. Digesting a file and then handing its PATH to the
-// unpacker proves nothing even while a name exists: a name can be pointed at
-// another inode in between. The descriptor these bytes were written and hashed
-// through is the one the unpacker reads. The caller closes it.
+// pin names; nothing downstream re-checks the digest. The file is created in the
+// installation root, whose custody was just proved, and unlinked at once, so its
+// bytes have no name another principal could repoint and nothing to clean up. It
+// returns the archive still open: the descriptor that was hashed is the one the
+// unpacker reads, so the proof and the extraction are about the same bytes.
 func (m *Manager) downloadArchive(ctx context.Context) (*verifiedArchive, error) {
 	f, err := m.anonymousFile()
 	if err != nil {
@@ -330,24 +296,19 @@ func (m *Manager) downloadArchive(ctx context.Context) (*verifiedArchive, error)
 	got := hex.EncodeToString(sum.Sum(nil))
 	if got != m.digest {
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: arch=%s expected=%s actual=%s. Bump the version and every digest literal together",
-			ErrDigestMismatch, m.cfg.GOARCH, m.digest, got)
+		return nil, fmt.Errorf("archive SHA-256 mismatch: arch=%s expected=%s actual=%s. Bump the version and every digest literal together",
+			m.cfg.goarch, m.digest, got)
 	}
-	slog.Info("archive SHA-256 verified against the pinned digest",
-		"package", m.cfg.Release.Name, "arch", m.cfg.GOARCH, "sha256", got)
+	m.log.Info("archive SHA-256 verified against the pinned digest",
+		"package", m.cfg.Name, "arch", m.cfg.goarch, "sha256", got)
 	return &verifiedArchive{file: f, size: size}, nil
 }
 
 // anonymousFile returns an open, writable file under the installation root that
-// has already been removed from the directory, so it is reachable only through the
-// returned descriptor.
-//
-// Create-then-unlink rather than O_TMPFILE: that flag's value is
-// architecture-dependent and reaching it means a dependency outside the standard
-// library, while the only thing it buys here is closing the instant between the
-// create and the unlink — an instant inside a directory whose custody was just
-// proved, where no other principal can act at all. The dot prefix keeps the name
-// out of the version scan and out of prunePartials for that instant.
+// is already unlinked, so only the descriptor reaches it. Create-then-unlink
+// rather than O_TMPFILE, whose value is architecture-dependent; the instant
+// between the two is inside a directory whose custody was just proved, and the
+// dot prefix keeps the name out of every scan meanwhile.
 func (m *Manager) anonymousFile() (*os.File, error) {
 	f, err := os.CreateTemp(m.versionsDir, ".download-*")
 	if err != nil {
@@ -398,13 +359,10 @@ func (m *Manager) newStage() (*stageTree, error) {
 		root:       root,
 		rel:        filepath.Base(root),
 		extract:    filepath.Join(root, stageExtractDir),
-		home:       filepath.Join(root, stageHomeDir),
 		versionDir: filepath.Join(root, stageVersionDir),
 	}
-	for _, dir := range []string{stage.extract, stage.home} {
-		if err := os.MkdirAll(dir, dirMode); err != nil {
-			return nil, fmt.Errorf("creating %s: %w", dir, err)
-		}
+	if err := os.MkdirAll(stage.extract, dirMode); err != nil {
+		return nil, fmt.Errorf("creating %s: %w", stage.extract, err)
 	}
 	return stage, nil
 }
@@ -412,51 +370,13 @@ func (m *Manager) newStage() (*stageTree, error) {
 // ensureVersionsDir creates the installation root, so custody can be judged on the
 // directory that will actually hold the tree rather than on the deepest ancestor
 // that happened to exist. It requests dirMode and does not read the result back:
-// what the filesystem stored is [verifyCustody]'s question, and its answer is a
+// what the filesystem stored is custody.Trust.Verify's question, and its answer is a
 // verdict rather than a repair.
 func (m *Manager) ensureVersionsDir() error {
 	if err := os.MkdirAll(m.versionsDir, dirMode); err != nil {
 		return fmt.Errorf("creating the installation root: %w", err)
 	}
 	return nil
-}
-
-// runInstaller runs the archive's own installer against the PRIVATE staging home,
-// so the artifacts it drops there never land on PATH or in the real home before
-// they are verified. It returns the directory the artifacts are expected in.
-//
-// The installer's exit code is deliberately not fatal: an upstream installer
-// commonly touches shell profiles and other surfaces that legitimately fail in a
-// minimal container. What matters is whether the artifacts it produced pass the
-// staged gates. With no installer configured the archive itself already holds the
-// artifacts and no subprocess runs at all.
-func (m *Manager) runInstaller(ctx context.Context, stage *stageTree) (string, error) {
-	inst := m.cfg.Release.Installer
-	if inst == nil {
-		return filepath.Join(stage.extract, m.cfg.Release.ArtifactDir), nil
-	}
-	script := filepath.Join(stage.extract, inst.Path)
-	if !selfContained(script) {
-		return "", fmt.Errorf("the archive holds no executable installer at %s", inst.Path)
-	}
-	homeEnv := cmp.Or(inst.HomeEnv, "HOME")
-	timeout := inst.Timeout
-	if timeout <= 0 {
-		timeout = defaultInstallerTimeout
-	}
-	out, err := m.run(ctx, &command{
-		Path:          script,
-		Env:           []string{homeEnv + "=" + stage.home},
-		Args:          inst.Args,
-		Timeout:       timeout,
-		CaptureStderr: true,
-	})
-	if err != nil {
-		slog.Warn("the archive's installer reported a failure; continuing to the staged-artifact gates, which decide",
-			"package", m.cfg.Release.Name, "installer", inst.Path,
-			"error", err, "output", truncate(string(out), 2000))
-	}
-	return filepath.Join(stage.home, m.cfg.Release.ArtifactDir), nil
 }
 
 // gateStaged refuses a staged candidate that is not the pinned, self-contained
@@ -481,28 +401,11 @@ func (m *Manager) gateStaged(ctx context.Context, staged string) error {
 }
 
 // assemble moves the artifacts out of src into the staged version directory and
-// makes the result DURABLE, in the order the protocol requires: every file is
-// written and Synced, then the ".complete" sentinel is written and Synced LAST,
-// then the directory itself is Synced. Only after that may publish rename it into
-// place.
-//
-// Atomic visibility is not crash durability: a successful rename proves no
-// concurrent lookup sees a half-populated directory, it does not prove the new
-// directory entry or the file data reached stable storage. Any sync failure —
-// ENOSPC included — fails the install, which leaves every complete version
-// already on the volume untouched.
-//
-// The moves go through an [os.Root] on the staging tree because src is territory
-// something ELSE wrote: an in-archive installer chose what it dropped there, and
-// with no installer it is the extracted archive. [os.Root] permits CREATING a
-// symlink whose target leaves the root (measured: it validates the name being
-// created, not the text the link carries) and refuses to FOLLOW one, so a custom
-// [Unpacker] reproducing an archive symlink can legitimately leave one at
-// ArtifactDir — and the plain filepath.Join this used to do followed it. Measured
-// on the unconfined form: a file outside the staging tree was renamed INTO the
-// published version directory, which makes the one claim this package reduces to
-// (the artifact came out of the digest-verified archive) false, and destroys the
-// file at its original location.
+// makes the result durable: every file synced, then the ".complete" sentinel
+// written and synced last, then the directory synced; only then may publish
+// rename it. Any sync failure fails the install and leaves every complete
+// version untouched. The moves go through an [os.Root] on the staging tree, so an
+// archive symlink at ArtifactDir cannot pull a file from outside it.
 func (m *Manager) assemble(stage *stageTree, src string) error {
 	root, err := os.OpenRoot(stage.root)
 	if err != nil {
@@ -528,31 +431,23 @@ func (m *Manager) assemble(stage *stageTree, src string) error {
 	if err := m.writeSentinel(stage.versionDir); err != nil {
 		return err
 	}
-	// The last point at which the DIRECTORY ITSELF and the sentinel can be refused, and
-	// against the same predicate selection applies at activation. moveArtifact judged each
-	// artifact as it was renamed in; these two entries are the ones this package CREATED,
-	// and nothing had judged them. A filesystem is free to store a wider mode than MkdirAll
-	// and WriteFile asked for — an inherited NFSv4 ACE on OpenZFS does exactly that, which
-	// is the filesystem family this library parses those lists for.
-	//
-	// Publishing one anyway installs a version selection refuses for the life of the
-	// volume: the install reports SUCCESS, and every later start re-fetches the archive and
-	// reports ErrNoVersion with the complete directory sitting right there. Config.
-	// MaxAttempts exists to prevent exactly that loop, and cannot, because each attempt
-	// succeeds.
+	// The last point at which the directory itself and the sentinel, which this
+	// package created, can be refused, by the predicate selection applies: a
+	// filesystem may store a wider mode than requested (an inherited NFSv4 ACE on
+	// OpenZFS), and publishing it would install a version selection refuses forever,
+	// each attempt reporting success.
 	if wide, reason := m.wideArtifact(stage.versionDir); wide != "" {
 		// Same wording discipline as selectActive's refusal twenty lines away, because
 		// this is the same verdict reached one step earlier: name what is wrong in terms
-		// the operator can act on rather than echoing wideArtifact's "." marker, and wrap
-		// ErrNoCustody so a caller can tell a custody refusal from a fetch failure. The
+		// the operator can act on rather than echoing wideArtifact's "." marker. The
 		// reason travels with the name so the operator is not told an entry is writable
 		// when what actually happened is that its access-control list could not be read.
 		what := fmt.Sprintf("an entry in it (%s)", wide)
 		if wide == "." {
 			what = "the directory itself"
 		}
-		return fmt.Errorf("%w: refusing to publish the version directory %s because %s %s, and selection would therefore never activate it%s",
-			ErrNoCustody, stage.versionDir, what, reason, m.trust.hint())
+		return fmt.Errorf("the installation root is not under this process's exclusive control: refusing to publish the version directory %s because %s %s, and selection would therefore never activate it%s",
+			stage.versionDir, what, reason, m.trustHint())
 	}
 	if err := m.fsync(stage.versionDir); err != nil {
 		return fmt.Errorf("syncing the staged version directory: %w", err)
@@ -566,7 +461,7 @@ func (m *Manager) assemble(stage *stageTree, src string) error {
 // The asymmetry between the two sets is the whole reason they are one function
 // rather than one loop: a required artifact that will not move fails the install,
 // while an optional one only warns, because "installed when the archive provides it"
-// is the contract Optional's own doc states.
+// is the contract [Config.Optional] states.
 func (m *Manager) moveArtifacts(root *os.Root, srcRel string) ([]string, error) {
 	moved := make([]string, 0, len(m.cfg.Require)+len(m.cfg.Optional))
 	for _, name := range m.cfg.Require {
@@ -579,8 +474,8 @@ func (m *Manager) moveArtifacts(root *os.Root, srcRel string) ([]string, error) 
 	for _, name := range m.cfg.Optional {
 		dst, err := m.moveArtifact(root, srcRel, name)
 		if err != nil {
-			slog.Warn("optional artifact not installed",
-				"package", m.cfg.Release.Name, "artifact", name, "error", err)
+			m.log.Warn("optional artifact not installed",
+				"package", m.cfg.Name, "artifact", name, "error", err)
 			continue
 		}
 		moved = append(moved, dst)
@@ -588,20 +483,11 @@ func (m *Manager) moveArtifacts(root *os.Root, srcRel string) ([]string, error) 
 	return moved, nil
 }
 
-// moveArtifact moves one artifact out of srcRel and into the staged version
-// directory, both resolved inside root, refusing anything that is not a
-// self-contained executable: a symlink would pass an existence and executability
-// check and then dangle the moment the staging tree is removed. It returns the
-// artifact's absolute path.
-//
-// Containment is proved FIRST, with root.Lstat, and that ordering is load-bearing
-// rather than tidy. The two predicates below have to read an absolute path — the
-// ownership question needs the raw stat and the access-control question needs a
-// getxattr, neither of which an [os.Root] offers — so on a source directory that
-// resolves out of the tree they would judge some file elsewhere on the volume and
-// then hand a name the rename refuses. Asking the root first means the predicates
-// only ever see an object inside the staging tree, and the diagnosis names the real
-// obstacle instead of a rename failure two lines later.
+// moveArtifact moves one artifact out of srcRel into the staged version
+// directory, both inside root, refusing anything but a self-contained
+// executable, and returns its absolute path. Containment is proved first with
+// root.Lstat, because the ownership and access-list checks below read an
+// absolute path and would otherwise judge a file outside the staging tree.
 func (m *Manager) moveArtifact(root *os.Root, srcRel, name string) (string, error) {
 	fromRel := filepath.Join(srcRel, name)
 	if _, err := root.Lstat(fromRel); err != nil {
@@ -611,16 +497,11 @@ func (m *Manager) moveArtifact(root *os.Root, srcRel, name string) (string, erro
 	if !selfContained(from) {
 		return "", errors.New("absent, not executable, or a symlink into the staging tree")
 	}
-	// An in-archive installer chooses its own modes, and this rename is the last
-	// point at which what it chose can be refused: publish moves this inode into
-	// place and a rename cannot change a mode. A group- or other-writable artifact
-	// in a published version directory is a binary this package executes and
-	// another principal can rewrite, which is the integrity gate the pin exists to
-	// provide. It is refused rather than repaired, for the same reason nothing else
-	// here is repaired. The predicate's own diagnosis is carried through, because
-	// "writable" and "its access-control list could not be read" send the operator
-	// to two different places.
-	if reason, private := m.entryPrivate(from, false, os.Geteuid()); !private {
+	// This rename is the last point at which the archive's chosen modes can be
+	// refused: a writable artifact in a published version directory is a binary
+	// another principal can rewrite. It is refused, not repaired, with the
+	// predicate's own diagnosis.
+	if reason, private := m.trust.EntryPrivate(from, false, os.Geteuid()); !private {
 		return "", fmt.Errorf("%s, and this package will not publish an artifact it executes that it cannot prove is private", reason)
 	}
 	toRel := filepath.Join(stageVersionDir, name)
@@ -635,7 +516,7 @@ func (m *Manager) moveArtifact(root *os.Root, srcRel, name string) (string, erro
 // describes, so it cannot drift from those artifacts.
 //
 // It is a plain file and therefore forgeable by anyone who can write into the
-// tree, which is exactly what custody excludes; see [verifyCustody] for why that
+// tree, which is exactly what custody excludes; see custody.Trust.Verify for why that
 // is the defence rather than the sentinel's own mode.
 func (m *Manager) writeSentinel(dir string) error {
 	path := filepath.Join(dir, sentinelName)
@@ -657,19 +538,10 @@ func (m *Manager) writeSentinel(dir string) error {
 // leaving it on an absolute path was the delete's own reasoning applied to one of
 // the two operations.
 func (m *Manager) publish(stage *stageTree) error {
-	// The destination can exist here for exactly one reason: the pinned
-	// directory was rejected by the version probe (a replaced artifact under an
-	// intact sentinel) and is being replaced. It is untrusted, so removing it is
-	// correct, and the retained predecessor is what covers the crash window
-	// between the remove and the rename.
-	//
-	// Untrusted is also why the delete goes through an [os.Root] on the installation root
-	// rather than through the absolute path, which is the rule the rest of this package's
-	// removals already follow (see [Manager.removeUnderRoot]). The entry being cleared is
-	// the one entry here that another principal may have replaced, and the pin is a single
-	// validated path component, so the root handle resolves the tree once and confines the
-	// delete to it: a redirected component cannot turn "clear the rejected version
-	// directory" into a delete somewhere else on the volume.
+	// The destination exists only when the pinned directory failed the version
+	// probe and is being replaced; the retained predecessor covers the crash window
+	// between the remove and the rename. The delete goes through an [os.Root], since
+	// this is the one entry here another principal may have replaced.
 	root, err := os.OpenRoot(m.versionsDir)
 	if err != nil {
 		return fmt.Errorf("opening the installation root to clear the previous %s directory: %w", m.cfg.Version, err)
@@ -688,25 +560,11 @@ func (m *Manager) publish(stage *stageTree) error {
 }
 
 // writeFileDurably writes data to the single path component name directly under
-// [Config.Root], through a temp file in the same directory: write, sync, rename,
-// sync the parent.
-//
-// name is root-RELATIVE and every step goes through an [os.Root] on Root, which is
-// not decoration. Root is judged by the custody walk as an ANCESTOR of the
-// installation root, so a sticky one — the 1777 shape that makes /tmp usable as a
-// root, and the shape [checkComponent] deliberately exempts from the write question
-// — passes the check while still letting another principal CREATE entries in it.
-// Sticky stops them replacing the state record; it does not stop them planting the
-// temp NAME first. os.WriteFile on that name follows the symlink, so the write left
-// the tree: measured, an arbitrary file outside Root truncated and overwritten with
-// the state record, and the state path left as a symlink pointing at it. The same
-// reachability comes free with [Config.InstallWithoutCustody], which re-authorises
-// this write into a tree the check has already refused.
-//
-// The two reads stay on absolute paths, and only because the confined create is
-// what makes them safe: an entry this process just created inside a sticky
-// directory is one sticky itself forbids another principal from replacing, so by
-// the time the syncs run the names resolve to this process's own files.
+// [Config.Root] through a temp file in the same directory: write, sync, rename,
+// sync the parent. Every step goes through an [os.Root] on Root because a sticky
+// Root passes custody while letting another principal plant the temp name first,
+// and a plain write would follow that symlink out of the tree. The syncs stay on
+// absolute paths, which sticky makes safe for entries this process created.
 func (m *Manager) writeFileDurably(name string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(m.cfg.Root, dirMode); err != nil {
 		return fmt.Errorf("creating %s: %w", m.cfg.Root, err)
@@ -734,14 +592,11 @@ func (m *Manager) writeFileDurably(name string, data []byte, mode os.FileMode) e
 // renameIn is the production rename: root-relative, so the kernel resolves both
 // names inside root and refuses either one that leaves it.
 //
-// The seam is shaped this way rather than as [os.Rename] over two absolute paths
+// The seam is root-relative rather than [os.Rename] over two absolute paths
 // because three of this package's four renames land in territory something else
-// wrote — the directory holding the convenience links, the directory holding the
-// state record, and the artifact tree an in-archive installer populated — and a
-// symlink at any component of those made the rename land outside Root. An
-// [os.Root] answers that in the kernel, on every component, which is the same
-// answer [UnpackZip] already gets for an archive entry and [Manager.publish]
-// already gets for the one delete it makes into untrusted territory.
+// wrote (the convenience links' directory, the state record's directory and the
+// extracted archive), where a symlink at any component would move the rename
+// outside Root.
 func renameIn(root *os.Root, oldname, newname string) error {
 	return root.Rename(oldname, newname)
 }
@@ -758,13 +613,4 @@ func fsyncPath(path string) error {
 		return fmt.Errorf("fsync %s: %w", path, err)
 	}
 	return nil
-}
-
-// truncate bounds a diagnostic string so a runaway installer log cannot flood the
-// log pipeline.
-func truncate(s string, limit int) string {
-	if len(s) <= limit {
-		return s
-	}
-	return s[:limit] + "...(truncated)"
 }

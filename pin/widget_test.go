@@ -1,77 +1,82 @@
+//go:build linux
+
 package pin
 
 import (
-	"encoding/json"
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
-// A SECOND, deliberately different profile, driven end to end.
-//
-// The library's real consumers all install the same shape of release, so every
-// parameter they do not vary would otherwise ship exercised by nothing. This
-// synthetic "widget" package varies all of them at once and in the opposite
-// direction from the primary test profile:
-//
-//   - no in-archive installer: the archive already holds the artifacts
-//   - a package NAME that differs from its primary ARTIFACT name
-//   - different architecture tokens, and a different URL shape
-//   - a JSON version probe, so ParseVersion is not the default
-//   - TWO required artifacts, no optional ones
-//   - no convenience link, no purge, and a retention of two
-//
-// What it does not prove is that a real second upstream publishes archives in this
-// shape. It proves the library does not depend on the shape its consumers happen to
-// share.
+// A SECOND, deliberately different profile, driven end to end: a tar.gz archive
+// rather than a zip, different architecture tokens and URL shape, a two-word
+// version probe, two required artifacts and no optional ones, and no
+// convenience link and no purge. It proves the library does not depend on the
+// shape its consumers happen to share.
 const (
 	widgetName     = "widget"
-	widgetBinary   = "widget-cli"
 	widgetHelper   = "widget-helper"
 	widgetProbeOne = "version"
-	widgetProbeTwo = "--json"
 	widgetGate     = "autoupdate"
 )
 
 // widgetRelease is the synthetic profile.
-func widgetRelease() Release {
-	return Release{
+func widgetRelease() Config {
+	return Config{
 		Name:        widgetName,
-		Binary:      widgetBinary,
-		URLTemplate: "https://widgets.invalid/dl/{arch}/widget_{version}.zip",
+		URLTemplate: "https://widgets.invalid/dl/{arch}/widget_{version}.tar.gz",
 		ArchTokens:  map[string]string{"amd64": "linux-64", "arm64": "linux-arm"},
 		ArtifactDir: "dist/bin",
-		ProbeArgs:   []string{widgetProbeOne, widgetProbeTwo},
-		// No Installer: the archive ships the artifacts. No Notice: the package
-		// is not proprietary.
-		ParseVersion: parseJSONVersion,
-		Mandatory:    []Assertion{{Name: widgetGate, Args: []string{"config", "set", widgetGate, "off"}}},
+		ProbeArgs:   []string{widgetProbeOne},
+		Assertions:  []Assertion{{Name: widgetGate, Args: []string{"config", "set", widgetGate, "off"}, Required: true}},
 	}
 }
 
-// parseJSONVersion is the widget profile's parser: the probe prints a JSON object.
-// It must never panic on arbitrary bytes, because the probe's output is whatever an
-// artifact on the volume chose to print.
-func parseJSONVersion(out string) string {
-	var doc struct {
-		Version string `json:"version"`
+// buildTarGz builds a real gzipped tar in memory.
+func buildTarGz(t *testing.T, entries map[string]zipEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, name := range slices.Sorted(func(yield func(string) bool) {
+		for n := range entries {
+			if !yield(n) {
+				return
+			}
+		}
+	}) {
+		e := entries[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: int64(e.mode), Size: int64(len(e.body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("tar header %s: %v", name, err)
+		}
+		if _, err := tw.Write([]byte(e.body)); err != nil {
+			t.Fatalf("tar body %s: %v", name, err)
+		}
 	}
-	if err := json.Unmarshal([]byte(out), &doc); err != nil {
-		return ""
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
 	}
-	return doc.Version
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
-// widgetArchive is an archive that already holds both artifacts under the profile's
-// ArtifactDir, plus content that must NOT be published.
+// widgetArchive holds both artifacts under the profile's ArtifactDir, plus
+// content that must NOT be published.
 func widgetArchive(t *testing.T, version string) []byte {
 	t.Helper()
-	return buildZip(t, map[string]zipEntry{
-		"dist/bin/" + widgetBinary: {body: fakeBinaryBody(version), mode: 0o755},
+	return buildTarGz(t, map[string]zipEntry{
+		"dist/bin/" + widgetName:   {body: fakeBinaryBody(version), mode: 0o755},
 		"dist/bin/" + widgetHelper: {body: fakeBinaryBody(version), mode: 0o755},
 		"dist/bin/notes.txt":       {body: "not an artifact\n", mode: 0o644},
 		"dist/share/widget.png":    {body: "asset\n", mode: 0o644},
@@ -82,19 +87,15 @@ func widgetArchive(t *testing.T, version string) []byte {
 func newWidgetEnv(t *testing.T) *fakeEnv {
 	t.Helper()
 	env := newEnv(t, widgetRelease(), widgetArchive(t, pinnedVersion), []string{widgetHelper}, nil)
-	env.probeAnswerFor = func(v string) string {
-		return fmt.Sprintf("{\"name\":%q,\"version\":%q}\n", widgetName, v)
-	}
+	env.probeAnswerFor = func(v string) string { return fmt.Sprintf("%s version %s\n", widgetName, v) }
 	return env
 }
 
-// widgetManager builds a manager for the widget profile with the axes this profile
-// exercises: no link dir, no purge, retention of two.
+// widgetManager builds a manager for the widget profile: no link dir, no purge.
 func widgetManager(env *fakeEnv, mutate ...func(*Config)) *Manager {
 	base := func(c *Config) {
 		c.LinkDir = ""
 		c.Purge = nil
-		c.Retain = 2
 	}
 	return env.manager(append([]func(*Config){base}, mutate...)...)
 }
@@ -112,7 +113,7 @@ func TestWidgetProfileInstallsEndToEnd(t *testing.T) {
 
 	// The URL shape and the architecture token come from this profile, not the
 	// primary one.
-	wantURL := "https://widgets.invalid/dl/linux-64/widget_" + pinnedVersion + ".zip"
+	wantURL := "https://widgets.invalid/dl/linux-64/widget_" + pinnedVersion + ".tar.gz"
 	if env.countCalls("fetch "+wantURL) != 1 {
 		t.Errorf("calls = %v, want one fetch of %q", env.called(), wantURL)
 	}
@@ -124,25 +125,20 @@ func TestWidgetProfileInstallsEndToEnd(t *testing.T) {
 	if !exists(filepath.Join(env.root, widgetName+stateSuffix)) {
 		t.Errorf("the state record was not written at %s", widgetName+stateSuffix)
 	}
-	// Path is the ARTIFACT, whose name differs from the package's.
-	if got, want := m.Path(), filepath.Join(dir, widgetBinary); got != want {
+	if got, want := m.Path(), filepath.Join(dir, widgetName); got != want {
 		t.Errorf("Path() = %q, want %q", got, want)
 	}
 	// Both required artifacts are published; nothing else from the archive is.
 	got := slices.Sorted(slices.Values(mustReadDir(t, dir)))
-	want := slices.Sorted(slices.Values([]string{sentinelName, widgetBinary, widgetHelper}))
+	want := slices.Sorted(slices.Values([]string{sentinelName, widgetName, widgetHelper}))
 	if !slices.Equal(got, want) {
 		t.Errorf("version directory holds %v, want %v", got, want)
 	}
-	// No subprocess but the probe and the assertion ran: there is no installer.
-	if env.countCalls("installer") != 0 {
-		t.Errorf("an installer ran although the profile declares none: %v", env.called())
-	}
-	if env.countCalls("probe "+filepath.Join(dir, widgetBinary)) == 0 {
+	if env.countCalls("probe "+filepath.Join(dir, widgetName)) == 0 {
 		t.Errorf("the primary artifact was never probed: %v", env.called())
 	}
 	if env.countCalls("assert config set "+widgetGate+" off") == 0 {
-		t.Errorf("the profile's mandatory assertion never ran: %v", env.called())
+		t.Errorf("the profile's required assertion never ran: %v", env.called())
 	}
 	// The off switches are asserted by absence.
 	if exists(filepath.Join(env.root, testLinkDir)) {
@@ -153,42 +149,16 @@ func TestWidgetProfileInstallsEndToEnd(t *testing.T) {
 	}
 }
 
-// TestWidgetProfileUsesItsOwnVersionParser pins that the JSON probe answer is what
-// gates activation for this profile: the default last-field parser would read the
-// whole JSON object's tail, so a wrong parser must not silently pass.
-func TestWidgetProfileUsesItsOwnVersionParser(t *testing.T) {
+// TestWidgetProfileExcludesAVersionTheProbeDenies pins that the probe answer
+// gates activation: an artifact naming another version is excluded.
+func TestWidgetProfileExcludesAVersionTheProbeDenies(t *testing.T) {
 	env := newWidgetEnv(t)
+	env.placeVersion(pinnedVersion, widgetName, widgetHelper)
+	env.onProbe = func(string) ([]byte, error) { return []byte("widget version 0.0.1\n"), nil }
 	m := widgetManager(env)
-	if err := m.Ensure(t.Context()); err != nil {
-		t.Fatalf("Ensure: %v", err)
+	if _, ok := m.selectActive(t.Context()); ok {
+		t.Error("selectActive accepted an artifact reporting a version its directory does not claim")
 	}
-
-	answer := fmt.Sprintf("{\"name\":%q,\"version\":%q}\n", widgetName, pinnedVersion)
-	if got := parseJSONVersion(answer); got != pinnedVersion {
-		t.Fatalf("the profile's parser returned %q for %q", got, answer)
-	}
-	if got := LastFieldOfFirstLine(answer); got == pinnedVersion {
-		t.Fatal("the default parser also reads this shape, so the test proves nothing about ParseVersion")
-	}
-
-	t.Run("a probe answer the parser cannot read excludes the version", func(t *testing.T) {
-		env := newWidgetEnv(t)
-		env.onProbe = func(string) ([]byte, error) { return []byte("widget " + pinnedVersion + "\n"), nil }
-		m := widgetManager(env)
-		if _, ok := m.selectActive(t.Context()); ok {
-			t.Error("selectActive accepted output the profile's parser cannot read")
-		}
-	})
-
-	t.Run("a parseable answer naming another version is excluded", func(t *testing.T) {
-		env := newWidgetEnv(t)
-		env.placeVersion(pinnedVersion, widgetBinary, widgetHelper)
-		env.onProbe = func(string) ([]byte, error) { return []byte(`{"version":"0.0.1"}`), nil }
-		m := widgetManager(env)
-		if _, ok := m.selectActive(t.Context()); ok {
-			t.Error("selectActive accepted an artifact reporting a version its directory does not claim")
-		}
-	})
 }
 
 // TestWidgetProfileRequiredSetIsBothArtifacts pins the required set for a profile
@@ -197,25 +167,24 @@ func TestWidgetProfileUsesItsOwnVersionParser(t *testing.T) {
 func TestWidgetProfileRequiredSetIsBothArtifacts(t *testing.T) {
 	tests := map[string]map[string]zipEntry{
 		"helper missing": {
-			"dist/bin/" + widgetBinary: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
+			"dist/bin/" + widgetName: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 		},
 		"primary missing": {
 			"dist/bin/" + widgetHelper: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 		},
 		"artifacts in the wrong directory": {
-			"bin/" + widgetBinary: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
+			"bin/" + widgetName:   {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 			"bin/" + widgetHelper: {body: fakeBinaryBody(pinnedVersion), mode: 0o755},
 		},
 		"artifacts not executable": {
-			"dist/bin/" + widgetBinary: {body: fakeBinaryBody(pinnedVersion), mode: 0o644},
+			"dist/bin/" + widgetName:   {body: fakeBinaryBody(pinnedVersion), mode: 0o644},
 			"dist/bin/" + widgetHelper: {body: fakeBinaryBody(pinnedVersion), mode: 0o644},
 		},
 	}
 	for name, entries := range tests {
 		t.Run(name, func(t *testing.T) {
 			env := newWidgetEnv(t)
-			env.archive = buildZip(t, entries)
-			env.digest = digestOf(env.archive)
+			env.setArchive(buildTarGz(t, entries))
 			m := widgetManager(env)
 
 			if err := m.Ensure(t.Context()); err == nil {
@@ -231,13 +200,18 @@ func TestWidgetProfileRequiredSetIsBothArtifacts(t *testing.T) {
 	}
 }
 
-// TestWidgetProfileRetainsTwoPredecessors pins the retention axis end to end on the
-// profile that sets it: three versions on the volume, the active one plus two kept,
-// the fourth pruned.
-func TestWidgetProfileRetainsTwoPredecessors(t *testing.T) {
+// TestWidgetProfileKeepsTheMostRecentlyActivatedPredecessor pins retention on
+// activation time rather than version order: of three predecessors, the one
+// activated last is kept even though another has a higher version.
+func TestWidgetProfileKeepsTheMostRecentlyActivatedPredecessor(t *testing.T) {
 	env := newWidgetEnv(t)
-	for _, v := range []string{prevVersion, oldVersion, "2.13.0"} {
-		env.placeVersion(v, widgetBinary, widgetHelper)
+	base := time.Now().Add(-time.Hour)
+	for i, v := range []string{prevVersion, "2.13.0", oldVersion} {
+		dir := env.placeVersion(v, widgetName, widgetHelper)
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(dir, at, at); err != nil {
+			t.Fatalf("Chtimes(%s): %v", dir, err)
+		}
 	}
 	m := widgetManager(env)
 
@@ -246,9 +220,9 @@ func TestWidgetProfileRetainsTwoPredecessors(t *testing.T) {
 	}
 	root := filepath.Join(env.root, widgetName+versionsSuffix)
 	got := slices.Sorted(slices.Values(nonHidden(mustReadDir(t, root))))
-	want := slices.Sorted(slices.Values([]string{pinnedVersion, prevVersion, oldVersion}))
+	want := slices.Sorted(slices.Values([]string{pinnedVersion, oldVersion}))
 	if !slices.Equal(got, want) {
-		t.Errorf("version directories = %v, want %v (active plus two predecessors)", got, want)
+		t.Errorf("version directories = %v, want %v (active plus the last activated)", got, want)
 	}
 }
 
@@ -257,7 +231,7 @@ func TestWidgetProfileRetainsTwoPredecessors(t *testing.T) {
 // keeps the widget install ready.
 func TestWidgetProfileFallsBackToAPredecessor(t *testing.T) {
 	env := newWidgetEnv(t)
-	prev := env.placeVersion(prevVersion, widgetBinary, widgetHelper)
+	prev := env.placeVersion(prevVersion, widgetName, widgetHelper)
 	env.onFetch = func(io.Writer) error { return errors.New("network unreachable") }
 	m := widgetManager(env)
 
@@ -267,16 +241,16 @@ func TestWidgetProfileFallsBackToAPredecessor(t *testing.T) {
 	if ready, why := m.Ready(); !ready {
 		t.Errorf("Ready() = false (%s), want true on the retained predecessor", why)
 	}
-	if got, want := m.Path(), filepath.Join(prev, widgetBinary); got != want {
+	if got, want := m.Path(), filepath.Join(prev, widgetName); got != want {
 		t.Errorf("Path() = %q, want %q", got, want)
 	}
-	if state, ok := m.Active(); !ok || state.ActiveVersion != prevVersion || state.LastError == "" {
-		t.Errorf("State = %+v (active=%v), want the fallback recorded with its error", state, ok)
+	if got := m.Version(); got != prevVersion {
+		t.Errorf("Version() = %q, want the fallback %q", got, prevVersion)
 	}
 }
 
 // TestTwoProfilesShareOneRootWithoutColliding pins the consequence of keying every
-// path on Release.Name: two different packages installed under the same Root keep
+// path on Config.Name: two different packages installed under the same Root keep
 // separate version trees, separate state records and separate active versions.
 func TestTwoProfilesShareOneRootWithoutColliding(t *testing.T) {
 	primary := newFakeEnv(t)

@@ -1,3 +1,5 @@
+//go:build linux
+
 package pin
 
 import (
@@ -16,39 +18,25 @@ import (
 	"time"
 )
 
-// TestNewValidatesItsPins pins construction: a manager cannot exist without a
-// version, an absolute root, a supported architecture and a well-formed digest
-// for THAT architecture. Rejecting a mangled pin at construction beats
+// TestNewValidatesItsPins pins the architecture-dependent half of construction
+// (TestConfigValidationRefusesEachBrokenField has the rest): a supported
+// architecture and a well-formed digest for THAT architecture. Rejecting a mangled pin at construction beats
 // discovering it after a large download.
 func TestNewValidatesItsPins(t *testing.T) {
 	tests := map[string]struct {
 		mutate  func(*Config)
 		wantErr string
 	}{
-		"missing version":       {mutate: func(c *Config) { c.Version = "" }, wantErr: "Version"},
 		"traversal version":     {mutate: func(c *Config) { c.Version = "../../etc" }, wantErr: "Version"},
 		"separator in version":  {mutate: func(c *Config) { c.Version = "2.14.2/x" }, wantErr: "illegal character"},
 		"dotted version":        {mutate: func(c *Config) { c.Version = ".hidden" }, wantErr: "dot"},
-		"missing root":          {mutate: func(c *Config) { c.Root = "" }, wantErr: "Root is required"},
-		"relative root":         {mutate: func(c *Config) { c.Root = "tools" }, wantErr: "must be absolute"},
-		"dot-dot ending root":   {mutate: func(c *Config) { c.Root += "/x/.." }, wantErr: "must not contain"},
-		"dot-dot inside root":   {mutate: func(c *Config) { c.Root = "/srv/link/../tools" }, wantErr: "must not contain"},
-		"dot-dot name in root":  {mutate: func(c *Config) { c.Root = "/srv/..tools" }},
 		"no digests at all":     {mutate: func(c *Config) { c.Digests = nil }, wantErr: "Digests is required"},
 		"no digest for arch":    {mutate: func(c *Config) { delete(c.Digests, "amd64") }, wantErr: "no pinned digest"},
-		"unsupported arch":      {mutate: func(c *Config) { c.GOARCH = "sparc64" }, wantErr: "no published archive"},
+		"unsupported arch":      {mutate: func(c *Config) { c.goarch = "sparc64" }, wantErr: "no published archive"},
 		"truncated digest":      {mutate: func(c *Config) { c.Digests["amd64"] = sixtyFourHexChars[:63] }, wantErr: "64 hex"},
 		"non-hex digest":        {mutate: func(c *Config) { c.Digests["amd64"] = strings.Repeat("z", 64) }, wantErr: "hexadecimal"},
 		"uppercase digest":      {mutate: func(c *Config) { c.Digests["amd64"] = strings.ToUpper(sixtyFourHexChars) }, wantErr: "lowercase"},
 		"other arch digest bad": {mutate: func(c *Config) { c.Digests["arm64"] = "junk" }},
-		"absolute link dir":     {mutate: func(c *Config) { c.LinkDir = "/usr/local/bin" }, wantErr: "must be relative"},
-		"escaping link dir":     {mutate: func(c *Config) { c.LinkDir = "../bin" }, wantErr: "escape"},
-		"dot-dot in link dir":   {mutate: func(c *Config) { c.LinkDir = "x/../bin" }, wantErr: "must not contain"},
-		"dot-dot ending link":   {mutate: func(c *Config) { c.LinkDir = "bin/x/.." }, wantErr: "must not contain"},
-		"artifact with a slash": {mutate: func(c *Config) { c.Require = []string{"sub/tool"} }, wantErr: "single path component"},
-		"dotted artifact":       {mutate: func(c *Config) { c.Require = []string{".complete"} }, wantErr: "must not start with a dot"},
-		"bad url override":      {mutate: func(c *Config) { c.URLTemplate = "ftp://x/{version}" }, wantErr: "http or https"},
-		"url without version":   {mutate: func(c *Config) { c.URLTemplate = "https://x/fixed.zip" }, wantErr: "{version}"},
 		"valid":                 {mutate: func(*Config) {}},
 	}
 	for name, tc := range tests {
@@ -61,9 +49,9 @@ func TestNewValidatesItsPins(t *testing.T) {
 				if err != nil {
 					t.Fatalf("New: %v", err)
 				}
-				if m.cfg.MaxAttempts <= 0 || m.cfg.RetryBackoff <= 0 || m.cfg.Retain <= 0 || m.urlTemplate == "" {
-					t.Errorf("New left a default unset: attempts=%d backoff=%v retain=%d url=%q",
-						m.cfg.MaxAttempts, m.cfg.RetryBackoff, m.cfg.Retain, m.urlTemplate)
+				if m.cfg.MaxAttempts <= 0 || m.urlTemplate == "" || m.format != "zip" {
+					t.Errorf("New left a default unset: attempts=%d url=%q format=%q",
+						m.cfg.MaxAttempts, m.urlTemplate, m.format)
 				}
 			case err == nil:
 				t.Fatalf("New accepted %s", name)
@@ -97,7 +85,7 @@ func TestNewCopiesEverythingItDependsOn(t *testing.T) {
 
 	cfg.Digests["amd64"] = strings.Repeat("f", 64)
 	cfg.Require[0] = "hijacked"
-	cfg.Release.ArchTokens["amd64"] = "hijacked"
+	cfg.ArchTokens["amd64"] = "hijacked"
 	cfg.Version = "9.9.9"
 
 	if m.digest != env.digest {
@@ -113,97 +101,6 @@ func TestNewCopiesEverythingItDependsOn(t *testing.T) {
 	}
 }
 
-// TestNewRefusesAProfileWithNoMandatoryAssertions pins the guarantee that cannot
-// be lost by omission. A package's integrity gate becomes profile DATA in this
-// library, and a profile with an empty Mandatory set is indistinguishable from one
-// whose author forgot — so construction refuses rather than shipping a silently
-// ungated install.
-func TestNewRefusesAProfileWithNoMandatoryAssertions(t *testing.T) {
-	tests := map[string]struct {
-		mandatory []Assertion
-		wantErr   string
-	}{
-		"nil":             {mandatory: nil, wantErr: "Mandatory is empty"},
-		"empty slice":     {mandatory: []Assertion{}, wantErr: "Mandatory is empty"},
-		"no name":         {mandatory: []Assertion{{Args: []string{"x"}}}, wantErr: "has no Name"},
-		"no args":         {mandatory: []Assertion{{Name: "a"}}, wantErr: "has no Args"},
-		"duplicate names": {mandatory: []Assertion{{Name: "a", Args: []string{"x"}}, {Name: "a", Args: []string{"y"}}}, wantErr: "two assertions named"},
-		"one is enough":   {mandatory: []Assertion{{Name: "a", Args: []string{"x"}}}},
-	}
-	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) {
-			env := newFakeEnv(t)
-			_, err := New(env.config(func(c *Config) { c.Release.Mandatory = tc.mandatory }))
-			switch {
-			case tc.wantErr == "" && err != nil:
-				t.Fatalf("New: %v", err)
-			case tc.wantErr == "":
-				return
-			case err == nil:
-				t.Fatalf("New accepted a profile with %s", name)
-			case !strings.Contains(err.Error(), tc.wantErr):
-				t.Errorf("error = %v, want one mentioning %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-// TestMandatoryAssertionsCannotBeWeakened pins the merge: whatever a deployment
-// passes, every mandatory assertion is present exactly once, is Required, and
-// carries the profile's argv rather than the caller's.
-func TestMandatoryAssertionsCannotBeWeakened(t *testing.T) {
-	mandatory := []Assertion{
-		{Name: "gate", Args: []string{"settings", "gate", "true"}},
-		{Name: "other", Args: []string{"settings", "other", "on"}},
-	}
-	tests := map[string][]Assertion{
-		"no caller assertions":      nil,
-		"unrelated caller":          {{Name: "telemetry", Args: []string{"settings", "telemetry", "false"}}},
-		"redeclared not required":   {{Name: "gate", Args: []string{"settings", "gate", "true"}}},
-		"redeclared with a lie":     {{Name: "gate", Args: []string{"settings", "gate", "false"}}},
-		"redeclared twice":          {{Name: "gate", Args: []string{"x"}}, {Name: "gate", Args: []string{"y"}}},
-		"redeclared with a no-op":   {{Name: "gate", Args: []string{"help"}}},
-		"both redeclared, reversed": {{Name: "other", Args: []string{"no"}}, {Name: "gate", Args: []string{"no"}}},
-	}
-	for name, caller := range tests {
-		t.Run(name, func(t *testing.T) {
-			got := mergeAssertions(caller, mandatory)
-			for _, want := range mandatory {
-				seen := 0
-				for _, a := range got {
-					if a.Name != want.Name {
-						continue
-					}
-					seen++
-					if !a.Required {
-						t.Errorf("%s is not Required after the merge", a.Name)
-					}
-					if strings.Join(a.Args, " ") != strings.Join(want.Args, " ") {
-						t.Errorf("%s args = %v, want the profile's %v", a.Name, a.Args, want.Args)
-					}
-				}
-				if seen != 1 {
-					t.Errorf("%s appears %d times, want exactly 1", want.Name, seen)
-				}
-			}
-			for _, a := range caller {
-				if a.Name == "telemetry" && !hasAssertion(got, "telemetry") {
-					t.Error("an unrelated caller assertion was dropped by the merge")
-				}
-			}
-		})
-	}
-}
-
-func hasAssertion(as []Assertion, name string) bool {
-	for _, a := range as {
-		if a.Name == name {
-			return true
-		}
-	}
-	return false
-}
-
 // TestEnsureReassertsRequiredAssertionsOnAStartThatSkipsTheInstall pins that an
 // assertion cannot be remembered. Its effect lives in the package's own mutable
 // configuration, not in the immutable version directory, so even the fast path
@@ -214,7 +111,7 @@ func TestEnsureReassertsRequiredAssertionsOnAStartThatSkipsTheInstall(t *testing
 		env := newFakeEnv(t)
 		dir := env.placeVersion(pinnedVersion)
 		m := env.manager(func(c *Config) {
-			c.Assert = []Assertion{{Name: "telemetry.enabled", Args: []string{"settings", "telemetry.enabled", "false"}}}
+			c.Assertions = append(c.Assertions, Assertion{Name: "telemetry.enabled", Args: []string{"settings", "telemetry.enabled", "false"}})
 		})
 
 		if err := m.Ensure(t.Context()); err != nil {
@@ -260,7 +157,7 @@ func TestEnsureReassertsRequiredAssertionsOnAStartThatSkipsTheInstall(t *testing
 		env.placeVersion(pinnedVersion)
 		env.onAssert = failAssertion("chat.notificationMethod")
 		m := env.manager(func(c *Config) {
-			c.Assert = []Assertion{{Name: "chat.notificationMethod", Args: []string{"settings", "chat.notificationMethod", "osc9"}}}
+			c.Assertions = append(c.Assertions, Assertion{Name: "chat.notificationMethod", Args: []string{"settings", "chat.notificationMethod", "osc9"}})
 		})
 
 		if err := m.Ensure(t.Context()); err != nil {
@@ -289,7 +186,7 @@ func failAssertion(name string) func(string, []string) error {
 func TestPersistedAssertionsOKNeverGatesReadiness(t *testing.T) {
 	env := newFakeEnv(t)
 	dir := env.placeVersion(pinnedVersion)
-	seed, err := json.Marshal(State{
+	seed, err := json.Marshal(stateRecord{
 		ActiveVersion: pinnedVersion,
 		Dir:           dir,
 		Pinned:        pinnedVersion,
@@ -312,7 +209,7 @@ func TestPersistedAssertionsOKNeverGatesReadiness(t *testing.T) {
 		t.Errorf("Ready() = (%v, %v), want (false, %v) -- the persisted record must never be the authority",
 			ready, why, ReasonAssertion)
 	}
-	if state, _ := m.Active(); state.AssertionsOK {
+	if m.state.AssertionsOK {
 		t.Error("State.AssertionsOK stayed true after a failed reassertion; it must record THIS start's result")
 	}
 }
@@ -367,7 +264,6 @@ func TestEnsureWithRetryIsBoundedAndReportsTerminalFailure(t *testing.T) {
 	env.installerFails = true
 	m := env.manager(func(c *Config) {
 		c.MaxAttempts = 3
-		c.RetryBackoff = time.Second
 	})
 
 	err := m.EnsureWithRetry(t.Context())
@@ -377,7 +273,7 @@ func TestEnsureWithRetryIsBoundedAndReportsTerminalFailure(t *testing.T) {
 	if got := env.fetchCount(); got != 3 {
 		t.Errorf("fetches = %d, want 3 (one per bounded attempt)", got)
 	}
-	want := []time.Duration{time.Second, 2 * time.Second}
+	want := []time.Duration{retryBackoff, 2 * retryBackoff}
 	if got := env.sleeps(); len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("backoffs = %v, want %v (doubling, one fewer than the attempts)", got, want)
 	}
@@ -498,8 +394,8 @@ func TestRescanMakesAnInPlaceRepairVisible(t *testing.T) {
 	if env.fetchCount() != before {
 		t.Errorf("Rescan downloaded the archive (%d -> %d); it must only re-derive from disk", before, env.fetchCount())
 	}
-	if state, active := m.Active(); !active || state.LastError != "" {
-		t.Errorf("State = %+v (active=%v), want the previous failure cleared", state, active)
+	if m.Version() == "" || m.state.LastError != "" {
+		t.Errorf("state = %+v (version %q), want the previous failure cleared", m.state, m.Version())
 	}
 }
 
@@ -558,7 +454,6 @@ func TestEnsureWithRetryUsesTheLibraryPolicyWhenTheRetryKnobsAreUnset(t *testing
 	env.installerFails = true
 	m := env.manager(func(c *Config) {
 		c.MaxAttempts = 0
-		c.RetryBackoff = 0
 	})
 
 	if err := m.EnsureWithRetry(t.Context()); err == nil {
@@ -567,7 +462,7 @@ func TestEnsureWithRetryUsesTheLibraryPolicyWhenTheRetryKnobsAreUnset(t *testing
 	if got := env.fetchCount(); got != defaultMaxAttempts {
 		t.Errorf("fetches = %d, want %d: one per attempt of the default bound", got, defaultMaxAttempts)
 	}
-	want := []time.Duration{defaultRetryBackoff, 2 * defaultRetryBackoff, 4 * defaultRetryBackoff}
+	want := []time.Duration{retryBackoff, 2 * retryBackoff, 4 * retryBackoff}
 	if got := env.sleeps(); !slices.Equal(got, want) {
 		t.Errorf("backoffs = %v, want %v: the default backoff, doubling", got, want)
 	}
@@ -671,38 +566,20 @@ func TestExhaustedRetriesWithNothingUsableIsAnError(t *testing.T) {
 // stops a long-lived process from waiting hours between attempts.
 func TestBackoffDoublesAndCaps(t *testing.T) {
 	env := newFakeEnv(t)
-	m := env.manager(func(c *Config) { c.RetryBackoff = time.Minute })
+	m := env.manager()
 	tests := map[int]time.Duration{
-		1: time.Minute,
-		2: 2 * time.Minute,
-		3: 4 * time.Minute,
-		4: 8 * time.Minute,
-		5: maxRetryBackoff,
+		1: retryBackoff,
+		2: 2 * retryBackoff,
+		3: 4 * retryBackoff,
+		4: 8 * retryBackoff,
+		5: 16 * retryBackoff,
+		6: maxRetryBackoff,
 		9: maxRetryBackoff,
 	}
 	for attempt, want := range tests {
 		if got := m.backoff(attempt); got != want {
 			t.Errorf("backoff(%d) = %v, want %v", attempt, got, want)
 		}
-	}
-}
-
-// TestBackoffCapsTheFirstWaitToo pins the cap on the one wait the doubling loop never
-// reaches. n == 1 runs the loop zero times, so a RetryBackoff above the cap was returned
-// verbatim: a caller configuring an hour waited an hour before the first retry, from a
-// function documented to cap at ten minutes. Config validation does not cover it either —
-// it only replaces a non-positive value with the default.
-func TestBackoffCapsTheFirstWaitToo(t *testing.T) {
-	env := newFakeEnv(t)
-	m := env.manager(func(c *Config) { c.RetryBackoff = time.Hour })
-
-	if got := m.backoff(1); got != maxRetryBackoff {
-		t.Errorf("backoff(1) = %v, want the %v cap", got, maxRetryBackoff)
-	}
-	// And the doubling path from an already-capped start stays capped rather than
-	// overflowing past it.
-	if got := m.backoff(2); got != maxRetryBackoff {
-		t.Errorf("backoff(2) = %v, want the %v cap", got, maxRetryBackoff)
 	}
 }
 
@@ -734,11 +611,9 @@ func TestProbeAndAssertionsLeadPATHWithTheBinaryDir(t *testing.T) {
 	envsByBin := map[string][]string{}
 	inner := m.run
 	m.run = func(ctx context.Context, c *command) ([]byte, error) {
-		if !env.isInstaller(c.Path) {
-			mu.Lock()
-			envsByBin[c.Path] = append([]string(nil), c.Env...)
-			mu.Unlock()
-		}
+		mu.Lock()
+		envsByBin[c.Path] = append([]string(nil), c.Env...)
+		mu.Unlock()
 		return inner(ctx, c)
 	}
 
@@ -1036,22 +911,15 @@ func TestEnsureStillHonoursCancellation(t *testing.T) {
 	}
 }
 
-// TestNewSnapshotsTheCallerConfig pins New's claim that nothing the manager keeps
-// shares memory with the caller's Config.
-//
-// A plain `*cfg` leaves every reference-bearing field aliased, and four of them are
-// read long after New returns: the argv of each assertion (what runs against the
-// installed artifact), Release.ProbeArgs (what every start runs to identify a
-// candidate), Release.Installer.Args (what the in-archive installer is invoked with),
-// and both Purge slices (the DELETE list, aliased across the validation that just
-// approved it). The Mandatory case is the sharpest: that field exists to be the set
-// "a deployment cannot weaken, reword or drop", and an aliased Args made rewording it
-// after construction a one-line assignment.
+// TestNewSnapshotsTheCallerConfig pins that every reference-bearing field is
+// copied, not just the ones read at construction: the argv of each assertion,
+// ProbeArgs, and both Purge slices (the DELETE list, aliased across the
+// validation that just approved it) are read long after New returns.
 func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	env := newFakeEnv(t)
 	cfg := env.config(func(c *Config) {
 		c.Purge = &Purge{Artifacts: []string{"legacy-artifact"}, Names: []string{toolName}, Marker: legacyMarker}
-		c.Assert = []Assertion{{Name: "extra", Args: []string{"settings", "extra", "true"}}}
+		c.Assertions = append(c.Assertions, Assertion{Name: "extra", Args: []string{"settings", "extra", "true"}})
 	})
 	m, err := New(cfg)
 	if err != nil {
@@ -1063,31 +931,29 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	cfg.Require = append(cfg.Require, "mutated")
 	cfg.Optional = append(cfg.Optional, "mutated")
 	cfg.TrustedUIDs = append(cfg.TrustedUIDs, 4242)
-	cfg.TrustedGIDs = append(cfg.TrustedGIDs, 4242)
-	cfg.Release.ArchTokens["amd64"] = "mutated"
-	cfg.Release.ProbeArgs[0] = "mutated"
-	cfg.Release.Installer.Args[0] = "mutated"
-	cfg.Release.Mandatory[0].Args[2] = "mutated"
-	cfg.Assert[0].Args[2] = "mutated"
+	cfg.ArchTokens["amd64"] = "mutated"
+	cfg.ProbeArgs[0] = "mutated"
+	for i := range cfg.Assertions {
+		cfg.Assertions[i].Args[0] = "mutated"
+	}
 	cfg.Purge.Artifacts[0] = "../escaped"
 	cfg.Purge.Names[0] = "mutated"
 
 	checks := map[string]string{
-		"Digests":                m.cfg.Digests["amd64"],
-		"Release.ArchTokens":     m.cfg.Release.ArchTokens["amd64"],
-		"Release.ProbeArgs":      m.cfg.Release.ProbeArgs[0],
-		"Release.Installer.Args": m.cfg.Release.Installer.Args[0],
-		"Purge.Artifacts":        m.cfg.Purge.Artifacts[0],
-		"Purge.Names":            m.cfg.Purge.Names[0],
-		"resolved digest":        m.digest,
-		"resolved arch token":    m.archToken,
+		"Digests":             m.cfg.Digests["amd64"],
+		"ArchTokens":          m.cfg.ArchTokens["amd64"],
+		"ProbeArgs":           m.cfg.ProbeArgs[0],
+		"Purge.Artifacts":     m.cfg.Purge.Artifacts[0],
+		"Purge.Names":         m.cfg.Purge.Names[0],
+		"resolved digest":     m.digest,
+		"resolved arch token": m.archToken,
 	}
 	for field, got := range checks {
 		if got == "mutated" || got == "../escaped" {
 			t.Errorf("%s reads %q after the caller mutated its own Config, so New aliased it", field, got)
 		}
 	}
-	for _, a := range m.cfg.Assert {
+	for _, a := range m.cfg.Assertions {
 		if slices.Contains(a.Args, "mutated") {
 			t.Errorf("assertion %q argv reads %v after the caller mutated its own Config, so New aliased it", a.Name, a.Args)
 		}
@@ -1095,10 +961,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	if slices.Contains(m.cfg.Require, "mutated") || slices.Contains(m.cfg.Optional, "mutated") {
 		t.Errorf("Require/Optional read %v/%v, so New aliased one of them", m.cfg.Require, m.cfg.Optional)
 	}
-	if slices.Contains(m.trust.uids, 4242) || slices.Contains(m.trust.gids, 4242) {
-		t.Errorf("the trust set reads %v/%v, so New aliased it", m.trust.uids, m.trust.gids)
-	}
-	if slices.Contains(m.cfg.TrustedUIDs, 4242) || slices.Contains(m.cfg.TrustedGIDs, 4242) {
-		t.Errorf("Config.TrustedUIDs/GIDs read %v/%v, so New aliased one of them", m.cfg.TrustedUIDs, m.cfg.TrustedGIDs)
+	if slices.Contains(m.trust.UIDs, 4242) || slices.Contains(m.cfg.TrustedUIDs, 4242) {
+		t.Errorf("the trust set reads %v/%v, so New aliased it", m.trust.UIDs, m.cfg.TrustedUIDs)
 	}
 }

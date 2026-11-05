@@ -673,6 +673,27 @@ func TestNew_RefusesANegativeTrustedUID(t *testing.T) {
 	}
 }
 
+func TestNew_RefusesADotDotRoot(t *testing.T) {
+	root := t.TempDir()
+	tests := map[string]*Config{
+		"config dir, inside": {ConfigDir: root + "/link/../config", ToolsDir: root + "/tools"},
+		"config dir, ending": {ConfigDir: root + "/config/x/..", ToolsDir: root + "/tools"},
+		"tools dir, inside":  {ConfigDir: root + "/config", ToolsDir: root + "/link/../tools"},
+		"tools dir, ending":  {ConfigDir: root + "/config", ToolsDir: root + "/tools/x/.."},
+	}
+	for name, cfg := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := New(cfg)
+			if err == nil || !strings.Contains(err.Error(), `must not contain a ".." component`) {
+				t.Errorf("New = %v, want the dot-dot root refused", err)
+			}
+		})
+	}
+	if _, serr := os.Stat(filepath.Join(root, "config")); serr == nil {
+		t.Error("New created the config dir before refusing its Config")
+	}
+}
+
 // TestManagedDirs_IsTheJudgedSet freezes the directories the integrity
 // check judges: a consumer's boot repair tightens exactly these.
 func TestManagedDirs_IsTheJudgedSet(t *testing.T) {
