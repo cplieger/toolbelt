@@ -590,7 +590,6 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 
 // loadAquaDef parses pkgs/<ref>/registry.yaml and keeps definitions the
 // runtime evaluator supports on linux.
-
 func loadAquaDef(aquaDir, ref string) (*toolbelt.AquaPackage, error) {
 	data, err := os.ReadFile(filepath.Join(aquaDir, filepath.FromSlash(ref), "registry.yaml"))
 	if err != nil {
