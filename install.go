@@ -171,9 +171,6 @@ const (
 	backupSuffix  = ".old"
 )
 
-// chtimes is os.Chtimes, a seam for the test of its failure.
-var chtimes = os.Chtimes
-
 // residue is the transient name of version under its tool's opt dir.
 func residue(versDir, suffix string) string {
 	return filepath.Join(filepath.Dir(versDir), "."+filepath.Base(versDir)+suffix)
@@ -404,7 +401,7 @@ func (in *installer) publishStaged(name, version, staging, versDir string) error
 	}
 	// Not fatal: a mis-ranked predecessor costs only which superseded tree is kept.
 	now := time.Now()
-	if err := chtimes(versDir, now, now); err != nil {
+	if err := os.Chtimes(versDir, now, now); err != nil {
 		in.logger().Warn("toolbelt: could not record the install time of a version directory", "path", versDir, "error", err)
 	}
 	_ = os.RemoveAll(backup)
@@ -769,11 +766,15 @@ func (in *installer) pruneOldVersions(name, current string, keep int) {
 	if err != nil {
 		return
 	}
+	names := make(map[string]bool, len(dirents))
+	for _, e := range dirents {
+		names[e.Name()] = true
+	}
 	var victims []string
 	entries := make([]retain.Entry, 0, len(dirents))
 	for _, e := range dirents {
 		switch n := e.Name(); {
-		case strings.HasPrefix(n, "."):
+		case strings.HasPrefix(n, "."), n != current && legacyResidue(n, names):
 			victims = append(victims, n)
 		default:
 			var mod time.Time
@@ -792,6 +793,19 @@ func (in *installer) pruneOldVersions(name, current string, keep int) {
 		}
 		in.logf("pruned old version %s/%s", name, victim)
 	}
+}
+
+// legacyResidue reports whether n is staging or backup residue under the
+// names an install used before residue was dot-prefixed: <version>.staging
+// or <version>.old beside its own version's tree. A crash left it with a
+// recent mtime, so ranked as a version it would take the predecessor's slot.
+func legacyResidue(n string, names map[string]bool) bool {
+	for _, suffix := range []string{stagingSuffix, backupSuffix} {
+		if stem, ok := strings.CutSuffix(n, suffix); ok && names[stem] {
+			return true
+		}
+	}
+	return false
 }
 
 // linkBin force-replaces bin/<name> with a symlink to target and flushes

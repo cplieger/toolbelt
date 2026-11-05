@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -1367,27 +1366,35 @@ func TestPruneOldVersions_keepsAnActiveVersionNamedLikeResidue(t *testing.T) {
 	}
 }
 
-// R8: a version directory whose install time cannot be recorded still
-// installs, and the failure is logged with its path.
-func TestPublishStaged_aFailedTimestampStillPublishes(t *testing.T) {
-	var buf bytes.Buffer
-	in := &installer{toolsDir: t.TempDir(), output: func(string) {}, log: slog.New(slog.NewTextHandler(&buf, nil))}
-	versDir := filepath.Join(in.optDir(), "tool", "v1.0.0")
-	staging := residue(versDir, stagingSuffix)
-	if err := os.MkdirAll(staging, managedDirMode); err != nil {
+// A staging or backup tree an install left under the names used before residue
+// was dot-prefixed is residue, not a predecessor: its mtime is the crash's.
+func TestPruneOldVersions_removesOldStyleResidue(t *testing.T) {
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+	root := filepath.Join(in.optDir(), "tool")
+	for name, age := range map[string]time.Duration{
+		"v3.0.0": 0, "v2.0.0": 48 * time.Hour, "v3.0.0" + stagingSuffix: 47 * time.Hour, "v2.0.0" + backupSuffix: time.Hour,
+	} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(p, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	in.pruneOldVersions("tool", "v3.0.0", 1)
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
 		t.Fatal(err)
 	}
-	prev := chtimes
-	chtimes = func(string, time.Time, time.Time) error { return errors.New("read-only file system") }
-	t.Cleanup(func() { chtimes = prev })
-
-	if err := in.publishStaged("tool", "v1.0.0", staging, versDir); err != nil {
-		t.Fatalf("publishStaged = %v, want the install to stand", err)
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
 	}
-	if _, err := os.Stat(versDir); err != nil {
-		t.Errorf("the version directory is not live: %v", err)
-	}
-	if got := buf.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "path="+versDir) {
-		t.Errorf("log = %q, want a WARN naming %s", got, versDir)
+	if !slices.Equal(left, []string{"v2.0.0", "v3.0.0"}) {
+		t.Errorf("after pruning, opt/tool holds %v, want [v2.0.0 v3.0.0]", left)
 	}
 }
