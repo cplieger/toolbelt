@@ -1778,11 +1778,11 @@ func (e *Engine) recordFailure(name string, cause error) error {
 }
 
 // pruneSuperseded applies the retention policy to a tool's versioned
-// install trees, after its new version is durably recorded. Only aqua
-// sources publish versioned trees; the other backends own a single
+// install trees, after its new version is durably recorded. Only aqua and
+// release sources publish versioned trees; the other backends own a single
 // unversioned dir that must never be swept.
 func (e *Engine) pruneSuperseded(name string, t *Tool) {
-	if kind, _, _ := strings.Cut(t.Source, ":"); kind != SourceAqua {
+	if kind, _, _ := strings.Cut(t.Source, ":"); kind != SourceAqua && kind != SourceRelease {
 		return
 	}
 	e.inst.pruneOldVersions(name, t.Version, e.keepVersions)

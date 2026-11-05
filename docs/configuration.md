@@ -15,7 +15,7 @@ This page lists every `Config` field, the helpers that fill `Config.Refresh` fro
 | `CatalogOverlays` | Your overlay files, applied again to every catalog the engine loads, so the patches survive a refresh |
 | `Seed` | The manifest written when none exists. Nil writes an empty manifest |
 | `System` | Binaries baked into your image, reported read-only in `Inventory` |
-| `KeepVersions` | How many replaced versions stay under `opt/<name>/` for rollback. 0 means the default of 1, and a negative value keeps none |
+| `KeepVersions` | How many replaced versions stay under `opt/<name>/` for rollback, the most recently installed first. 0 means the default of 1, and a negative value keeps none |
 | `VerifyRootIntegrity` | Refuse to start over an unsafe tools tree. Off by default. See below |
 | `OnJobChanged` | Receives every job state change. Must not block. Nil is silent |
 | `OnJobOutput` | Receives a running job's output lines in batches. Must not block. Nil is silent |
