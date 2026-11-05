@@ -2336,7 +2336,7 @@ func TestPruneOldVersions_Retention(t *testing.T) {
 			ages := map[string]time.Duration{
 				"v0.9.0": 96 * time.Hour, "v1.0.0": 72 * time.Hour,
 				"v2.0.0": 48 * time.Hour, "v3.0.0": 0,
-				"v3.0.0" + stagingSuffix: 0, "v2.0.0" + backupSuffix: 0,
+				".v3.0.0" + stagingSuffix: 0, ".v2.0.0" + backupSuffix: 0,
 			}
 			for name, age := range ages {
 				p := filepath.Join(root, name)

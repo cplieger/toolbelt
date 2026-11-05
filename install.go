@@ -162,17 +162,26 @@ func (in *installer) logf(format string, args ...any) {
 // ~200 MB; anything past this is a broken or hostile URL.
 const maxArtifactSize = 1 << 30
 
-// Transient suffixes inside a tool's opt dir: the extraction target
-// before a publish, and the superseded tree kept during one. Neither is
-// ever a retention candidate.
+// Transient names inside a tool's opt dir: the extraction target
+// (staged before an atomic swap) and the previous tree held during that
+// swap, each "."+version+suffix. A version cannot start with a dot
+// (grammarTag), so residue never shares a name with a version tree.
 const (
 	stagingSuffix = ".staging"
 	backupSuffix  = ".old"
 )
 
+// chtimes is os.Chtimes, a seam for the test of its failure.
+var chtimes = os.Chtimes
+
+// residue is the transient name of version under its tool's opt dir.
+func residue(versDir, suffix string) string {
+	return filepath.Join(filepath.Dir(versDir), "."+filepath.Base(versDir)+suffix)
+}
+
 // DefaultKeepVersions is how many superseded versions of a tool the
-// engine retains when Config.KeepVersions is unset (retain.Keep's zero
-// value): one, so a bad update
+// engine retains when Config.KeepVersions is unset, the count
+// retain.Keep(0) returns: one, so a bad update
 // always has a previous tree under <ToolsDir>/opt/<name>/ to fall back
 // to instead of only a re-download.
 const DefaultKeepVersions = 1
@@ -321,7 +330,7 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 		return "", nil, fmt.Errorf("refusing to install %s: version %q is not a path component", name, version)
 	}
 	versDir := filepath.Join(in.optDir(), name, version)
-	staging := versDir + stagingSuffix
+	staging := residue(versDir, stagingSuffix)
 	declared, err := in.stageArtifact(ctx, name, version, spec, artifact, staging)
 	if err == nil {
 		err = in.publishStaged(name, version, staging, versDir)
@@ -370,10 +379,10 @@ func (in *installer) stageArtifact(ctx context.Context, name, version string, sp
 }
 
 // publishStaged swaps the staged tree in as the live version directory and
-// stamps it with the time, which retention ranks predecessors by: a rename
+// stamps it with the current time, which retention ranks predecessors by: a rename
 // keeps the staged root's mtime, which an archive's "./" member may have set.
 func (in *installer) publishStaged(name, version, staging, versDir string) error {
-	backup := versDir + backupSuffix
+	backup := residue(versDir, backupSuffix)
 	if err := os.RemoveAll(backup); err != nil {
 		return err
 	}
@@ -395,7 +404,7 @@ func (in *installer) publishStaged(name, version, staging, versDir string) error
 	}
 	// Not fatal: a mis-ranked predecessor costs only which superseded tree is kept.
 	now := time.Now()
-	if err := os.Chtimes(versDir, now, now); err != nil {
+	if err := chtimes(versDir, now, now); err != nil {
 		in.logger().Warn("toolbelt: could not record the install time of a version directory", "path", versDir, "error", err)
 	}
 	_ = os.RemoveAll(backup)
@@ -749,8 +758,8 @@ func isHexDigest(s string, n int) bool {
 	return true
 }
 
-// pruneOldVersions removes a tool's transient .staging and .old residue,
-// then the superseded version dirs retain.Victims names, keeping the current
+// pruneOldVersions removes a tool's transient residue (every dot-prefixed
+// entry), then the superseded version dirs retain.Victims names, keeping the current
 // version and the `keep` most recently activated previous ones so a bad
 // update has a fallback. Best-effort: a failure is logged and disk is left
 // as-is.
@@ -764,7 +773,7 @@ func (in *installer) pruneOldVersions(name, current string, keep int) {
 	entries := make([]retain.Entry, 0, len(dirents))
 	for _, e := range dirents {
 		switch n := e.Name(); {
-		case strings.HasSuffix(n, stagingSuffix), strings.HasSuffix(n, backupSuffix):
+		case strings.HasPrefix(n, "."):
 			victims = append(victims, n)
 		default:
 			var mod time.Time

@@ -1,6 +1,6 @@
-// Package retain is the one retention rule and version order of toolbelt's
-// install engine and its pin package: keep the active version and the keep
-// most recently activated predecessors that could serve.
+// Package retain is the install engine's retention rule and version-directory
+// order: keep the active version and the keep most recently activated
+// predecessors that could serve.
 package retain
 
 import (

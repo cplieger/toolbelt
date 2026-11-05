@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -1240,7 +1241,7 @@ func TestInstallNpm_CreatesTheModuleTreeFirst(t *testing.T) {
 
 // TestPruneSuperseded_prunesReleaseTrees pins that a release: source's
 // versioned trees are retained like aqua's: release installs publish
-// opt/<name>/<version> too, so each update without a prune leaked a tree.
+// opt/<name>/<version> too, so without a prune each update leaks a tree.
 func TestPruneSuperseded_prunesReleaseTrees(t *testing.T) {
 	e := newTestEngine(t, nil)
 	root := filepath.Join(e.inst.optDir(), "r")
@@ -1295,8 +1296,8 @@ func tarGzWithRoot(t *testing.T, mtime time.Time, members map[string]string) []b
 
 // TestInstallFromSpec_recordsTheActivationTime pins that a published version
 // directory carries its install time: retention ranks predecessors by it, and an
-// archive whose "./" member is dated 2019 otherwise left the newer predecessor
-// ranked oldest and pruned.
+// archive whose "./" member is dated 2019 would otherwise rank the newer
+// predecessor oldest and prune it.
 func TestInstallFromSpec_recordsTheActivationTime(t *testing.T) {
 	old := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
 	assets := map[string][]byte{
@@ -1339,5 +1340,54 @@ func TestInstallFromSpec_recordsTheActivationTime(t *testing.T) {
 func TestDefaultKeepVersions_isRetainsDefault(t *testing.T) {
 	if got := retain.Keep(0); got != DefaultKeepVersions {
 		t.Errorf("retain.Keep(0) = %d, want DefaultKeepVersions (%d)", got, DefaultKeepVersions)
+	}
+}
+
+// A version may end in what was once a residue suffix: residue names start
+// with a dot, which no version can, so such an active tree is never swept.
+func TestPruneOldVersions_keepsAnActiveVersionNamedLikeResidue(t *testing.T) {
+	for _, current := range []string{"v1.0.old", "nightly.staging"} {
+		in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+		root := filepath.Join(in.optDir(), "tool")
+		for _, n := range []string{current, "." + current + stagingSuffix, "." + current + backupSuffix} {
+			if err := os.MkdirAll(filepath.Join(root, n), managedDirMode); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		in.pruneOldVersions("tool", current, 1)
+
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != current {
+			t.Errorf("after pruning, opt/tool holds %v, want only the active %s", entries, current)
+		}
+	}
+}
+
+// R8: a version directory whose install time cannot be recorded still
+// installs, and the failure is logged with its path.
+func TestPublishStaged_aFailedTimestampStillPublishes(t *testing.T) {
+	var buf bytes.Buffer
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}, log: slog.New(slog.NewTextHandler(&buf, nil))}
+	versDir := filepath.Join(in.optDir(), "tool", "v1.0.0")
+	staging := residue(versDir, stagingSuffix)
+	if err := os.MkdirAll(staging, managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	prev := chtimes
+	chtimes = func(string, time.Time, time.Time) error { return errors.New("read-only file system") }
+	t.Cleanup(func() { chtimes = prev })
+
+	if err := in.publishStaged("tool", "v1.0.0", staging, versDir); err != nil {
+		t.Fatalf("publishStaged = %v, want the install to stand", err)
+	}
+	if _, err := os.Stat(versDir); err != nil {
+		t.Errorf("the version directory is not live: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "path="+versDir) {
+		t.Errorf("log = %q, want a WARN naming %s", got, versDir)
 	}
 }

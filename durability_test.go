@@ -234,7 +234,7 @@ func TestInstall_PublishBarriersAreWired(t *testing.T) {
 	}
 
 	optRoot := filepath.Join(e.toolsDir, "opt", "tool")
-	staging := filepath.Join(optRoot, "v1.0.0"+stagingSuffix)
+	staging := residue(filepath.Join(optRoot, "v1.0.0"), stagingSuffix)
 	wantDirs := []string{staging, optRoot, e.binDir()}
 	for _, want := range wantDirs {
 		if !slices.Contains(dirs, want) {
