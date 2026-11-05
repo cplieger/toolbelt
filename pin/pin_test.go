@@ -535,8 +535,6 @@ func TestExhaustedRetriesWithNothingUsableIsAnError(t *testing.T) {
 // TestBackoffDoublesAndCaps pins the retry schedule's shape, including the cap that
 // stops a long-lived process from waiting hours between attempts.
 func TestBackoffDoublesAndCaps(t *testing.T) {
-	env := newFakeEnv(t)
-	m := env.manager()
 	tests := map[int]time.Duration{
 		1: retryBackoff,
 		2: 2 * retryBackoff,
@@ -547,7 +545,7 @@ func TestBackoffDoublesAndCaps(t *testing.T) {
 		9: maxRetryBackoff,
 	}
 	for attempt, want := range tests {
-		if got := m.backoff(attempt); got != want {
+		if got := backoff(attempt); got != want {
 			t.Errorf("backoff(%d) = %v, want %v", attempt, got, want)
 		}
 	}

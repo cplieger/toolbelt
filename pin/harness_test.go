@@ -72,7 +72,7 @@ type logRecorder struct {
 	seen []logRecord
 }
 
-func (h *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *logRecorder) Handle(_ context.Context, r slog.Record) error {
 	rec := logRecord{level: r.Level, msg: r.Message, attrs: make(map[string]string, r.NumAttrs())}
@@ -359,14 +359,6 @@ func encodeZip(entries []namedEntry) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// zipWithRawName builds a one-entry archive carrying name verbatim, for the fuzz
-// target. archive/zip rejects some byte sequences outright, which is the writer's
-// business rather than the extractor's, so the error is returned for the caller to
-// skip on.
-func zipWithRawName(name string) ([]byte, error) {
-	return encodeZip([]namedEntry{{name: name, body: "x", mode: 0o644}})
-}
-
 // manager builds a manager wired to this env, with every seam replaced.
 func (e *fakeEnv) manager(mutate ...func(*Config)) *Manager {
 	e.t.Helper()
@@ -535,6 +527,11 @@ func (e *fakeEnv) probeAnswer(path string) ([]byte, error) {
 	return nil, fmt.Errorf("%s is not a fake artifact", path)
 }
 
+// placedAt is the activation time placeVersion gives every directory it writes, so
+// placed versions share one and retention orders them by version precedence,
+// whatever timestamp resolution the filesystem has.
+var placedAt = time.Unix(1600000000, 0)
+
 // placeVersion writes a COMPLETE version directory straight onto the volume,
 // standing in for an install a previous start finished.
 func (e *fakeEnv) placeVersion(version string, names ...string) string {
@@ -553,6 +550,9 @@ func (e *fakeEnv) placeVersion(version string, names ...string) string {
 	}
 	if err := os.WriteFile(filepath.Join(dir, sentinelName), []byte(version+"\n"), 0o600); err != nil {
 		e.t.Fatalf("write sentinel: %v", err)
+	}
+	if err := os.Chtimes(dir, placedAt, placedAt); err != nil {
+		e.t.Fatalf("Chtimes(%s): %v", dir, err)
 	}
 	return dir
 }
@@ -615,13 +615,6 @@ func dirNames(t *testing.T, dir string) []string {
 func exists(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
-}
-
-// digestOf is the SHA-256 of an archive a test built itself, for the cases that
-// replace the harness's default archive.
-func digestOf(archive []byte) string {
-	sum := sha256.Sum256(archive)
-	return hex.EncodeToString(sum[:])
 }
 
 // openRoot opens dir as an os.Root closed when the test ends.

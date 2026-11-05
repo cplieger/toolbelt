@@ -416,7 +416,7 @@ func (m *Manager) EnsureWithRetry(ctx context.Context) error {
 			break
 		}
 		m.setPhase(phaseRetrying)
-		wait := m.backoff(attempt)
+		wait := backoff(attempt)
 		m.log.Warn("retrying the install after a failure",
 			"package", m.cfg.Name, "attempt", attempt, "of", m.cfg.MaxAttempts,
 			"retry_in", wait.String(), "error", lastErr)
@@ -436,7 +436,7 @@ func (m *Manager) EnsureWithRetry(ctx context.Context) error {
 
 // backoff returns the wait before the attempt after n, doubling from
 // retryBackoff up to maxRetryBackoff.
-func (m *Manager) backoff(n int) time.Duration {
+func backoff(n int) time.Duration {
 	wait := retryBackoff
 	for range n - 1 {
 		wait *= 2
