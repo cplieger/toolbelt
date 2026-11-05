@@ -21,8 +21,8 @@ import (
 
 // TestNewValidatesItsPins pins the architecture-dependent half of construction
 // (TestConfigValidationRefusesEachBrokenField has the rest): a supported
-// architecture and a well-formed digest for THAT architecture. Rejecting a mangled pin at construction beats
-// discovering it after a large download.
+// architecture and a well-formed digest for THAT architecture. Rejecting a
+// mangled pin at construction beats discovering it after a large download.
 func TestNewValidatesItsPins(t *testing.T) {
 	tests := map[string]struct {
 		mutate  func(*Config)

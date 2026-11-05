@@ -515,7 +515,7 @@ func (m *Manager) Version() string {
 }
 
 // PathEntry returns the absolute directory to lead PATH with, or "" when no
-// version is active. It holds only this release's artifact and its sentinel, so
+// version is active. It holds only files this release's installs put there, so
 // leading with it shadows nothing else.
 func (m *Manager) PathEntry() string {
 	m.mu.Lock()
@@ -717,9 +717,10 @@ func (m *Manager) settlePhase() {
 // the record is an input to readiness, so losing it must not fail an otherwise good
 // install.
 //
-// It is skipped entirely in a tree this process does not control, because the record is a file written under Root and the refusal has to mean
-// what it says. Nothing is lost: the same facts are already in the returned error and
-// the log line.
+// It is skipped entirely in a tree this process does not control, because the
+// record is a file written under Root and the refusal has to mean what it says.
+// Nothing is lost: the same facts are already in the returned error and the log
+// line.
 func (m *Manager) saveState(s *stateRecord) {
 	if !m.mayMutateTree() {
 		return
