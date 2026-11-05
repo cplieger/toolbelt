@@ -21,11 +21,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cplieger/go/ssrf"
+	"github.com/cplieger/toolbelt/v3/internal/custody"
 )
 
 // Source prefixes for Tool.Source. A source is "<kind>:<ref>" except
@@ -96,6 +98,11 @@ type Config struct {
 	// System names image-baked binaries surfaced read-only in
 	// Inventory's System group (informational; not managed).
 	System []string
+	// TrustedUIDs lists users, beside root and this process's uid, whose
+	// write access to a managed root or a directory above it
+	// VerifyRootIntegrity accepts: an account the operator knows is already
+	// privileged on the host. New rejects a negative entry.
+	TrustedUIDs []int
 	// KeepVersions is how many SUPERSEDED versions of a tool to retain
 	// under <ToolsDir>/opt/<name>/ (the current version is always kept),
 	// so a bad update can be rolled back. 0 means DefaultKeepVersions; a
@@ -215,6 +222,12 @@ func New(cfg *Config) (*Engine, error) {
 	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
 		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
 	}
+	for _, uid := range cfg.TrustedUIDs {
+		if uid < 0 {
+			return nil, fmt.Errorf("toolbelt: TrustedUIDs entry %d is not a uid", uid)
+		}
+	}
+	trust := custody.Trust{UIDs: slices.Clone(cfg.TrustedUIDs)}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -227,7 +240,7 @@ func New(cfg *Config) (*Engine, error) {
 	// returned afterwards would leak (the caller gets a nil Engine and can
 	// never Close it).
 	if cfg.VerifyRootIntegrity {
-		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir, trust); err != nil {
 			return nil, fmt.Errorf("toolbelt: %w", err)
 		}
 	}
@@ -251,7 +264,7 @@ func New(cfg *Config) (*Engine, error) {
 	// skipped any root that was absent, and New created those through
 	// whatever mode the filesystem stores. Still before newJobQueue.
 	if cfg.VerifyRootIntegrity {
-		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir, trust); err != nil {
 			return nil, fmt.Errorf("toolbelt: %w", err)
 		}
 	}
