@@ -420,8 +420,8 @@ func TestVerifyCustodyRefusesANonDirectoryAndAMissingPath(t *testing.T) {
 	})
 }
 
-// TestVerifyCustodyJudgesTheResolvedChain pins that a symlink is resolved before
-// the walk, so the directory a link lands in is what gets judged. Judging the link
+// TestVerifyCustodyJudgesTheResolvedChain pins that the walk follows a symlink, so
+// the directory a link lands in is what gets judged. Judging the link
 // itself would be both wrong (a symlink's own mode grants nothing on Linux) and
 // exploitable (a safe-looking link into a world-writable directory).
 func TestVerifyCustodyJudgesTheResolvedChain(t *testing.T) {
@@ -550,7 +550,7 @@ func TestVerifyCustodyFollowsAsManyLinksAsTheKernelWould(t *testing.T) {
 
 	t.Run("a chain at the bound resolves", func(t *testing.T) {
 		if err := (Trust{}).Verify(chain(t, maxSymlinkHops), true); err != nil {
-			t.Errorf("verifyCustodyChain over %d links = %v, want nil: the kernel follows a chain this long",
+			t.Errorf("Verify over %d links = %v, want nil: the kernel follows a chain this long",
 				maxSymlinkHops, err)
 		}
 	})
@@ -558,7 +558,7 @@ func TestVerifyCustodyFollowsAsManyLinksAsTheKernelWould(t *testing.T) {
 	t.Run("a chain past the bound is refused", func(t *testing.T) {
 		err := (Trust{}).Verify(chain(t, maxSymlinkHops+1), true)
 		if !errors.Is(err, syscall.ELOOP) {
-			t.Errorf("verifyCustodyChain over %d links = %v, want an ELOOP refusal", maxSymlinkHops+1, err)
+			t.Errorf("Verify over %d links = %v, want an ELOOP refusal", maxSymlinkHops+1, err)
 		}
 	})
 }
