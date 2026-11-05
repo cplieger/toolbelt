@@ -1342,8 +1342,8 @@ func TestDefaultKeepVersions_isRetainsDefault(t *testing.T) {
 	}
 }
 
-// A version may end in what was once a residue suffix: residue names start
-// with a dot, which no version can, so such an active tree is never swept.
+// A version may end in .old or .staging: residue names start with a dot,
+// which no version can, so such an active tree is never swept.
 func TestPruneOldVersions_keepsAnActiveVersionNamedLikeResidue(t *testing.T) {
 	for _, current := range []string{"v1.0.old", "nightly.staging"} {
 		in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
@@ -1366,8 +1366,8 @@ func TestPruneOldVersions_keepsAnActiveVersionNamedLikeResidue(t *testing.T) {
 	}
 }
 
-// A staging or backup tree an install left under the names used before residue
-// was dot-prefixed is residue, not a predecessor: its mtime is the crash's.
+// A <version>.staging or <version>.old beside its own version's tree is a
+// crashed install's residue, not a predecessor: its mtime is the crash's.
 func TestPruneOldVersions_removesOldStyleResidue(t *testing.T) {
 	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
 	root := filepath.Join(in.optDir(), "tool")
@@ -1396,5 +1396,32 @@ func TestPruneOldVersions_removesOldStyleResidue(t *testing.T) {
 	}
 	if !slices.Equal(left, []string{"v2.0.0", "v3.0.0"}) {
 		t.Errorf("after pruning, opt/tool holds %v, want [v2.0.0 v3.0.0]", left)
+	}
+}
+
+// Residue never shares a name with a version: publishing v1.0 twice, the second
+// time over a backup, leaves a retained v1.0.old version alone.
+func TestPublishStaged_leavesAVersionNamedLikeItsBackup(t *testing.T) {
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+	root := filepath.Join(in.optDir(), "tool")
+	versDir := filepath.Join(root, "v1.0")
+	kept := filepath.Join(root, "v1.0.old", "tool")
+	if err := os.MkdirAll(filepath.Dir(kept), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kept, []byte("v1.0.old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		staging := residue(versDir, stagingSuffix)
+		if err := os.MkdirAll(staging, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := in.publishStaged("tool", "v1.0", staging, versDir); err != nil {
+			t.Fatalf("publishStaged: %v", err)
+		}
+	}
+	if body, err := os.ReadFile(kept); err != nil || string(body) != "v1.0.old" {
+		t.Errorf("the retained v1.0.old version = %q, %v; want it untouched", body, err)
 	}
 }

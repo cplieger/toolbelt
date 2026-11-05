@@ -795,10 +795,10 @@ func (in *installer) pruneOldVersions(name, current string, keep int) {
 	}
 }
 
-// legacyResidue reports whether n is staging or backup residue under the
-// names an install used before residue was dot-prefixed: <version>.staging
-// or <version>.old beside its own version's tree. A crash left it with a
-// recent mtime, so ranked as a version it would take the predecessor's slot.
+// legacyResidue reports whether n is <version>.staging or <version>.old
+// beside its own version's tree, as a crash under the undotted residue names
+// leaves it. Its mtime is the crash's, so ranked as a version it would take
+// the predecessor's slot.
 func legacyResidue(n string, names map[string]bool) bool {
 	for _, suffix := range []string{stagingSuffix, backupSuffix} {
 		if stem, ok := strings.CutSuffix(n, suffix); ok && names[stem] {
