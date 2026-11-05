@@ -2,6 +2,8 @@
 
 This page explains the files the engine keeps, the life of a tool, how dependencies are handled and what each engine call does. It is for a developer wiring toolbelt into a server.
 
+The `pin` package is separate from the engine: it installs one pinned release into its own tree under its own `Root`, as [Installing a pinned release with pin](pin.md) describes.
+
 ## Three files
 
 The engine uses three data files. The manifest and the state live under `ConfigDir` on your persistent volume. The catalog is read from `Config.CatalogPath`, usually baked into your image, and a refreshed copy is cached under `ConfigDir`.

@@ -66,3 +66,7 @@ A refused archive fails the install, and the previous version keeps serving.
 A tool the engine installs and then runs itself, `npm`, `uv`, `cargo` or `go`, is still found through the tools tree. Publishing it there is the point, and an absolute path would name the same writable file.
 
 `VerifyRootIntegrity` limits which other accounts can reach that tree, as [Configuration](configuration.md#root-integrity-check) describes. It cannot separate the engine from a shell command running beside it as the same user. On a volume where someone else holds a shell as that user, those binaries are theirs to replace. The engine is built for a volume with one user.
+
+## Pinned releases
+
+The `pin` package checks who can write its tree before it fetches anything, and never repairs a tree it refuses, as [Who may write the tree](pin.md#who-may-write-the-tree) describes. Each archive is checked against the pinned SHA-256 and unpacked from the same file, with the limits above.

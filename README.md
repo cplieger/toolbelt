@@ -75,6 +75,7 @@ Without `GitHubToken`, GitHub API requests go without a token, and GitHub allows
 - `Jobs`, `Wait` and `CancelJob` follow the job queue. `RefreshCatalog` and `CatalogInfo` refresh and describe the catalog.
 - `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity`, `ErrQueueFull`, `ErrShuttingDown` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
 - `httpapi.Handler` serves the engine over HTTP, and `cmd/toolcatalog` compiles and checks a catalog.
+- `pin` installs and runs one release at a pinned version and SHA-256.
 
 The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/toolbelt/v3).
 
@@ -103,6 +104,7 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/too
 - [The catalog](docs/catalog.md) covers runtime refresh and the `toolcatalog` compiler.
 - [The REST handler](docs/http-api.md) lists the routes, the refusal codes and the cache policy.
 - [Security](docs/security-model.md) describes what the engine checks and what it trusts.
+- [Installing a pinned release with pin](docs/pin.md) covers the `pin` package: what a start does, who may write the tree, retention and links.
 
 ## Credits
 
