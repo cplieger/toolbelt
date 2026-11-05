@@ -34,13 +34,16 @@ func TestVerifyCustodyAcceptsATreeOnlyThisProcessCanWrite(t *testing.T) {
 	// The witness: the chain really does include a world-writable ancestor, so
 	// the sticky exemption is what let this pass rather than the absence of one.
 	sticky := false
-	for _, component := range ancestors(mustEval(t, dir)) {
+	for component := mustEval(t, dir); ; component = filepath.Dir(component) {
 		fi, err := os.Lstat(component)
 		if err != nil {
 			t.Fatalf("lstat %s: %v", component, err)
 		}
 		if fi.Mode().Perm()&0o022 != 0 && fi.Mode()&os.ModeSticky != 0 {
 			sticky = true
+		}
+		if component == "/" {
+			break
 		}
 	}
 	if !sticky {
@@ -108,26 +111,88 @@ func TestVerifyCustodyRefusesAWritableComponent(t *testing.T) {
 	}
 }
 
-// TestVerifyCustodyTrustsGroupZeroOnlyAboveTheRoot pins that a root:root
-// 0775 ancestor passes and a root:root 0775 protected directory does not: a
-// non-root member of group 0 could write it.
-func TestVerifyCustodyTrustsGroupZeroOnlyAboveTheRoot(t *testing.T) {
-	if os.Geteuid() != 0 || os.Getegid() != 0 {
-		t.Skip("needs root for the fixture's group to be group 0")
+// TestVerifyCustodyTrustsNoGroup pins that group 0 is a stranger above the
+// root too: a non-root member could rename the root within a 0775 parent and
+// plant its own.
+func TestVerifyCustodyTrustsNoGroup(t *testing.T) {
+	t.Run("a group-0 writable ancestor, by mode", func(t *testing.T) {
+		if os.Geteuid() != 0 || os.Getegid() != 0 {
+			t.Skip("needs root for the fixture's group to be group 0")
+		}
+		parent := filepath.Join(t.TempDir(), "shared")
+		root := filepath.Join(parent, "pkg-versions")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(parent, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		if err := (Trust{}).Verify(root, true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), "can be modified by gid 0") {
+			t.Errorf("Verify = %v, want the gid-0 writable ancestor refused", err)
+		}
+	})
+	t.Run("a group-0 entry in an ancestor's list", func(t *testing.T) {
+		parent := filepath.Join(t.TempDir(), "shared")
+		root := filepath.Join(parent, "pkg-versions")
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		group0 := buildNFS4ACL(nfs4TypeAllow, nfs4FlagIdentifierGroup, 0, nfs4WriteData, 0)
+		defer serveACL(t, parent, xattrNFS4XDR, group0)()
+		if err := (Trust{}).Verify(root, true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), "can be modified by gid 0") {
+			t.Errorf("Verify = %v, want the ancestor's gid-0 grant refused", err)
+		}
+	})
+	t.Run("a sticky ancestor group 0 can write holds the walk to its links' owners", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "shared")
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, os.ModeSticky|0o755); err != nil {
+			t.Fatal(err)
+		}
+		group0 := buildNFS4ACL(nfs4TypeAllow, nfs4FlagIdentifierGroup, 0, nfs4WriteData, 0)
+		defer serveACL(t, dir, xattrNFS4XDR, group0)()
+		if !sharedSticky(dir, os.Geteuid(), Trust{}) {
+			t.Error("sharedSticky = false for a sticky directory group 0 can write")
+		}
+	})
+}
+
+// TestVerifyCustodyFollowsDotDotAsTheKernelDoes pins that ".." moves to the
+// parent of the directory a symlink reached, not of the link's own name, so
+// the directory the kernel passes through is the one judged.
+func TestVerifyCustodyFollowsDotDotAsTheKernelDoes(t *testing.T) {
+	base := mustEval(t, t.TempDir())
+	open := filepath.Join(base, "home", "open")
+	landing := filepath.Join(open, "deep", "safedir")
+	opt := filepath.Join(base, "opt")
+	for _, d := range []string{filepath.Join(open, "deep", "dir"), filepath.Join(landing, "tb"), filepath.Join(opt, "safedir", "tb"), filepath.Join(opt, "leaf")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	parent := filepath.Join(t.TempDir(), "shared")
-	root := filepath.Join(parent, "pkg-versions")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	if err := os.Chmod(open, 0o777); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.Chmod(parent, 0o775); err != nil {
-		t.Fatalf("chmod: %v", err)
+	if err := os.Symlink(filepath.Join(open, "deep", "dir"), filepath.Join(opt, "a")); err != nil {
+		t.Fatal(err)
 	}
-	if err := (Trust{}).Verify(root, true); err != nil {
-		t.Fatalf("Verify refused a root under a root:root 0775 ancestor: %v", err)
+	if err := os.Symlink("a/../safedir", filepath.Join(opt, "link")); err != nil {
+		t.Fatal(err)
 	}
-	if err := (Trust{}).Verify(parent, true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), "can be modified by gid 0") {
-		t.Fatalf("Verify(root:root 0775 protected directory) = %v, want gid 0 refused", err)
+	for name, path := range map[string]string{
+		"in a link target":     filepath.Join(opt, "link", "tb"),
+		"in the path as given": opt + "/a/../safedir", // not Join, which cleans ".." away
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, err := filepath.EvalSymlinks(path); err != nil || !strings.HasPrefix(got, open+"/") {
+				t.Fatalf("INVALID: %s resolves to %q, %v; want a path under %s", path, got, err, open)
+			}
+			if err := (Trust{}).Verify(path, true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), open+", mode 0777") {
+				t.Errorf("Verify = %v, want the world-writable directory the kernel passes through refused", err)
+			}
+		})
 	}
 }
 
@@ -766,13 +831,10 @@ func TestSharedStickyAsksTheListAndFailsClosed(t *testing.T) {
 }
 
 // TestVerifyCustodyRefusesTheProcessOwnGroup is the unprivileged witness for
-// group-write refusal: the runner's own primary gid needs no chown, and only
-// group 0 is ever trusted.
+// group-write refusal: the runner's own primary gid needs no chown, and no
+// group is trusted.
 func TestVerifyCustodyRefusesTheProcessOwnGroup(t *testing.T) {
 	gid := os.Getgid()
-	if gid == 0 {
-		t.Skip("the root group is always trusted, so it cannot stand in for a stranger here; the pinned-gid tests cover this shape where privilege exists")
-	}
 	root := filepath.Join(t.TempDir(), "pkg-versions")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -1014,22 +1076,20 @@ func TestCheckSymlinkJudgesWhoOwnsTheLink(t *testing.T) {
 	}
 }
 
-// TestAllowsTrustsGroupZeroOnlyInAnAncestor is the unprivileged witness for
-// the gid-0 rule, whose end-to-end tests need root.
-func TestAllowsTrustsGroupZeroOnlyInAnAncestor(t *testing.T) {
-	const euid = 1000
-	trust := Trust{}
-	if !trust.allows(principal{kind: principalGroup, id: 0}, euid, false) {
-		t.Error("group 0 is not trusted in an ancestor")
+// TestAllowsTrustsOnlyUsers is the unprivileged witness for the trust rule:
+// no group, group 0 included, and never everyone.
+func TestAllowsTrustsOnlyUsers(t *testing.T) {
+	const euid, admin = 1000, 3000
+	trust := Trust{UIDs: []int{admin}}
+	for _, p := range []principal{{kind: principalGroup, id: 0}, {kind: principalGroup, id: euid}, {kind: principalEveryone}} {
+		if trust.allows(p, euid) {
+			t.Errorf("%v is trusted", p)
+		}
 	}
-	if trust.allows(principal{kind: principalGroup, id: 0}, euid, true) {
-		t.Error("group 0 is trusted in the protected directory, which its non-root members could then write")
-	}
-	if trust.allows(principal{kind: principalGroup, id: 1}, euid, false) {
-		t.Error("group 1 is trusted, but only group 0 is")
-	}
-	if trust.allows(principal{kind: principalEveryone}, euid, false) {
-		t.Error("everyone is trusted, which nothing may ever make true")
+	for _, p := range []principal{{kind: principalUser, id: 0}, {kind: principalUser, id: euid}, {kind: principalUser, id: admin}} {
+		if !trust.allows(p, euid) {
+			t.Errorf("%v is not trusted", p)
+		}
 	}
 }
 
@@ -1064,5 +1124,56 @@ func TestARefusalNamesTheTrustKnobOnlyWhileItCanHelp(t *testing.T) {
 				t.Errorf("error %q names %s = %v, want %v", err, knob, got, tc.wantHint)
 			}
 		})
+	}
+}
+
+// ownedBy reports fi as owned by uid.
+type ownedBy struct {
+	os.FileInfo
+	st syscall.Stat_t
+}
+
+func (o ownedBy) Sys() any { return &o.st }
+
+// TestVerifyCustodyJudgesTheOwnerOfALinkInASharedDirectory is the
+// unprivileged witness that the walk judges a link's owner where sticky lets
+// that owner replace it: lstatFn reports the link as a stranger's.
+func TestVerifyCustodyJudgesTheOwnerOfALinkInASharedDirectory(t *testing.T) {
+	const stranger = 4242
+	base := mustEval(t, t.TempDir())
+	shared := filepath.Join(base, "shared")
+	tree := filepath.Join(base, "private", "tools")
+	for _, d := range []string{filepath.Join(shared, "sub"), tree} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(shared, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(shared, "link")
+	if err := os.Symlink(tree, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := (Trust{}).Verify(link, true); err != nil {
+		t.Fatalf("INVALID: Verify through our own link = %v, want nil", err)
+	}
+	old := lstatFn
+	defer func() { lstatFn = old }()
+	lstatFn = func(path string) (os.FileInfo, error) {
+		fi, err := old(path)
+		if err != nil || path != link {
+			return fi, err
+		}
+		st := *fi.Sys().(*syscall.Stat_t)
+		st.Uid = stranger
+		return ownedBy{FileInfo: fi, st: st}, nil
+	}
+	// Through "sub/..", the walk must judge shared again, not keep sub's answer.
+	for _, path := range []string{link, shared + "/sub/../link"} {
+		err := (Trust{}).Verify(path, true)
+		if !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), fmt.Sprintf("symlink owned by uid %d", stranger)) {
+			t.Errorf("Verify(%s) = %v, want the stranger's link in a shared sticky directory refused", path, err)
+		}
 	}
 }

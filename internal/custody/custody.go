@@ -12,94 +12,123 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
+	"strings"
 	"syscall"
 )
 
 // errNoCustody is what every refusal from Verify wraps.
 var errNoCustody = errors.New("not under this process's exclusive control")
 
-// Verify judges dir, which must exist, and every component of every path its
-// resolution visits: the path as written, then for each symlink the path it
-// points at. leafIsRoot says dir itself is the tree being protected, which a
-// sticky bit does not exempt; an ancestor's sticky bit does, unless its
-// access-control list lets another principal take it or rewrite the list.
+// Verify judges dir, which must exist, and every directory the kernel passes
+// through to reach it: the path is followed one component at a time, every
+// symlink's target included, and ".." moves to the parent of the directory
+// actually reached, never lexically. leafIsRoot says dir itself is the tree
+// being protected, which a sticky bit does not exempt; an ancestor's sticky
+// bit does, unless its access-control list lets another principal take it or
+// rewrite the list.
 func (t Trust) Verify(dir string, leafIsRoot bool) error {
-	// The walk starts at "/": a relative path would stop at the working directory.
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return fmt.Errorf("%w: resolving %s: %w", errNoCustody, dir, err)
+	if dir == "" {
+		return fmt.Errorf("%w: an empty path", errNoCustody)
 	}
-	dir = abs
-	euid := os.Geteuid()
-	path := dir
-	for range maxSymlinkHops + 1 {
-		if err := walkChain(path, euid, t, leafIsRoot); err != nil {
-			return err
-		}
-		next, expanded, err := expandFirstSymlink(path)
+	if !filepath.IsAbs(dir) {
+		wd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("%w: resolving %s: %w", errNoCustody, dir, err)
 		}
-		if !expanded {
-			return nil
-		}
-		path = next
+		dir = wd + "/" + dir // not Join: Join cleans ".." lexically
 	}
-	return fmt.Errorf("%w: resolving %s: the chain has not resolved after %d symbolic links: %w",
-		errNoCustody, dir, maxSymlinkHops, syscall.ELOOP)
+	w := &walk{trust: t, euid: os.Geteuid(), at: "/"}
+	if err := checkComponent(w.at, w.euid, false, t); err != nil {
+		return err
+	}
+	w.shared = sharedSticky(w.at, w.euid, t)
+	pending := components(dir)
+	for len(pending) > 0 {
+		next, err := w.step(pending[0])
+		if err != nil {
+			return err
+		}
+		pending = append(next, pending[1:]...)
+	}
+	if leafIsRoot {
+		return checkComponent(w.at, w.euid, true, t)
+	}
+	return nil
 }
+
+// walk is Verify's position: at is the physical directory reached, every
+// directory above it judged on the way down.
+type walk struct {
+	at     string
+	trust  Trust
+	euid   int
+	hops   int
+	shared bool // at is a sticky directory a stranger can write
+}
+
+// step moves through one component, returning the components a symlink's
+// target puts in front of the rest of the path.
+func (w *walk) step(name string) ([]string, error) {
+	if name == ".." {
+		w.at = filepath.Dir(w.at)
+		w.shared = sharedSticky(w.at, w.euid, w.trust)
+		return nil, nil
+	}
+	next := filepath.Join(w.at, name) // one name, no "..": nothing to clean
+	fi, err := lstatFn(next)
+	if err != nil {
+		return nil, fmt.Errorf("%w: examining %s: %w", errNoCustody, next, err)
+	}
+	if fi.Mode()&os.ModeSymlink == 0 {
+		if cerr := checkComponent(next, w.euid, false, w.trust); cerr != nil {
+			return nil, cerr
+		}
+		w.at = next
+		w.shared = sharedSticky(w.at, w.euid, w.trust)
+		return nil, nil
+	}
+	if lerr := checkLink(next, fi, w.euid, w.shared, w.trust); lerr != nil {
+		return nil, lerr
+	}
+	w.hops++
+	if w.hops > maxSymlinkHops {
+		return nil, fmt.Errorf("%w: resolving %s: the chain has not resolved after %d symbolic links: %w",
+			errNoCustody, next, maxSymlinkHops, syscall.ELOOP)
+	}
+	target, err := os.Readlink(next)
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading the symlink %s: %w", errNoCustody, next, err)
+	}
+	if filepath.IsAbs(target) {
+		w.at = "/"
+		w.shared = sharedSticky(w.at, w.euid, w.trust)
+	}
+	return components(target), nil
+}
+
+// lstatFn is replaced in tests: no unprivileged test can own a symlink as
+// another user.
+var lstatFn = os.Lstat
 
 // maxSymlinkHops is Linux's SYMLOOP_MAX, so a chain this refuses is one open()
 // would refuse too.
 const maxSymlinkHops = 40
 
-// expandFirstSymlink replaces path's first symlink component with its target.
-// One link per call: the caller judges the path between expansions, which is
-// what puts the directory holding every intermediate link under the walk.
-// filepath.EvalSymlinks resolves them all at once and hides those directories.
-func expandFirstSymlink(path string) (expanded string, found bool, err error) {
-	clean := filepath.Clean(path)
-	for _, component := range ancestors(clean) {
-		fi, err := os.Lstat(component)
-		if err != nil {
-			return "", false, fmt.Errorf("examining %s: %w", component, err)
+// components splits path into its names, dropping empty ones and ".", and
+// keeping "..", which only the walk can resolve.
+func components(path string) []string {
+	var out []string
+	for c := range strings.SplitSeq(path, "/") {
+		if c != "" && c != "." {
+			out = append(out, c)
 		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			continue
-		}
-		target, readErr := os.Readlink(component)
-		if readErr != nil {
-			return "", false, fmt.Errorf("reading the symlink %s: %w", component, readErr)
-		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(filepath.Dir(component), target)
-		}
-		return filepath.Join(target, clean[len(component):]), true, nil
 	}
-	return clean, false, nil
+	return out
 }
 
-// walkChain judges every component of path from "/" down. It carries one fact
-// forward: whether the parent is a sticky directory a stranger can write, the
-// only place a symlink's owner matters (checkSymlink).
-func walkChain(path string, euid int, trust Trust, leafIsRoot bool) error {
-	components := ancestors(path)
-	parentShared := false
-	last := len(components) - 1
-	for i, component := range components {
-		if err := checkComponent(component, euid, leafIsRoot && i == last, parentShared, trust); err != nil {
-			return err
-		}
-		parentShared = sharedSticky(component, euid, trust)
-	}
-	return nil
-}
-
-// sharedSticky reports whether path denotes, through a symlink if it is one, a
-// sticky directory a stranger can write by mode or list. A link's own mode
-// says nothing about the directory the next component lives in. An answer it
-// cannot obtain counts as shared, which can only add checkSymlink's demand.
+// sharedSticky reports whether the directory at path, a physical path, is
+// sticky and writable by a stranger by mode or list. An answer it cannot
+// obtain counts as shared, which can only add checkSymlink's demand.
 func sharedSticky(path string, euid int, trust Trust) bool {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -116,24 +145,8 @@ func sharedSticky(path string, euid int, trust Trust) bool {
 	if err != nil {
 		return true
 	}
-	_, shared := trust.firstStranger(writers, euid, false)
+	_, shared := trust.firstStranger(writers, euid)
 	return shared
-}
-
-// ancestors returns every component of an absolute path from "/" down to the
-// path itself.
-func ancestors(path string) []string {
-	out := []string{path}
-	for {
-		parent := filepath.Dir(path)
-		if parent == path {
-			break
-		}
-		out = append(out, parent)
-		path = parent
-	}
-	slices.Reverse(out)
-	return out
 }
 
 // checkComponent judges one component. A directory's owner must be trusted
@@ -141,7 +154,7 @@ func ancestors(path string) []string {
 // exempt from the write question, since sticky stops a stranger renaming our
 // entries; the protected directory itself is not, since sticky does not stop a
 // stranger creating entries in it.
-func checkComponent(path string, euid int, leafIsRoot, parentShared bool, trust Trust) error {
+func checkComponent(path string, euid int, leafIsRoot bool, trust Trust) error {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%w: examining %s: %w", errNoCustody, path, err)
@@ -152,9 +165,6 @@ func checkComponent(path string, euid int, leafIsRoot, parentShared bool, trust 
 	}
 	mode := fi.Mode()
 	owner := int(stat.Uid)
-	if mode&os.ModeSymlink != 0 {
-		return checkSymlink(path, owner, euid, parentShared, trust)
-	}
 	if !trust.allowsOwner(owner, euid) {
 		return fmt.Errorf("%w: %s is owned by uid %d rather than uid %d or root, so its permissions are that user's to change%s",
 			errNoCustody, path, owner, euid, trust.hint())
@@ -167,7 +177,7 @@ func checkComponent(path string, euid int, leafIsRoot, parentShared bool, trust 
 		if ctlErr != nil {
 			return fmt.Errorf("%w: %w", errNoCustody, ctlErr)
 		}
-		if stranger, found := trust.firstStranger(controllers, euid, false); found {
+		if stranger, found := trust.firstStranger(controllers, euid); found {
 			return fmt.Errorf("%w: %s, mode %#o, is sticky, but its access-control list lets %s take its ownership or rewrite that list, and either removes the protection the sticky bit was providing%s",
 				errNoCustody, path, mode.Perm(), stranger, trust.hintFor(stranger))
 		}
@@ -177,7 +187,7 @@ func checkComponent(path string, euid int, leafIsRoot, parentShared bool, trust 
 	if err != nil {
 		return fmt.Errorf("%w: %w", errNoCustody, err)
 	}
-	if stranger, found := trust.firstStranger(writers, euid, leafIsRoot); found {
+	if stranger, found := trust.firstStranger(writers, euid); found {
 		return fmt.Errorf("%w: %s, mode %#o, can be modified by %s%s%s",
 			errNoCustody, path, mode.Perm(), stranger, stickyNote(mode, leafIsRoot), trust.hintFor(stranger))
 	}
@@ -190,6 +200,15 @@ func stickyNote(mode os.FileMode, leafIsRoot bool) string {
 		return ", and the sticky bit stops another principal renaming the directory away but not creating entries inside it"
 	}
 	return ""
+}
+
+// checkLink judges a symlink on the path by its owner (checkSymlink).
+func checkLink(path string, fi os.FileInfo, euid int, parentShared bool, trust Trust) error {
+	stat, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%w: %s: the filesystem reported no ownership information", errNoCustody, path)
+	}
+	return checkSymlink(path, int(stat.Uid), euid, parentShared, trust)
 }
 
 // checkSymlink judges a symlink on the path. Replacing a link needs write on

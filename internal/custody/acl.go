@@ -481,23 +481,16 @@ func (t Trust) allowsOwner(uid, euid int) bool {
 	return uid == euid || uid == 0 || slices.Contains(t.UIDs, uid)
 }
 
-// allows reports whether p may write. Everyone never may. Group 0 may write an
-// ancestor, though its members do not hold root, because the walk judges every
-// directory up to "/" and a root:root 0775 one is common; it may not write the
-// protected directory itself (leaf), which this process creates 0755.
-func (t Trust) allows(p principal, euid int, leaf bool) bool {
-	switch p.kind {
-	case principalUser:
-		return p.id == euid || p.id == 0 || slices.Contains(t.UIDs, p.id)
-	case principalGroup:
-		return p.id == 0 && !leaf
-	}
-	return false
+// allows reports whether p may write: no group or everyone ever may, since a
+// group grant reaches every current and future member, and membership of
+// group 0 is not root's privilege.
+func (t Trust) allows(p principal, euid int) bool {
+	return p.kind == principalUser && (p.id == euid || p.id == 0 || slices.Contains(t.UIDs, p.id))
 }
 
-func (t Trust) firstStranger(writers []principal, euid int, leaf bool) (principal, bool) {
+func (t Trust) firstStranger(writers []principal, euid int) (principal, bool) {
 	for _, p := range writers {
-		if !t.allows(p, euid, leaf) {
+		if !t.allows(p, euid) {
 			return p, true
 		}
 	}

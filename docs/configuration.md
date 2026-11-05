@@ -32,8 +32,8 @@ An overlay patch carries display fields and `essential`, which makes the engine 
 With `VerifyRootIntegrity` set, `New` refuses to start when `ConfigDir`, `ToolsDir` or one of `bin/`, `opt/`, `npm/`, `npm/bin`, `npm/lib`, `npm/lib/node_modules`, `python/`, `python/bin`, `python/tools` and `python/interpreters` exists and fails a check. A path that does not exist yet is skipped. Every listed path must:
 
 - be a directory and not a symlink, that the engine can inspect;
-- belong to root, to the account the engine runs as or to a user in `TrustedUIDs`, and so must every directory above it, through every symlink on the way;
-- be writable by nobody else, by its mode or by a POSIX.1e or NFSv4 access-control list, and so must every directory above it. A sticky directory above it, such as `/tmp`, may be writable by others, unless its list lets another account take it or rewrite the list. Each user in `TrustedUIDs` counts as root, and so does group 0 in a directory above a checked one, not in the checked directory itself;
+- belong to root, to the account the engine runs as or to a user in `TrustedUIDs`, and so must every directory the system passes through to reach it, each symlink's target and every `..` included;
+- be writable by nobody else, by its mode or by a POSIX.1e or NFSv4 access-control list, and so must every directory above it. A sticky directory above it, such as `/tmp`, may be writable by others, unless its list lets another account take it or rewrite the list. Each user in `TrustedUIDs` counts as root. No group does, group 0 included, so a directory above the tree that its group can write, such as a `root:root 0775` one, needs `chmod g-w`;
 - for `ToolsDir`'s managed subdirectories, resolve inside the tools tree. `ConfigDir` may live outside it.
 
 `New` checks again after it has created `ConfigDir`, `ToolsDir` and `bin/`, so a root it created and the filesystem stored as writable by another account refuses to start as well, leaving what it created in place.
