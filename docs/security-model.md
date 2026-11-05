@@ -22,7 +22,7 @@ Every extracted file and the staging directory are flushed to disk before the re
 
 Downloads are capped at 1 GiB. Archive extraction refuses a symlink that points outside the install tree. Installs land in versioned directories that are swapped in one step.
 
-The managed directories the engine creates are created owner-writable only and are otherwise left as they are. [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account can write, including a root `New` has just created.
+The managed directories the engine creates are created owner-writable only and are otherwise left as they are. [`VerifyRootIntegrity`](configuration.md#root-integrity-check) reports one another account owns or can write, by mode or access-control list, including a root `New` has just created and every directory above it. It reads the list itself, because a POSIX.1e list's mask sits in the mode's group bits: when the list grants a named user, the mode shows the owning group as a writer and cannot tell the two apart. It cannot see a filesystem that does not decide access by mode and list at all, such as a CIFS mount with `noperm`.
 
 ## Network
 
