@@ -66,11 +66,8 @@ func TestVerifyCustodyRefusesAWritableComponent(t *testing.T) {
 		"group writable, by a group that is not root": {mode: 0o775, chgrp: true, want: "gid 65500"},
 		"other writable": {mode: 0o757, want: "everyone"},
 		// Both bits set names the GROUP, not everyone: writersOf enumerates the group
-		// first and firstStranger stops at the first writer the caller has not
-		// accounted for. The group is pinned to a stranger here rather than left as
-		// whatever gid the test process happens to carry, because the root group is
-		// trusted — so as root this case would report everyone and as anyone else the
-		// group, and the assertion would be describing the environment.
+		// first and firstStranger stops at the first stranger. The group is pinned so
+		// the assertion names it whatever gid the test process carries.
 		"both writable, the group reported first":       {mode: 0o777, chgrp: true, want: "gid 65500"},
 		"group write only, by a group that is not root": {mode: 0o720, chgrp: true, want: "gid 65500"},
 	}
@@ -181,6 +178,12 @@ func TestVerifyCustodyFollowsDotDotAsTheKernelDoes(t *testing.T) {
 	if err := os.Symlink("a/../safedir", filepath.Join(opt, "link")); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("in a relative path", func(t *testing.T) {
+		t.Chdir(opt)
+		if err := (Trust{}).Verify("a/../safedir", true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), open+", mode 0777") {
+			t.Errorf("Verify(a/../safedir) = %v, want the world-writable directory the kernel passes through refused", err)
+		}
+	})
 	for name, path := range map[string]string{
 		"in a link target":     filepath.Join(opt, "link", "tb"),
 		"in the path as given": opt + "/a/../safedir", // not Join, which cleans ".." away
@@ -525,10 +528,6 @@ func TestVerifyCustodyRefusesASymlinkCycle(t *testing.T) {
 // sits. The bound mirrors SYMLOOP_MAX, so a chain the kernel would resolve has to be one
 // this walk resolves too: refusing one link earlier would refuse a tree open(2) reaches
 // perfectly well, and the refusal is an install outage rather than a diagnosis.
-//
-// Each pass expands ONE link, and the pass after the last expansion is the one that judges
-// where the tree actually lives, so a chain of exactly the bound needs one more pass than
-// it has links.
 func TestVerifyCustodyFollowsAsManyLinksAsTheKernelWould(t *testing.T) {
 	// chain links a run of symlinks ending at a private directory and returns the head.
 	chain := func(t *testing.T, links int) string {
@@ -1175,5 +1174,21 @@ func TestVerifyCustodyJudgesTheOwnerOfALinkInASharedDirectory(t *testing.T) {
 		if !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), fmt.Sprintf("symlink owned by uid %d", stranger)) {
 			t.Errorf("Verify(%s) = %v, want the stranger's link in a shared sticky directory refused", path, err)
 		}
+	}
+}
+
+// TestVerifyCustodyRefusesAnEmptyPath pins that "" is refused, not read as
+// the working directory, which can be a private tree.
+func TestVerifyCustodyRefusesAnEmptyPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if err := (Trust{}).Verify(".", true); err != nil {
+		t.Fatalf("INVALID: Verify(.) = %v; the working directory must pass, or the guard is not what refuses", err)
+	}
+	if err := (Trust{}).Verify("", true); !errors.Is(err, errNoCustody) || !strings.Contains(err.Error(), "an empty path") {
+		t.Errorf("Verify(\"\") = %v, want the empty path refused", err)
 	}
 }

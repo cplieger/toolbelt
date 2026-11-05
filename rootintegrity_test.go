@@ -180,8 +180,8 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 			},
 		},
 		"bin dir is writable by group 0": {
-			// gid 0 is trusted only above a managed root: a non-root member of
-			// group 0 could otherwise write the bin the engine executes.
+			// No group is trusted: a non-root member of group 0 could write the
+			// bin the engine executes.
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				if os.Getegid() != 0 {
 					t.Skip("needs gid 0 for the fixture's group")
