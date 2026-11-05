@@ -201,7 +201,7 @@ func TestStderrCap(t *testing.T) {
 	t.Run("writes never fail", func(t *testing.T) {
 		t.Parallel()
 		var c stderrCap
-		for _, n := range []int{100, stderrKeep, 3000} {
+		for _, n := range []int{100, stderrKeep + 1000, 3000} {
 			if got, err := c.Write(make([]byte, n)); got != n || err != nil {
 				t.Errorf("Write(%d bytes) = %d, %v; want %d, nil", n, got, err, n)
 			}

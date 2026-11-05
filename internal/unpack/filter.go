@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -53,30 +54,35 @@ func (x *extractor) filtered(ctx context.Context, filter FilterFunc, name string
 		return fmt.Errorf("unpack: %s: %w", name, err)
 	}
 	var stderr stderrCap
-	// stdout is an io.Pipe, not StdoutPipe: exec then copies it in a goroutine
-	// WaitDelay can cut, so a descendant holding stdout cannot block the drain.
-	out, pw := io.Pipe()
-	cmd.Stdin = src
-	cmd.Stdout = pw
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = filterWaitDelay
-	if err := cmd.Start(); err != nil {
+	// stdout is an *os.File, so exec copies only stderr and WaitDelay never
+	// cuts output; filterOut ends the stream once the exited filter's pipe idles.
+	r, w, err := os.Pipe()
+	if err != nil {
 		return fmt.Errorf("unpack: %s: %w", name, err)
 	}
-	waited := make(chan error, 1)
-	go func() {
-		werr := cmd.Wait()
-		_ = pw.Close()
-		waited <- werr
-	}()
-	// consume reads to the end of the stream, so a filter that never stops
-	// writing ends at the byte limit.
-	if uerr := consume(x.stream(out)); uerr != nil {
-		return reapFailed(ctx, cmd, out, waited, cancel, name, &stderr, uerr)
+	defer r.Close()
+	cmd.Stdin = src
+	cmd.Stdout = w
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = filterWaitDelay
+	err = cmd.Start()
+	_ = w.Close() // the child holds its own copy
+	if err != nil {
+		return fmt.Errorf("unpack: %s: %w", name, err)
 	}
-	werr := <-waited
+	reaped := &reap{done: make(chan struct{})}
+	go func() {
+		reaped.err = cmd.Wait()
+		// Wakes a read already blocked on a pipe only a descendant still holds.
+		_ = r.SetReadDeadline(time.Now().Add(filterWaitDelay))
+		close(reaped.done)
+	}()
+	if uerr := consume(x.stream(&filterOut{r: r, exited: reaped.done})); uerr != nil {
+		return reapFailed(ctx, cmd, r, reaped, cancel, name, &stderr, uerr)
+	}
+	<-reaped.done
 	cancel()
-	switch {
+	switch werr := reaped.err; {
 	case ctx.Err() != nil:
 		return ctx.Err()
 	case werr != nil && !errors.Is(werr, exec.ErrWaitDelay):
@@ -86,18 +92,45 @@ func (x *extractor) filtered(ctx context.Context, filter FilterFunc, name string
 	return nil
 }
 
+// reap is a filter's Wait, run once: err is set before done closes.
+type reap struct {
+	err  error
+	done chan struct{}
+}
+
+// filterOut reads the filter's stdout. Once the filter has exited it has
+// written all it will, so filterWaitDelay with no byte is the end of the
+// stream: a descendant holding the pipe cannot hold the call, and a slow
+// consumer loses nothing, since each read re-arms the deadline.
+type filterOut struct {
+	r      *os.File
+	exited <-chan struct{}
+}
+
+func (o *filterOut) Read(p []byte) (int, error) {
+	select {
+	case <-o.exited:
+		_ = o.r.SetReadDeadline(time.Now().Add(filterWaitDelay))
+	default:
+	}
+	n, err := o.r.Read(p)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return n, io.EOF
+	}
+	return n, err
+}
+
 // reapFailed stops and reaps a filter after consume failed with uerr. A
 // failure reading the stream means the filter closed its stdout first, so it
 // gets filterWaitDelay to exit with its own status: a non-zero exit is the
 // cause, and its status and stderr lead the error. Any other failure is this
 // package's decision, so the filter is killed and its status dropped.
-func reapFailed(ctx context.Context, cmd *exec.Cmd, out io.Closer, waited <-chan error, cancel context.CancelFunc, name string, stderr *stderrCap, uerr error) error {
+func reapFailed(ctx context.Context, cmd *exec.Cmd, out io.Closer, reaped *reap, cancel context.CancelFunc, name string, stderr *stderrCap, uerr error) error {
 	se, isRead := errors.AsType[*streamError](uerr)
 	if !isRead {
 		cancel()
 		_ = out.Close()
-		killed := <-waited
-		_ = killed // the kill this function caused
+		<-reaped.done // its error is the kill this function caused
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -105,8 +138,7 @@ func reapFailed(ctx context.Context, cmd *exec.Cmd, out io.Closer, waited <-chan
 	}
 	_ = out.Close()
 	kill := time.AfterFunc(filterWaitDelay, cancel)
-	exited := <-waited
-	_ = exited // cmd.ProcessState carries the status
+	<-reaped.done // cmd.ProcessState carries the status
 	kill.Stop()
 	cancel()
 	if err := ctx.Err(); err != nil {

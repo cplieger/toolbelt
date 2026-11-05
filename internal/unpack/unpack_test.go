@@ -859,3 +859,65 @@ func TestMeter_HandlesAnUnboundedLimit(t *testing.T) {
 		t.Errorf("Archive = %v, want nil", err)
 	}
 }
+
+// stallOnce sleeps d in its nth Err call, a consumer stalled behind a slow disk.
+type stallOnce struct {
+	context.Context
+	d time.Duration
+	n int
+}
+
+func (c *stallOnce) Err() error {
+	c.n--
+	if c.n == 0 {
+		time.Sleep(c.d)
+	}
+	return c.Context.Err()
+}
+
+// TestFilter_SlowConsumerLosesNothing pins that a filter which has exited
+// keeps its unread output: the consumer stalls past filterWaitDelay before
+// its first read, and every entry still lands.
+func TestFilter_SlowConsumerLosesNothing(t *testing.T) {
+	t.Parallel()
+	f := newFakeFilter(t, `cat "$1"`, tarOf(t, reg("a", "1", 0o644), reg("b", "2", 0o644), reg("c", "3", 0o644)))
+	dst := t.TempDir()
+	root, err := os.OpenRoot(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ctx := &stallOnce{Context: t.Context(), d: filterWaitDelay + 500*time.Millisecond, n: 2}
+	if err := Archive(ctx, io.NewSectionReader(strings.NewReader("x"), 0, 1), formatTarXz, root, oneMiB, f.run); err != nil {
+		t.Fatalf("Archive = %v, want nil", err)
+	}
+	for _, name := range []string{"a", "b", "c"} {
+		if _, err := os.Lstat(filepath.Join(dst, name)); err != nil {
+			t.Errorf("%s: %v, want every entry extracted", name, err)
+		}
+	}
+}
+
+// TestArchive_TrailingBytes pins what follows the compressed stream: zero
+// padding after a tar.gz is ignored, as gzip -d ignores it, while the CRC is
+// still checked; any byte after a tar.bz2 is refused, since Go's bzip2 reader
+// reads every continuation.
+func TestArchive_TrailingBytes(t *testing.T) {
+	t.Parallel()
+	pad := make([]byte, 1024)
+	gz := append(gzipOf(t, tarOf(t, reg("a", "x", 0o644))), pad...)
+	if _, err := extract(t, formatTarGz, gz, generous); err != nil {
+		t.Errorf("Archive(tar.gz + 1024 zero bytes) = %v, want nil", err)
+	}
+	garbage := append(append([]byte(nil), gz...), "garbage"...)
+	if _, err := extract(t, formatTarGz, garbage, generous); err == nil || !strings.Contains(err.Error(), "data after the trailing padding") {
+		t.Errorf("Archive(tar.gz + zeros + garbage) = %v, want the trailing data refused", err)
+	}
+	bz, err := os.ReadFile(filepath.Join("testdata", "hello.tar.bz2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extract(t, formatTarBz2, append(bz, pad...), generous); err == nil || !strings.Contains(err.Error(), "bzip2") {
+		t.Errorf("Archive(tar.bz2 + 1024 zero bytes) = %v, want the bzip2 refusal", err)
+	}
+}

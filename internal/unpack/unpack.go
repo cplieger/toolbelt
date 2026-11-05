@@ -5,6 +5,7 @@
 package unpack
 
 import (
+	"bufio"
 	"compress/bzip2"
 	"compress/gzip"
 	"context"
@@ -118,14 +119,79 @@ func Single(ctx context.Context, src *io.SectionReader, format string, dst *os.R
 	return safe(err)
 }
 
-// gunzip runs consume over the gzip stream in r, metered.
+// gunzip runs consume over the gzip members in r, metered.
 func (x *extractor) gunzip(r io.Reader, consume func(io.Reader) error) error {
-	z, err := gzip.NewReader(r)
+	src := bufio.NewReader(r)
+	z, err := gzip.NewReader(src)
 	if err != nil {
 		return tagRead(err)
 	}
 	defer z.Close()
-	return consume(x.stream(z))
+	z.Multistream(false)
+	return consume(x.stream(&gzipMembers{z: z, src: src}))
+}
+
+// gzipMembers reads every gzip member in src, as gzip -d does, and ends the
+// stream at zero bytes running to the end, the padding gzip -d ignores. Any
+// other byte after padding is refused.
+type gzipMembers struct {
+	z   *gzip.Reader
+	src *bufio.Reader
+	end error // sticky: io.ReadFull drops an error sent with the bytes it wanted
+}
+
+func (g *gzipMembers) Read(p []byte) (int, error) {
+	if g.end != nil {
+		return 0, g.end
+	}
+	for {
+		n, err := g.z.Read(p)
+		if !errors.Is(err, io.EOF) {
+			return n, err
+		}
+		// A member ended with its CRC and length checked.
+		more, perr := g.next()
+		if perr != nil || !more {
+			g.end = io.EOF
+			if perr != nil {
+				g.end = perr
+			}
+			if n > 0 {
+				return n, nil
+			}
+			return 0, g.end
+		}
+		if n > 0 {
+			return n, nil
+		}
+	}
+}
+
+// next skips zero padding and reports whether another member follows.
+func (g *gzipMembers) next() (bool, error) {
+	padded := false
+	for {
+		b, err := g.src.ReadByte()
+		switch {
+		case errors.Is(err, io.EOF):
+			return false, nil
+		case err != nil:
+			return false, err
+		case b == 0:
+			padded = true
+			continue
+		case padded:
+			return false, errors.New("gzip: data after the trailing padding")
+		}
+		if err := g.src.UnreadByte(); err != nil {
+			return false, err
+		}
+		if err := g.z.Reset(g.src); err != nil {
+			return false, err
+		}
+		g.z.Multistream(false)
+		return true, nil
+	}
 }
 
 // limitError is a limit this package enforced.
