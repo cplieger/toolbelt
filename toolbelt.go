@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,7 +49,7 @@ const (
 // version (or one that fails to parse) is an error at engine start.
 const ManifestVersion = 2
 
-// Config wires an Engine. ConfigDir and ToolsDir are required.
+// Config wires an Engine. ConfigDir and ToolsDir are required, with no ".." component.
 type Config struct {
 	// OnJobChanged, when non-nil, receives every job state transition
 	// (queued, running, done, failed, cancelled). Views carry no output
@@ -211,6 +212,26 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 	}
 }
 
+// validate checks the fields New refuses before it touches the disk.
+func (cfg *Config) validate() error {
+	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
+		return errors.New("toolbelt: ConfigDir and ToolsDir are required")
+	}
+	// The root-integrity walk resolves ".." after a symlink while every managed
+	// path is Join-cleaned, so the two would judge and write different directories.
+	for _, f := range []struct{ name, dir string }{{"ConfigDir", cfg.ConfigDir}, {"ToolsDir", cfg.ToolsDir}} {
+		if slices.Contains(strings.Split(f.dir, "/"), "..") {
+			return fmt.Errorf("toolbelt: %s %q must not contain a \"..\" component", f.name, f.dir)
+		}
+	}
+	for _, uid := range cfg.TrustedUIDs {
+		if uid < 0 {
+			return fmt.Errorf("toolbelt: TrustedUIDs entry %d is not a uid", uid)
+		}
+	}
+	return nil
+}
+
 // New constructs and starts an Engine: initializes the manifest files
 // (seeding when absent; another schema version is an error), refuses a
 // ConfigDir that fails a probe write, and launches the job worker.
@@ -219,13 +240,8 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 // an unfit managed root refuses construction with ErrRootIntegrity. New
 // is the seam because Inventory and EnsureInstalled probe synchronously too.
 func New(cfg *Config) (*Engine, error) {
-	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
-		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
-	}
-	for _, uid := range cfg.TrustedUIDs {
-		if uid < 0 {
-			return nil, fmt.Errorf("toolbelt: TrustedUIDs entry %d is not a uid", uid)
-		}
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
 	trust := custody.Trust{UIDs: slices.Clone(cfg.TrustedUIDs)}
 	log := cfg.Logger

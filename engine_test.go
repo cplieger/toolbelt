@@ -2090,7 +2090,7 @@ type logCapture struct {
 	mu    sync.Mutex
 }
 
-func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (*logCapture) Enabled(context.Context, slog.Level) bool { return true }
 
 func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
 	var b strings.Builder

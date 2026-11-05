@@ -50,7 +50,7 @@ func (e *RootIntegrityError) Error() string {
 }
 
 // Is makes errors.Is(err, ErrRootIntegrity) match.
-func (e *RootIntegrityError) Is(target error) bool { return target == ErrRootIntegrity }
+func (*RootIntegrityError) Is(target error) bool { return target == ErrRootIntegrity }
 
 // findingLines renders one "<path> <reason>" line per finding. The
 // message and the log field share it so an operator reading either sees

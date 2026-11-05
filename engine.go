@@ -59,7 +59,7 @@ func (e *DependentsError) Error() string {
 }
 
 // Is makes errors.Is(err, ErrHasDependents) match.
-func (e *DependentsError) Is(target error) bool { return target == ErrHasDependents }
+func (*DependentsError) Is(target error) bool { return target == ErrHasDependents }
 
 // defaultBackends maps a source kind to the tool that must be installed
 // first for the backend to function at all.

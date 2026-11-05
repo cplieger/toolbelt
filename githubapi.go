@@ -226,7 +226,7 @@ func (e *GitHubRateLimitError) Error() string {
 }
 
 // Is makes errors.Is(err, ErrGitHubRateLimited) match.
-func (e *GitHubRateLimitError) Is(target error) bool { return target == ErrGitHubRateLimited }
+func (*GitHubRateLimitError) Is(target error) bool { return target == ErrGitHubRateLimited }
 
 // Wire returns e in the form Job.RateLimit carries.
 func (e *GitHubRateLimitError) Wire() GitHubRateLimit {
