@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/cplieger/go/filesafe v1.0.0-dev.1 h1:XocKFFoFzbCtCAeR9v7HXF7F+UUTiSo53z7O5uSyKKQ=
-github.com/cplieger/go/filesafe v1.0.0-dev.1/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
+github.com/cplieger/go/filesafe v1.0.0-dev.2 h1:Y9CEthiQH/VkzjNXgt1kyr0UzPL+PNc2klUj2npdkYg=
+github.com/cplieger/go/filesafe v1.0.0-dev.2/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
 github.com/cplieger/go/httpclient v1.0.0-dev.3 h1:gxGUwZYy8NvQNJm3m2pt9OAOwByp0fjo95lA9ZXAlkE=
 github.com/cplieger/go/httpclient v1.0.0-dev.3/go.mod h1:zXZyXwYWXVujBH7qoNR16WYGHOGCo8hbJb0Gy8gNgBQ=
 github.com/cplieger/go/httpserver v1.0.0-dev.3 h1:cxmEdEXhRh591+2/lrhRlxn9cTenL7s9q66ATUtNt2s=
