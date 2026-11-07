@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -49,6 +50,29 @@ func TestResolveBackendCore(t *testing.T) {
 			}
 			if skip, _ := backendSkip("core:node", err); skip != tc.wantSkip {
 				t.Errorf("resolveBackend(core:node) = %v, backendSkip = %v, want %v", err, skip, tc.wantSkip)
+			}
+		})
+	}
+}
+
+// TestReadRequirements_IgnoresALeadingBOM pins that a requirements file saved
+// with a byte-order mark keeps its first line a comment or a plain name.
+func TestReadRequirements_IgnoresALeadingBOM(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body string
+		want []string
+	}{
+		"before a comment": {"\ufeff# tools\njq\n", []string{"jq"}},
+		"before a name":    {"\ufeffjq\nuv\n", []string{"jq", "uv"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "requirements.txt")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got := readRequirements(path)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("readRequirements = %q, want %q", got, tc.want)
 			}
 		})
 	}

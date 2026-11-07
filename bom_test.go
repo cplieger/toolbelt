@@ -7,13 +7,8 @@ import (
 	"testing"
 )
 
-// utf8BOM is the byte-order mark some editors (Windows Notepad among them)
-// write at the start of a file saved as UTF-8.
-const utf8BOM = "\xef\xbb\xbf"
-
-// TestHandEditedJSON_AcceptsALeadingBOM pins the three readers of files a
-// user or consumer edits by hand: a BOM is not JSON, so encoding/json refuses
-// it, but the document behind it is valid.
+// TestHandEditedJSON_AcceptsALeadingBOM pins that each reader of a hand-edited
+// file ignores one leading mark.
 func TestHandEditedJSON_AcceptsALeadingBOM(t *testing.T) {
 	t.Run("tools.json", func(t *testing.T) {
 		doc := fmt.Sprintf(`%s{"version":%d,"tools":{"jq":{"source":"aqua:jqlang/jq","version":"1.8.1"}}}`, utf8BOM, ManifestVersion)

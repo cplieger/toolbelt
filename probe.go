@@ -297,7 +297,7 @@ func (e *Engine) probeNpmPackage(ref, want string) (probeVerdict, bool) {
 			Bin string `json:"bin"`
 		} `json:"directories"`
 	}
-	if err := json.Unmarshal(data, &pkg); err != nil {
+	if err := json.Unmarshal(stripBOM(data), &pkg); err != nil {
 		return unread("is not valid JSON: " + err.Error())
 	}
 	if pkg.Version == "" {

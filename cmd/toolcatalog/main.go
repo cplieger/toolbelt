@@ -157,7 +157,8 @@ func readRequirements(path string) []string {
 		log.Fatalf("toolcatalog verify: read requirements: %v", err)
 	}
 	var names []string
-	for line := range strings.SplitSeq(string(data), "\n") {
+	// A leading byte-order mark is not a name: an editor may save one.
+	for line := range strings.SplitSeq(strings.TrimPrefix(string(data), "\ufeff"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
