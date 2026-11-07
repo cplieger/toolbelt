@@ -3,7 +3,6 @@ package toolbelt
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -248,8 +247,8 @@ func readOverlayDoc(path string) (overlayDoc, error) {
 	if err != nil {
 		return overlayDoc{}, fmt.Errorf("overlay %s: %w", path, err)
 	}
-	var ov overlayDoc
-	if err := json.Unmarshal(data, &ov); err != nil {
+	ov, err := decodeOverlay(data)
+	if err != nil {
 		return overlayDoc{}, fmt.Errorf("overlay %s: %w", path, err)
 	}
 	return ov, nil

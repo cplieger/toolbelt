@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -195,15 +196,15 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 }
 
 // ParseManifest decodes and validates a tools.json document exactly as the
-// engine reads the file: a JSON parse error, a version other than
-// ManifestVersion, an invalid tool name, a version its source's grammar
-// refuses, or a python request that is not a bare version or sits on a
-// non-pip: source is an error. A consumer that writes tools.json on a user's
-// behalf calls it first, because a document it refuses fails New at the next
-// start.
+// engine reads the file, ignoring one leading UTF-8 byte-order mark. A JSON
+// parse error, a version other than ManifestVersion, an invalid tool name, a
+// version its source's grammar refuses, or a python request that is not a
+// bare version or sits on a non-pip: source is an error. A consumer that
+// writes tools.json on a user's behalf calls it first, because a document it
+// refuses fails New at the next start.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
+	if err := json.Unmarshal(stripBOM(data), &m); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	if m.Version != ManifestVersion {
@@ -216,6 +217,14 @@ func ParseManifest(data []byte) (*Manifest, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+const utf8BOM = "\xef\xbb\xbf"
+
+// stripBOM drops one leading UTF-8 byte-order mark: some editors save UTF-8
+// with one, and encoding/json refuses it although the JSON behind it is valid.
+func stripBOM(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte(utf8BOM))
 }
 
 // validateManifest applies ParseManifest's per-row checks. A key and a
