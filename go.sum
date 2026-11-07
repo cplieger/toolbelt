@@ -1,7 +1,7 @@
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
-github.com/cplieger/go/filesafe v1.0.0-dev.2 h1:Y9CEthiQH/VkzjNXgt1kyr0UzPL+PNc2klUj2npdkYg=
-github.com/cplieger/go/filesafe v1.0.0-dev.2/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
+github.com/cplieger/go/filesafe v1.0.0-dev.4 h1:05SeUM+hKRzdu4qROsLC3edb06CK44VEm+9L2Gs34xM=
+github.com/cplieger/go/filesafe v1.0.0-dev.4/go.mod h1:Pu9t7x6mRQwXm09EdWaQvVK++fpjgGP7+58XiMxGYks=
 github.com/cplieger/go/httpclient v1.0.0-dev.4 h1:TSeqhBSwwoOvvgTT6fykSOp+nsjqyPyeiXM6kTb99DU=
 github.com/cplieger/go/httpclient v1.0.0-dev.4/go.mod h1:zXZyXwYWXVujBH7qoNR16WYGHOGCo8hbJb0Gy8gNgBQ=
 github.com/cplieger/go/httpserver v1.0.0-dev.5 h1:D/U/s6iU5/xKZt5Wk3K2VtmWuCvE9rW0ar098F6F3lg=
@@ -12,8 +12,8 @@ github.com/cplieger/go/pathinside v1.0.0-dev.1 h1:iVkDRXYDDAgaTBm02ekQ+VH7KhXZTI
 github.com/cplieger/go/pathinside v1.0.0-dev.1/go.mod h1:+Fj6L8z2GUfDFi/uvAzoxF1iIADDf83g4fMbrvelDUY=
 github.com/cplieger/go/scheduler v1.0.0-dev.1 h1:SliSxE9oAN2UWDgvipCQIKK1JJkcGnysGgGf43PWUT0=
 github.com/cplieger/go/scheduler v1.0.0-dev.1/go.mod h1:2cQv1OLOFwmyVNBbR/ocU1I6Qbg46787ZS+a0xZKHJI=
-github.com/cplieger/go/ssrf v1.0.0-dev.1 h1:2wxKGOKp5sFwwJneaxOEOvFqlA7077nOWmaKm+9q5MU=
-github.com/cplieger/go/ssrf v1.0.0-dev.1/go.mod h1:/YuSCNO/nE8JB4PAw6FEA/A3AsqHLzcZckpLgQCMGnA=
+github.com/cplieger/go/ssrf v1.0.0-dev.2 h1:g2BAHqh7yX4ubNMHKhGr5tLDpSljdq45/aNXxQNvbfg=
+github.com/cplieger/go/ssrf v1.0.0-dev.2/go.mod h1:/YuSCNO/nE8JB4PAw6FEA/A3AsqHLzcZckpLgQCMGnA=
 github.com/cplieger/go/textsafe v1.0.0-dev.1 h1:NqiLs9uk4eOoXXkTQo0O8lMtYddo3XZuCuyx/ruB66w=
 github.com/cplieger/go/textsafe v1.0.0-dev.1/go.mod h1:5IH0ZWTC+U864nzWGtcwGkp+PtA5hrlcfY2zLY/TexM=
 github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
