@@ -1,6 +1,7 @@
 package toolbelt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -195,7 +196,7 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 }
 
 // ParseManifest decodes and validates a tools.json document exactly as the
-// engine reads the file: a JSON parse error, a version other than
+// engine reads the file, after one leading UTF-8 byte-order mark: a JSON parse error, a version other than
 // ManifestVersion, an invalid tool name, a version its source's grammar
 // refuses, or a python request that is not a bare version or sits on a
 // non-pip: source is an error. A consumer that writes tools.json on a user's
@@ -203,7 +204,7 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 // start.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
+	if err := json.Unmarshal(handEdited(data), &m); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	if m.Version != ManifestVersion {
@@ -216,6 +217,13 @@ func ParseManifest(data []byte) (*Manifest, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// handEdited drops one leading UTF-8 byte-order mark from a file a person or
+// a consumer edits: some editors save UTF-8 with one, and encoding/json
+// refuses it although the document behind it is valid JSON.
+func handEdited(data []byte) []byte {
+	return bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 }
 
 // validateManifest applies ParseManifest's per-row checks. A key and a

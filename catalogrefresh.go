@@ -249,7 +249,7 @@ func readOverlayDoc(path string) (overlayDoc, error) {
 		return overlayDoc{}, fmt.Errorf("overlay %s: %w", path, err)
 	}
 	var ov overlayDoc
-	if err := json.Unmarshal(data, &ov); err != nil {
+	if err := json.Unmarshal(handEdited(data), &ov); err != nil {
 		return overlayDoc{}, fmt.Errorf("overlay %s: %w", path, err)
 	}
 	return ov, nil
