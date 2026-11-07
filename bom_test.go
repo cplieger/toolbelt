@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// TestHandEditedJSON_AcceptsALeadingBOM pins that each reader of a hand-edited
-// file ignores one leading mark.
+// TestHandEditedJSON_AcceptsALeadingBOM pins that ParseManifest, ApplyOverlay
+// and readOverlayDoc each ignore one leading mark.
 func TestHandEditedJSON_AcceptsALeadingBOM(t *testing.T) {
 	t.Run("tools.json", func(t *testing.T) {
 		doc := fmt.Sprintf(`%s{"version":%d,"tools":{"jq":{"source":"aqua:jqlang/jq","version":"1.8.1"}}}`, utf8BOM, ManifestVersion)

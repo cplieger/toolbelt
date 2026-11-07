@@ -55,15 +55,18 @@ func TestResolveBackendCore(t *testing.T) {
 	}
 }
 
-// TestReadRequirements_IgnoresALeadingBOM pins that a requirements file saved
-// with a byte-order mark keeps its first line a comment or a plain name.
-func TestReadRequirements_IgnoresALeadingBOM(t *testing.T) {
+// TestReadRequirements_IgnoresOneLeadingBOM pins that a requirements file
+// saved with a byte-order mark keeps its first line a comment or a plain name,
+// and that only one leading mark is dropped.
+func TestReadRequirements_IgnoresOneLeadingBOM(t *testing.T) {
 	for name, tc := range map[string]struct {
 		body string
 		want []string
 	}{
-		"before a comment": {"\ufeff# tools\njq\n", []string{"jq"}},
-		"before a name":    {"\ufeffjq\nuv\n", []string{"jq", "uv"}},
+		"before a comment":                       {"\ufeff# tools\njq\n", []string{"jq"}},
+		"before a name":                          {"\ufeffjq\nuv\n", []string{"jq", "uv"}},
+		"a second mark stays on the name":        {"\ufeff\ufeffjq\n", []string{"\ufeffjq"}},
+		"a mark after a space stays on the name": {" \ufeffjq\n", []string{"\ufeffjq"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "requirements.txt")
