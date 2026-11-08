@@ -163,11 +163,25 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, 
 	// gone.
 	if v.Installed {
 		v.Checksum = s.Checksum
+		v.Commands = e.rowCommands(t, s)
 	}
 	if latest := e.versions.Cached(t, e.aquaDef(t.Source)); latest != "" && latest != t.Version {
 		v.Latest = latest
 	}
 	return v
+}
+
+// rowCommands is ToolInfo.Commands for an installed row.
+func (e *Engine) rowCommands(t *Tool, s *ToolStatus) []string {
+	if pkg, ok := strings.CutPrefix(t.Source, SourceApt+":"); ok {
+		if e.aptSeen == nil {
+			return aptCommands(pkg)
+		}
+		return slices.Clone(e.aptSeen.commands(pkg))
+	}
+	cmds := slices.Concat(s.Bins, s.PMBins)
+	slices.Sort(cmds)
+	return slices.Compact(cmds)
 }
 
 // installedFor is the row-level installed flag. Enabled entries use the
