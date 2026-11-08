@@ -97,6 +97,9 @@ func (m *Manager) purge() {
 		switch {
 		case !present:
 			continue
+		case !matches && m.ownsLinkAt(root, t.path):
+			m.log.Debug("not purging this manager's own convenience symlink; the link publication owns it",
+				"package", m.cfg.Name, "entry", t.path)
 		case !matches:
 			m.log.Warn("refusing to remove an entry the previous layout never had this shape at; it belongs to another owner of this tree and that owner's state still claims it",
 				"package", m.cfg.Name, "entry", t.path, "want_shape", shapeName(t.dir))
@@ -154,6 +157,14 @@ func purgeShapeMatches(root *os.Root, t purgeTarget) (present, matches bool) {
 		return true, fi.IsDir()
 	}
 	return true, fi.Mode().IsRegular()
+}
+
+// ownsLinkAt reports whether path holds this manager's own link for the artifact
+// of its base name. A former link dir can sit where a Purge target names a file.
+func (m *Manager) ownsLinkAt(root *os.Root, path string) bool {
+	name := filepath.Base(path)
+	_, own := m.linkSlot(root, filepath.Dir(path), name, name)
+	return own
 }
 
 // shapeName names a target's expected shape for the refusal log line.
@@ -214,15 +225,15 @@ func (m *Manager) recordPurge() {
 }
 
 // publishConvenienceLinks republishes <Root>/<LinkDir>/<Name> into sel's directory
-// and retracts every other link this manager owns there, so no link dangles once
-// the old version is pruned.
+// and retracts every other link this manager owns there and every link it owns in
+// FormerLinkDirs, so no link dangles once the old version is pruned.
 // Non-authoritative: every failure only warns.
-// LinkDir is commonly co-owned, so only an empty slot or this manager's own link
-// is replaced or removed ([Manager.ownsLink]). Every step goes through an
+// Link directories are commonly co-owned, so only an empty slot or this manager's
+// own link is replaced or removed ([Manager.ownsLink]). Every step goes through an
 // [os.Root] on Root: with LinkDir a symlink out of Root, an unconfined publish was
 // measured landing outside Root.
 func (m *Manager) publishConvenienceLinks(sel selection) {
-	if m.cfg.LinkDir == "" {
+	if m.cfg.LinkDir == "" && len(m.cfg.FormerLinkDirs) == 0 {
 		return
 	}
 	root, err := os.OpenRoot(m.cfg.Root)
@@ -232,6 +243,37 @@ func (m *Manager) publishConvenienceLinks(sel selection) {
 		return
 	}
 	defer root.Close()
+	var linkDirInfo fs.FileInfo
+	if m.cfg.LinkDir != "" {
+		m.publishInLinkDir(root, sel)
+		if fi, err := root.Stat(m.cfg.LinkDir); err == nil {
+			linkDirInfo = fi
+		}
+	}
+	for _, dir := range m.cfg.FormerLinkDirs {
+		if aliasesDir(root, dir, linkDirInfo) {
+			m.log.Debug("not retracting the convenience symlinks in a former link dir that resolves to LinkDir",
+				"package", m.cfg.Name, "path", filepath.Join(m.cfg.Root, dir))
+			continue
+		}
+		m.retractFormerLinks(root, dir)
+	}
+}
+
+// aliasesDir reports whether dir resolves through root to the directory info
+// describes. It catches the symlink spellings New's lexical check cannot see,
+// where retracting dir would remove the primary's link just published in LinkDir.
+func aliasesDir(root *os.Root, dir string, info fs.FileInfo) bool {
+	if info == nil {
+		return false
+	}
+	fi, err := root.Stat(dir)
+	return err == nil && os.SameFile(fi, info)
+}
+
+// publishInLinkDir points the primary's link in LinkDir at sel and retracts the
+// strays beside it.
+func (m *Manager) publishInLinkDir(root *os.Root, sel selection) {
 	linkDir := filepath.Join(m.cfg.Root, m.cfg.LinkDir)
 	if err := root.MkdirAll(m.cfg.LinkDir, dirMode); err != nil {
 		m.log.Warn("failed to create the link dir for the convenience symlinks",
@@ -250,11 +292,34 @@ func (m *Manager) publishConvenienceLinks(sel selection) {
 	}
 }
 
+// retractFormerLinks retracts every link this manager owns in dir, the primary's
+// included, and every staged link a crash left there. A missing dir has nothing
+// to retract.
+func (m *Manager) retractFormerLinks(root *os.Root, dir string) {
+	changed, err := m.retractOwnLinks(root, dir, false)
+	if errors.Is(err, fs.ErrNotExist) {
+		return
+	}
+	path := filepath.Join(m.cfg.Root, dir)
+	if err != nil {
+		m.log.Warn("failed to list a former link dir to retract its convenience symlinks",
+			"package", m.cfg.Name, "path", path, "error", err)
+		return
+	}
+	if !changed {
+		return
+	}
+	if err := m.fsync(path); err != nil {
+		m.log.Warn("failed to sync a former link dir after retracting its convenience symlinks",
+			"package", m.cfg.Name, "path", path, "error", err)
+	}
+}
+
 // publishLink points <LinkDir>/<name> at target and reports whether it changed the
 // link directory. An entry this manager does not own is left as it is.
 func (m *Manager) publishLink(root *os.Root, name, target string) bool {
 	link := filepath.Join(m.cfg.LinkDir, name)
-	if free, own := m.linkSlot(root, name, name); !free && !own {
+	if free, own := m.linkSlot(root, m.cfg.LinkDir, name, name); !free && !own {
 		m.log.Warn("not publishing a convenience symlink: another owner of the link dir holds an entry at its name",
 			"package", m.cfg.Name, "path", filepath.Join(m.cfg.Root, link))
 		return false
@@ -282,15 +347,25 @@ func (m *Manager) publishLink(root *os.Root, name, target string) bool {
 
 // retractStrayLinks retracts every link this manager owns in LinkDir under another
 // name than the primary's, and every staged link a crash left, and reports whether it
-// changed the link directory. Ownership is read off each entry rather than the
-// configuration: a link an earlier installer published for a sidecar the release has
-// since dropped would dangle once retention prunes its version.
+// changed the link directory.
 func (m *Manager) retractStrayLinks(root *os.Root) bool {
-	entries, err := m.listLinkDir(root)
+	changed, err := m.retractOwnLinks(root, m.cfg.LinkDir, true)
 	if err != nil {
 		m.log.Warn("failed to list the link dir to retract stale convenience symlinks",
 			"package", m.cfg.Name, "path", filepath.Join(m.cfg.Root, m.cfg.LinkDir), "error", err)
-		return false
+	}
+	return changed
+}
+
+// retractOwnLinks retracts every link this manager owns in dir and every staged link
+// a crash left there, sparing the primary's own link when keepPrimary is set, and
+// reports whether it changed dir. Ownership is read off each entry rather than the
+// configuration: a link an earlier installer published for a sidecar the release has
+// since dropped would dangle once retention prunes its version.
+func (m *Manager) retractOwnLinks(root *os.Root, dir string, keepPrimary bool) (bool, error) {
+	entries, err := listLinkDir(root, dir)
+	if err != nil {
+		return false, err
 	}
 	changed := false
 	for _, e := range entries {
@@ -300,24 +375,24 @@ func (m *Manager) retractStrayLinks(root *os.Root) bool {
 		// publishLink renames or removes its staged link before returning, so one found
 		// here is a crash remnant whatever its artifact's status.
 		artifact, staged := stagedLinkArtifact(e.Name())
-		if !staged && artifact == m.primary {
+		if keepPrimary && !staged && artifact == m.primary {
 			continue
 		}
-		changed = m.retractLink(root, e.Name(), artifact) || changed
+		changed = m.retractLink(root, dir, e.Name(), artifact) || changed
 	}
-	return changed
+	return changed, nil
 }
 
-// listLinkDir lists LinkDir through root.Open rather than root.FS: io/fs accepts only
-// fs.ValidPath names, which refuses spellings validation admits ("bin/", "./bin") and
-// the other link operations resolve.
-func (m *Manager) listLinkDir(root *os.Root) ([]fs.DirEntry, error) {
-	dir, err := root.Open(m.cfg.LinkDir)
+// listLinkDir lists a link dir through root.Open rather than root.FS: io/fs accepts
+// only fs.ValidPath names, which refuses spellings validation admits ("bin/", "./bin")
+// and the other link operations resolve.
+func listLinkDir(root *os.Root, dir string) ([]fs.DirEntry, error) {
+	f, err := root.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
-	return dir.ReadDir(-1)
+	defer f.Close()
+	return f.ReadDir(-1)
 }
 
 // stagedLinkSuffix ends the name [Manager.publishLink] stages a link under before
@@ -328,7 +403,7 @@ const stagedLinkSuffix = ".newlink"
 // keeps it out of a plain listing.
 func stagedLinkName(artifact string) string { return "." + artifact + stagedLinkSuffix }
 
-// stagedLinkArtifact maps an entry name in LinkDir to the artifact its link would
+// stagedLinkArtifact maps an entry name in a link dir to the artifact its link would
 // carry, and reports whether the entry is a staged name from [stagedLinkName].
 func stagedLinkArtifact(entry string) (artifact string, staged bool) {
 	rest, dotted := strings.CutPrefix(entry, ".")
@@ -338,14 +413,13 @@ func stagedLinkArtifact(entry string) (artifact string, staged bool) {
 	return entry, false
 }
 
-// retractLink removes this manager's own link for artifact at <LinkDir>/<entry> and
-// reports whether it changed the link directory. Anything else at that name is left
-// alone.
-func (m *Manager) retractLink(root *os.Root, entry, artifact string) bool {
-	if _, own := m.linkSlot(root, entry, artifact); !own {
+// retractLink removes this manager's own link for artifact at <dir>/<entry> and
+// reports whether it changed dir. Anything else at that name is left alone.
+func (m *Manager) retractLink(root *os.Root, dir, entry, artifact string) bool {
+	if _, own := m.linkSlot(root, dir, entry, artifact); !own {
 		return false
 	}
-	link := filepath.Join(m.cfg.LinkDir, entry)
+	link := filepath.Join(dir, entry)
 	if err := root.Remove(link); err != nil {
 		m.log.Warn("failed to retract a convenience symlink; it may dangle",
 			"package", m.cfg.Name, "path", filepath.Join(m.cfg.Root, link), "error", err)
@@ -356,12 +430,12 @@ func (m *Manager) retractLink(root *os.Root, entry, artifact string) bool {
 	return true
 }
 
-// linkSlot reports whether <LinkDir>/<entry> is free, and whether what is there is
-// this manager's own link for artifact. Lstat, never Stat: a foreign symlink must be
+// linkSlot reports whether <dir>/<entry> is free, and whether what is there is this
+// manager's own link for artifact. Lstat, never Stat: a foreign symlink must be
 // judged as itself, not as whatever it points at. A slot that cannot be read is
 // neither.
-func (m *Manager) linkSlot(root *os.Root, entry, artifact string) (free, own bool) {
-	link := filepath.Join(m.cfg.LinkDir, entry)
+func (m *Manager) linkSlot(root *os.Root, dir, entry, artifact string) (free, own bool) {
+	link := filepath.Join(dir, entry)
 	fi, err := root.Lstat(link)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

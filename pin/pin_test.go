@@ -870,15 +870,16 @@ func TestEnsureStillHonoursCancellation(t *testing.T) {
 
 // TestNewSnapshotsTheCallerConfig pins that every reference-bearing field is
 // copied, not just the ones read at construction: the argv of each assertion,
-// ProbeArgs, TrustedUIDs and both Purge slices (the DELETE list, aliased across
-// the validation that just approved it) are read long after New returns. Each is
-// mutated in place, which is the write an alias would carry.
+// ProbeArgs, TrustedUIDs, FormerLinkDirs and both Purge slices (the DELETE list,
+// aliased across the validation that just approved it) are read long after New
+// returns. Each is mutated in place, which is the write an alias would carry.
 func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	env := newFakeEnv(t)
 	cfg := env.config(func(c *Config) {
 		c.Purge = &Purge{Artifacts: []string{"legacy-artifact"}, Names: []string{toolName}, Marker: legacyMarker}
 		c.Assertions = append(c.Assertions, Assertion{Name: "extra", Args: []string{"settings", "extra", "true"}})
 		c.TrustedUIDs = []int{4000}
+		c.FormerLinkDirs = []string{"old-bin"}
 	})
 	m, err := New(cfg)
 	if err != nil {
@@ -895,6 +896,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	}
 	cfg.Purge.Artifacts[0] = "../escaped"
 	cfg.Purge.Names[0] = "mutated"
+	cfg.FormerLinkDirs[0] = "mutated"
 
 	checks := map[string]string{
 		"Digests":         m.cfg.Digests["amd64"],
@@ -902,6 +904,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 		"ProbeArgs":       m.cfg.ProbeArgs[0],
 		"Purge.Artifacts": m.cfg.Purge.Artifacts[0],
 		"Purge.Names":     m.cfg.Purge.Names[0],
+		"FormerLinkDirs":  m.cfg.FormerLinkDirs[0],
 		"resolved digest": m.digest,
 	}
 	for field, got := range checks {
