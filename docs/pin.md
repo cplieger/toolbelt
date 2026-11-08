@@ -38,7 +38,7 @@ Each version lives in `<Root>/<Name>-versions/<version>/`, holding the binary an
 
 Retention keeps the active version and the most recently activated other version that would still be selected, so a bad pin falls back to the version that ran before it. A failed install removes nothing. Every activation sets its directory's modification time, which is the order retention reads.
 
-The convenience link `<Root>/<LinkDir>/<Name>` points at the active binary for an operator using a shell. A link this manager published under another name, such as a sidecar an older release shipped, is removed. An entry another owner put in `LinkDir` is never replaced or removed.
+The convenience link `<Root>/<LinkDir>/<Name>` points at the active binary for an operator using a shell. A link this manager published under another name, such as a sidecar an older release shipped, is removed. An entry another owner put in `LinkDir` is never replaced or removed. When you move `LinkDir`, list the old directories in `FormerLinkDirs`. Each activation that may write the tree removes the links this manager published there, so none is left pointing at a removed version, and leaves every other entry alone. A former directory that resolves to `LinkDir` through a symlink, in either direction, is skipped, so keeping the old name as a symlink to the new one is safe.
 
 ## Archives
 

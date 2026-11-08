@@ -61,6 +61,12 @@ type Config struct {
 	// another owner put there is never touched. It is relative, with no ".."
 	// component. Empty publishes none.
 	LinkDir string
+	// FormerLinkDirs are directories under Root where an earlier deployment
+	// published this package's convenience links. Every activation that may
+	// write the tree retracts the links of this manager's shape there, so none
+	// dangles after a prune, and touches nothing else. Each is spelled like
+	// LinkDir, must not name it, and is skipped if it resolves to it.
+	FormerLinkDirs []string
 	// Assertions are re-asserted against the active artifact on every start,
 	// and the Required ones against the staged artifact before it is
 	// published. At least one must be Required.
@@ -163,6 +169,7 @@ func (c *Config) snapshot() Config {
 	out.ProbeArgs = slices.Clone(c.ProbeArgs)
 	out.Digests = maps.Clone(c.Digests)
 	out.TrustedUIDs = slices.Clone(c.TrustedUIDs)
+	out.FormerLinkDirs = slices.Clone(c.FormerLinkDirs)
 	if c.Assertions != nil {
 		out.Assertions = make([]Assertion, 0, len(c.Assertions))
 		for _, a := range c.Assertions {
@@ -219,19 +226,49 @@ func (c *Config) validateDeployment() error {
 	if err := validateRoot(c.Root); err != nil {
 		return err
 	}
-	if err := validateRelPath("LinkDir", c.LinkDir); err != nil {
+	if err := validateLinkDir("LinkDir", c.LinkDir); err != nil {
 		return err
 	}
-	// root.MkdirAll and the listing resolve ".." after a symlink, while every link,
-	// fsync and log path is Join-cleaned, so the two would reach different directories.
-	if slices.Contains(strings.Split(c.LinkDir, "/"), "..") {
-		return fmt.Errorf("pin: LinkDir %q must not contain a \"..\" component", c.LinkDir)
+	if err := c.validateFormerLinkDirs(); err != nil {
+		return err
 	}
 	if err := c.validateLists(); err != nil {
 		return err
 	}
 	if c.Purge != nil {
 		return c.Purge.validate(c.LinkDir)
+	}
+	return nil
+}
+
+// validateLinkDir refuses a link directory that is absolute, escapes Root or
+// holds a ".." component. root.MkdirAll and the listing resolve ".." after a
+// symlink, while every link, fsync and log path is Join-cleaned, so the two
+// would reach different directories.
+func validateLinkDir(field, value string) error {
+	if err := validateRelPath(field, value); err != nil {
+		return err
+	}
+	if slices.Contains(strings.Split(value, "/"), "..") {
+		return fmt.Errorf("pin: %s %q must not contain a \"..\" component", field, value)
+	}
+	return nil
+}
+
+// validateFormerLinkDirs checks each former link directory. One naming LinkDir
+// would retract the primary's link right after it is published.
+func (c *Config) validateFormerLinkDirs() error {
+	for i, dir := range c.FormerLinkDirs {
+		field := fmt.Sprintf("FormerLinkDirs[%d]", i)
+		if dir == "" {
+			return fmt.Errorf("pin: %s is required", field)
+		}
+		if err := validateLinkDir(field, dir); err != nil {
+			return err
+		}
+		if c.LinkDir != "" && filepath.Clean(dir) == filepath.Clean(c.LinkDir) {
+			return fmt.Errorf("pin: %s %q names LinkDir, whose own link it would retract", field, dir)
+		}
 	}
 	return nil
 }
