@@ -1135,16 +1135,17 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
 	c := e.cat()
-	err := e.store.MutateManifest(func(m *Manifest) error {
-		merged := false
-		for name := range m.Tools {
-			t := m.Tools[name]
-			if h, ok := hydrated(c, name, &t); ok {
-				m.Tools[name] = h
-				merged = true
-			}
-		}
-		if !merged {
+	// A read first: a merge is refused over a held unreadable tools.json even
+	// when it would write nothing, and every job runs this before planning.
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		return err
+	}
+	if !hydrateRows(c, m) {
+		return nil
+	}
+	err = e.store.MutateManifest(func(m *Manifest) error {
+		if !hydrateRows(c, m) {
 			return errHydratedAlready
 		}
 		return nil
@@ -1153,6 +1154,20 @@ func (e *Engine) hydrateStatic() error {
 		return nil
 	}
 	return err
+}
+
+// hydrateRows hydrates every row of m the catalog completes and reports
+// whether any merged.
+func hydrateRows(c *Catalog, m *Manifest) bool {
+	merged := false
+	for name := range m.Tools {
+		t := m.Tools[name]
+		if h, ok := hydrated(c, name, &t); ok {
+			m.Tools[name] = h
+			merged = true
+		}
+	}
+	return merged
 }
 
 // errHydratedAlready aborts hydrateStatic's write when no row merged, so a

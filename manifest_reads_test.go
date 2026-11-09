@@ -127,12 +127,20 @@ func TestManifestReads(t *testing.T) {
 			t.Run("Reconcile", func(t *testing.T) {
 				e, _ := newReadsEngine(t)
 				st.put(t, e)
-				if _, _, err := e.Reconcile(ReconcileMissing); err != nil && w.loadErr == nil {
+				job, _, err := e.Reconcile(ReconcileMissing)
+				if err != nil && w.loadErr == nil {
 					t.Fatalf("Reconcile = %v", err)
 				}
 				settleJobs(t, e)
 				if _, kept := e.store.State().Tools["a"]; kept != w.aKept {
 					t.Errorf("a installed after the reconcile = %v, want %v", kept, w.aKept)
+				}
+				if job == nil {
+					return
+				}
+				// A job that writes nothing to tools.json is never refused as a merge over it.
+				if done, err := e.Wait(t.Context(), job.ID); err != nil || done.State != JobDone {
+					t.Errorf("the reconcile job ended %s (%s, %v), want done", done.State, done.Error, err)
 				}
 			})
 		})
