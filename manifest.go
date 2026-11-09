@@ -324,14 +324,14 @@ func verifyConfigWritable(log *slog.Logger, configDir string) error {
 	}
 	if res.Writable() {
 		log.Warn("toolbelt: config dir accepted a probe write but its teardown failed",
-			"dir", res.Dir, "stage", res.Stage.String(), "name", res.Name, "leaked", res.Leaked, "err", res.Err)
+			"dir", res.Dir, "stage", res.Phase.String(), "name", res.Name, "leaked", res.Leaked, "err", res.Err)
 		return nil
 	}
 	if errors.Is(res.Err, filesafe.ErrModeNotStored) {
 		return fmt.Errorf("config dir %s cannot keep an owner-only staging file, typically because an inherited ACL widens new files: %w",
 			res.Dir, res.Err)
 	}
-	return fmt.Errorf("config dir %s is not writable (%s failed): %w", res.Dir, res.Stage, res.Err)
+	return fmt.Errorf("config dir %s is not writable (%s failed): %w", res.Dir, res.Phase, res.Err)
 }
 
 // LoadManifest reads the manifest file under the store lock and returns a

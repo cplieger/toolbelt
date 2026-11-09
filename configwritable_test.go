@@ -17,7 +17,7 @@ import (
 // probeCall records what New asked the config-dir probe for.
 type probeCall struct {
 	dir  string
-	opts []filesafe.Option
+	opts []filesafe.WriteOption
 }
 
 // stubProbe replaces the config-dir probe for one test. A root test process
@@ -27,7 +27,7 @@ func stubProbe(t *testing.T, res filesafe.ProbeResult) *[]probeCall {
 	orig := probeWritable
 	t.Cleanup(func() { probeWritable = orig })
 	var calls []probeCall
-	probeWritable = func(_ context.Context, dir string, opts ...filesafe.Option) (filesafe.ProbeResult, error) {
+	probeWritable = func(_ context.Context, dir string, opts ...filesafe.WriteOption) (filesafe.ProbeResult, error) {
 		calls = append(calls, probeCall{dir: dir, opts: opts})
 		res.Dir = dir
 		return res, nil
@@ -58,13 +58,13 @@ func TestNew_RefusesUnwritableConfigDir(t *testing.T) {
 	}{
 		{
 			name:     "read_only_volume",
-			res:      filesafe.ProbeResult{Stage: filesafe.ProbeStageCreate, Err: syscall.EROFS},
+			res:      filesafe.ProbeResult{Phase: filesafe.ProbePhaseCreate, Err: syscall.EROFS},
 			wantIs:   syscall.EROFS,
 			wantText: "is not writable (create probe file failed)",
 		},
 		{
 			name:     "mode_widening_acl",
-			res:      filesafe.ProbeResult{Stage: filesafe.ProbeStageCreate, Err: modeErr},
+			res:      filesafe.ProbeResult{Phase: filesafe.ProbePhaseCreate, Err: modeErr},
 			wantIs:   filesafe.ErrModeNotStored,
 			wantText: "cannot keep an owner-only staging file, typically because an inherited ACL",
 		},
@@ -96,7 +96,7 @@ func TestNew_RefusesUnwritableConfigDir(t *testing.T) {
 func TestNew_WarnsOnProbeTeardownFailure(t *testing.T) {
 	dir := seededConfigDir(t)
 	stubProbe(t, filesafe.ProbeResult{
-		Stage: filesafe.ProbeStageRemove, Err: syscall.EBUSY, Name: ".probe-leftover", Leaked: true,
+		Phase: filesafe.ProbePhaseRemove, Err: syscall.EBUSY, Name: ".probe-leftover", Leaked: true,
 	})
 	logs := &logCapture{}
 	e, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools"), Logger: slog.New(logs)})
@@ -124,7 +124,7 @@ func TestNew_ProbesConfigDirWithEngineFileMode(t *testing.T) {
 		t.Fatalf("probe calls = %d, want 1", len(*calls))
 	}
 	replay := filepath.Join(t.TempDir(), "replay")
-	opts := append([]filesafe.Option{filesafe.WithMode(0o600)}, (*calls)[0].opts...)
+	opts := append([]filesafe.WriteOption{filesafe.WithMode(0o600)}, (*calls)[0].opts...)
 	if _, err := filesafe.WriteFile(t.Context(), replay, []byte("x"), opts...); err != nil {
 		t.Fatalf("Setup: replay write: %v", err)
 	}

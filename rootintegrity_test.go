@@ -468,7 +468,7 @@ func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
 
 			orig := probeWritable
 			t.Cleanup(func() { probeWritable = orig })
-			probeWritable = func(ctx context.Context, dir string, opts ...filesafe.Option) (filesafe.ProbeResult, error) {
+			probeWritable = func(ctx context.Context, dir string, opts ...filesafe.WriteOption) (filesafe.ProbeResult, error) {
 				chmod(t, widened, 0o770)
 				return orig(ctx, dir, opts...)
 			}

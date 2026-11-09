@@ -423,7 +423,7 @@ func postCancel(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		httpserver.WriteError(w, r, http.StatusNotFound, "not_found", "no such job")
 		return
 	}
-	httpserver.Ok(w)
+	httpserver.OK(w)
 }
 
 // writeEngineError maps engine sentinels onto wire responses.
