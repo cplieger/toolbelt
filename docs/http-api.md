@@ -12,6 +12,8 @@ mux.Handle("/api/tools", h)
 mux.Handle("/api/tools/", h)
 ```
 
+A host that binds every route itself, with its own types and access rule per route, calls `httpapi.Routes()` instead. Each `Route` carries its method, its path suffix under your prefix, the Go types of its path wildcards, body, query and reply, its success status, every error code it can answer with that code's status, and `Handler(engine)`, which serves it with the cache policy below. Bind each one at `Method + " " + prefix + Suffix`, so the handler can read its wildcards. `Handler` serves exactly these routes.
+
 The handler has no authentication and adds no middleware except its own cache policy. Wrap it in your own stack, such as an origin check or a gate that accepts only loopback connections. It speaks JSON in both directions and caps a request body at 64 KiB.
 
 ## Routes
