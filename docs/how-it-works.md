@@ -14,7 +14,24 @@ The engine uses three data files. The manifest and the state live under `ConfigD
 | `tools-state.json` | the engine | what is installed, the binary names each tool owns, the last error |
 | the file at `Config.CatalogPath`, plus `tool-catalog.cached.json` under `ConfigDir` | your image build, and the engine once a runtime refresh succeeds | install knowledge: sources, download templates, checksum locations, dependencies, the registries' license texts |
 
-The engine reads `tools.json` again on every operation, so a hand edit takes effect on the next call. It accepts only manifest schema version 2. Any other version fails `New`, and the engine never rewrites or backs up a manifest it does not recognise.
+It accepts only manifest schema version 2. Any other version fails `New`, and the engine never rewrites or backs up a manifest it does not recognise.
+
+## Editing tools.json
+
+The engine reads `tools.json` again on every operation, so a valid hand edit takes effect on the next call. The engine keeps the last manifest it wrote or adopted, called the applied manifest, and answers from it whenever the file is absent or cannot be read:
+
+- A read (an inventory, a reconcile plan) gets the applied manifest. An absent or broken `tools.json` is never read as an empty manifest, so a reconcile never removes every installed tool because the file was missing for a moment. An editor that saves by renaming the old file away leaves exactly that moment.
+- An engine write (an install, a patch) over an absent file builds on the applied manifest. Over a file it cannot read, it is refused and writes nothing, so the person's bytes are kept.
+
+The applied manifest moves only when the engine writes the file or when you call `SyncManifest`:
+
+- `SyncManifest(seen, kind)` takes what your own read of the file found: its bytes, or nil when it found no regular file, and its kind (`SeenValid`, `SeenAbsent` or `SeenUnreadable`). When the file no longer holds that read, it does nothing. A valid edit is applied and a reconcile is queued. An absence is replaced by the configured seed, written back, and a reconcile is queued, which removes the tools the seed does not list. An unreadable file is refused, and its error matches `ErrManifestInvalid` or `filesafe.ErrNotRegular`.
+- If you poll the file, pass an absent or unreadable read only once two consecutive polls saw it. A save caught in the middle is then never taken for a removal.
+- A consumer that never calls `SyncManifest` still applies valid hand edits at the next call, and keeps working on the applied manifest while the file is absent or broken.
+
+To write the file for a person, use `ReplaceManifest(content, check)` while the engine runs. It writes the bytes as given under the store lock, so no install can write over them or be written over, and queues a reconcile. `check` sees the bytes on disk first and can refuse a stale save. It refuses a document `ParseManifest` refuses, and one that drops a tool the catalog marks essential (`ErrEssential`). With no engine running, `WriteManifest` validates and writes the file the same way, without the catalog check.
+
+A FIFO or another non-regular file at `tools.json` is refused at once, with an error matching `filesafe.ErrNotRegular`.
 
 ## The life of a tool
 

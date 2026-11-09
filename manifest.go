@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/cplieger/go/filesafe"
@@ -131,40 +133,57 @@ type State struct {
 	Tools map[string]ToolStatus `json:"tools"`
 }
 
+const manifestFile = "tools.json"
+
 // store owns tools.json (user intent) and tools-state.json (machine
 // state). It is the ONLY writer of both files; every read-modify-write
-// runs under mu. Files are re-read on each access so an out-of-band
-// hand edit of the manifest is picked up on the next operation.
+// runs under mu. The manifest is re-read on each access, so a valid
+// out-of-band hand edit is picked up on the next operation; an absent or
+// unreadable one is answered from applied until SyncManifest adopts it.
 type store struct {
 	seed         *Manifest
 	log          *slog.Logger
 	manifestPath string
 	statePath    string
-	mu           sync.Mutex
+	// applied is the read the store last wrote or adopted; its zero kind
+	// means none (a store New did not initialise).
+	applied manifestRead
+	mu      sync.Mutex
+	// foreign marks an engine write whose base was valid bytes the store had
+	// not written, so SyncManifest applies the result although applied holds it.
+	foreign bool
 }
 
 func newStore(configDir string, seed *Manifest, log *slog.Logger) *store {
 	return &store{
 		seed:         seed,
 		log:          log,
-		manifestPath: filepath.Join(configDir, "tools.json"),
+		manifestPath: filepath.Join(configDir, manifestFile),
 		statePath:    filepath.Join(configDir, "tools-state.json"),
 	}
 }
 
-// initFiles writes the seed when no manifest exists. Any existing file
-// must already be schema ManifestVersion: an unparseable or
-// wrong-version manifest is an error (the engine refuses to guess at
-// or rewrite user intent), surfaced from New. Called once at engine
-// start.
+// initFiles adopts the first read of the manifest: a valid file as it is,
+// an absent one as the seed, written. An unreadable or wrong-version
+// manifest is an error (the engine refuses to guess at or rewrite user
+// intent), surfaced from New. Called once at engine start.
 func (s *store) initFiles() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.readManifestLocked()
-	if errors.Is(err, fs.ErrNotExist) {
-		return s.writeManifestLocked(s.seedManifest())
+	r := s.readManifestLocked()
+	switch r.kind {
+	case SeenAbsent:
+		return s.writeSeedLocked()
+	case SeenUnreadable:
+		return r.err
 	}
-	return err
+	s.applied = r
+	return nil
+}
+
+// writeSeedLocked is the only write of the seed.
+func (s *store) writeSeedLocked() error {
+	return s.writeManifestLocked(s.seedManifest())
 }
 
 // seedManifest returns a deep copy of the configured seed (or an empty
@@ -182,17 +201,34 @@ func (s *store) seedManifest() *Manifest {
 	return cp
 }
 
-// readManifestLocked requires the caller to hold mu.
-func (s *store) readManifestLocked() (*Manifest, error) {
-	data, err := os.ReadFile(s.manifestPath)
+// readManifestLocked requires the caller to hold mu. It follows a final
+// symlink and opens without blocking, so a FIFO at the path is refused as
+// not a regular file instead of holding mu until a writer appears.
+func (s *store) readManifestLocked() manifestRead {
+	f, err := os.OpenFile(s.manifestPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return manifestRead{kind: SeenAbsent}
+	}
 	if err != nil {
-		return nil, err
+		return manifestRead{kind: SeenUnreadable, err: err}
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return manifestRead{kind: SeenUnreadable, err: err}
+	}
+	if !info.Mode().IsRegular() {
+		return manifestRead{kind: SeenUnreadable, err: fmt.Errorf("%s: %w", s.manifestPath, filesafe.ErrNotRegular)}
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return manifestRead{kind: SeenUnreadable, err: fmt.Errorf("read %s: %w", s.manifestPath, err)}
 	}
 	m, err := ParseManifest(data)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", s.manifestPath, err)
+		return manifestRead{kind: SeenUnreadable, data: data, err: fmt.Errorf("%s: %w", s.manifestPath, err)}
 	}
-	return m, nil
+	return manifestRead{kind: SeenValid, data: data, m: m}
 }
 
 // ParseManifest decodes and validates a tools.json document exactly as the
@@ -201,20 +237,20 @@ func (s *store) readManifestLocked() (*Manifest, error) {
 // version its source's grammar refuses, or a python request that is not a
 // bare version or sits on a non-pip: source is an error. A consumer that
 // writes tools.json on a user's behalf calls it first, because a document it
-// refuses fails New at the next start.
+// refuses fails New at the next start. Every error matches ErrManifestInvalid.
 func ParseManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(stripBOM(data), &m); err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, invalidManifest(fmt.Errorf("parse: %w", err))
 	}
 	if m.Version != ManifestVersion {
-		return nil, fmt.Errorf("manifest version %d, want %d", m.Version, ManifestVersion)
+		return nil, invalidManifest(fmt.Errorf("manifest version %d, want %d", m.Version, ManifestVersion))
 	}
 	if m.Tools == nil {
 		m.Tools = map[string]Tool{}
 	}
 	if err := validateManifest(&m); err != nil {
-		return nil, err
+		return nil, invalidManifest(err)
 	}
 	return &m, nil
 }
@@ -259,16 +295,23 @@ func validateTool(t *Tool) error {
 // persisting one would fail every later read and New.
 func (s *store) writeManifestLocked(m *Manifest) error {
 	if err := validateManifest(m); err != nil {
-		return err
+		return invalidManifest(err)
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	durable, err := atomicWrite(s.manifestPath, append(data, '\n'))
+	return s.commitManifestLocked(append(data, '\n'))
+}
+
+// commitManifestLocked writes data as tools.json and makes it the applied
+// read. It is every engine write of the manifest.
+func (s *store) commitManifestLocked(data []byte) error {
+	durable, err := atomicWrite(s.manifestPath, data)
 	if err != nil {
 		return err
 	}
+	s.applied = manifestRead{kind: SeenValid, data: data}
 	if !durable {
 		// Intent is recoverable (the file is user-editable and re-read
 		// per operation), so a non-durable manifest commit is reported
@@ -339,37 +382,35 @@ func verifyConfigWritable(log *slog.Logger, configDir string) error {
 // not mutate maps/slices inside them). It is a verb because it costs real
 // work per call — the lock, a file read and a JSON decode — and a caller
 // that treated it as a field access would pay for all three in a loop.
-// Named for the file it loads, beside MutateManifest.
+// Named for the file it loads, beside MutateManifest. An absent or
+// unreadable file answers as store.base gives it, never as an empty manifest.
 func (s *store) LoadManifest() (*Manifest, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.readManifestLocked()
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &Manifest{Version: ManifestVersion, Tools: map[string]Tool{}}, nil
-		}
-		return nil, err
-	}
-	return m, nil
+	r := s.readManifestLocked()
+	return s.base(&r, false)
 }
 
-// MutateManifest applies fn to the parsed manifest and persists the
-// result atomically, all under the store lock. fn returning an error
-// aborts without writing.
+// MutateManifest applies fn to the manifest a merge builds on (store.base)
+// and persists the result atomically, all under the store lock. fn
+// returning an error aborts without writing.
 func (s *store) MutateManifest(fn func(*Manifest) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.readManifestLocked()
+	r := s.readManifestLocked()
+	m, err := s.base(&r, true)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		m = &Manifest{Version: ManifestVersion, Tools: map[string]Tool{}}
+		return err
 	}
 	if err := fn(m); err != nil {
 		return err
 	}
-	return s.writeManifestLocked(m)
+	foreign := r.kind == SeenValid && !s.applied.same(&r)
+	if err := s.writeManifestLocked(m); err != nil {
+		return err
+	}
+	s.foreign = s.foreign || foreign
+	return nil
 }
 
 // State returns the current machine state (missing file = empty state).
