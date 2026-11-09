@@ -17,6 +17,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -117,17 +118,17 @@ type JobsResponse struct {
 	Recent []*toolbelt.Job `json:"recent"`
 }
 
-// dependentsResponse is the 409 envelope for refused remove/disable:
+// DependentsResponse is the 409 envelope for refused remove/disable:
 // the standard error envelope plus the blocking tool names.
-type dependentsResponse struct {
+type DependentsResponse struct {
 	Error      string   `json:"error"`
 	Code       string   `json:"code"`
 	Dependents []string `json:"dependents"`
 }
 
-// rateLimitResponse is the 503 envelope for a request GitHub's API rate
+// RateLimitResponse is the 503 envelope for a request GitHub's API rate
 // limit refused: the standard error envelope plus the limit's detail.
-type rateLimitResponse struct {
+type RateLimitResponse struct {
 	Error     string                   `json:"error"`
 	Code      string                   `json:"code"`
 	RateLimit toolbelt.GitHubRateLimit `json:"rate_limit"`
@@ -141,6 +142,107 @@ type RemoveResponse struct {
 	Dependents []string      `json:"dependents,omitempty"`
 }
 
+// UpdateRequest is the optional body of the update route: the tools to
+// update, every enabled tool when empty.
+type UpdateRequest struct {
+	Names []string `json:"names,omitempty"`
+}
+
+// OKResponse is the cancel route's body.
+type OKResponse struct {
+	OK bool `json:"ok"`
+}
+
+// SearchQuery is the search route's query.
+type SearchQuery struct {
+	Q string `json:"q,omitempty"`
+	// Unavailable opts into the uninstallable block: present and empty,
+	// 1, true, yes or on.
+	Unavailable string `json:"unavailable,omitempty"`
+}
+
+// RemoveQuery is the delete route's query: Force 1 or true cascades.
+type RemoveQuery struct {
+	Force string `json:"force,omitempty"`
+}
+
+// NameParams is the path of the routes under /{name}.
+type NameParams struct {
+	Name string `json:"name"`
+}
+
+// JobParams is the cancel route's path.
+type JobParams struct {
+	ID string `json:"id"`
+}
+
+// Code is one error code with the one status the package answers it with.
+type Code struct {
+	Code   string
+	Status int
+}
+
+// Route is one route of the projection, for a host that binds each route
+// itself instead of mounting Handler. A nil type means none: no path
+// wildcard, no body, no query key read.
+type Route struct {
+	Params   reflect.Type
+	Request  reflect.Type
+	Query    reflect.Type
+	Response reflect.Type
+	// Handler serves the route over e, with the package's cache policy.
+	// It reads path wildcards with PathValue, so the host's pattern must
+	// name them as Suffix does.
+	Handler func(e *toolbelt.Engine) http.Handler
+	Method  string
+	// Suffix is appended to the mount prefix; "" is the prefix itself.
+	Suffix string
+	// Codes is every error code the route can answer, in a stable order.
+	Codes  []Code
+	Status int
+}
+
+var (
+	codeInventoryFailed = Code{Code: "inventory_failed", Status: http.StatusInternalServerError}
+	codeNotFound        = Code{Code: "not_found", Status: http.StatusNotFound}
+	// engineCodes are the codes writeEngineError answers with.
+	engineCodes = []Code{
+		{Code: "has_dependents", Status: http.StatusConflict},
+		{Code: toolbelt.ErrorCodeGitHubRateLimited, Status: http.StatusServiceUnavailable},
+		{Code: "essential", Status: http.StatusConflict},
+		codeNotFound,
+		{Code: "disabled", Status: http.StatusConflict},
+		{Code: "not_configured", Status: http.StatusConflict},
+		{Code: "queue_full", Status: http.StatusServiceUnavailable},
+		{Code: "shutting_down", Status: http.StatusServiceUnavailable},
+		{Code: "bad_request", Status: http.StatusBadRequest},
+	}
+)
+
+// Routes returns the projection's routes in table order: the routes
+// Handler serves.
+func Routes() []Route {
+	out := make([]Route, 0, len(routes))
+	for i := range routes {
+		rt := &routes[i]
+		h := rt.h
+		out = append(out, Route{
+			Handler: func(e *toolbelt.Engine) http.Handler {
+				return withNoStore(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h(e, w, r) }))
+			},
+			Params:   rt.params,
+			Request:  rt.request,
+			Query:    rt.query,
+			Response: rt.response,
+			Method:   rt.method,
+			Suffix:   rt.suffix,
+			Codes:    slices.Clone(rt.codes),
+			Status:   rt.status,
+		})
+	}
+	return out
+}
+
 // routeHandler is the shape of every entry in the route table: the
 // engine the projection reads, plus the standard http pair.
 type routeHandler func(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request)
@@ -149,6 +251,7 @@ type routeHandler func(e *toolbelt.Engine, w http.ResponseWriter, r *http.Reques
 // fieldalignment's, not the reading order; the table below uses keyed
 // literals so it reads method, path, handler regardless.
 type route struct {
+	params, request, query, response reflect.Type
 	// h serves the route.
 	h routeHandler
 	// method is the HTTP method the ServeMux pattern is anchored to.
@@ -156,6 +259,16 @@ type route struct {
 	// suffix is appended to the mount prefix to form the pattern's path
 	// ("" is the prefix itself); wildcards use ServeMux "{name}" syntax.
 	suffix string
+	codes  []Code
+	status int
+}
+
+// engineRoute is a mutation: 202 with resp, refused through writeEngineError.
+func engineRoute(method, suffix string, h routeHandler, params, req, resp reflect.Type) route {
+	return route{
+		method: method, suffix: suffix, h: h, params: params, request: req, response: resp,
+		codes: engineCodes, status: http.StatusAccepted,
+	}
 }
 
 // routes is the projection's complete route table and the single source
@@ -163,17 +276,36 @@ type route struct {
 // tests enumerate the same slice, so a route added here inherits the
 // cache-policy coverage without the tests being touched.
 var routes = []route{
-	{method: http.MethodGet, suffix: "", h: getInventory},
-	{method: http.MethodGet, suffix: "/search", h: getSearch},
-	{method: http.MethodGet, suffix: "/jobs", h: func(e *toolbelt.Engine, w http.ResponseWriter, _ *http.Request) { getJobs(e, w) }},
-	{method: http.MethodGet, suffix: "/catalog", h: func(e *toolbelt.Engine, w http.ResponseWriter, _ *http.Request) { getCatalog(e, w) }},
-	{method: http.MethodPost, suffix: "/catalog/refresh", h: postCatalogRefresh},
-	{method: http.MethodPost, suffix: "", h: postAdd},
-	{method: http.MethodPost, suffix: "/update", h: postUpdate},
-	{method: http.MethodPatch, suffix: "/{name}", h: patchTool},
-	{method: http.MethodPost, suffix: "/{name}/install", h: postInstall},
-	{method: http.MethodDelete, suffix: "/{name}", h: deleteTool},
-	{method: http.MethodPost, suffix: "/jobs/{id}/cancel", h: postCancel},
+	{
+		method: http.MethodGet, suffix: "", h: getInventory, response: reflect.TypeFor[toolbelt.Inventory](),
+		codes: []Code{codeInventoryFailed}, status: http.StatusOK,
+	},
+	{
+		method: http.MethodGet, suffix: "/search", h: getSearch,
+		query: reflect.TypeFor[SearchQuery](), response: reflect.TypeFor[SearchResponse](), status: http.StatusOK,
+	},
+	{
+		method: http.MethodGet, suffix: "/jobs", h: func(e *toolbelt.Engine, w http.ResponseWriter, _ *http.Request) { getJobs(e, w) },
+		response: reflect.TypeFor[JobsResponse](), status: http.StatusOK,
+	},
+	{
+		method: http.MethodGet, suffix: "/catalog", h: func(e *toolbelt.Engine, w http.ResponseWriter, _ *http.Request) { getCatalog(e, w) },
+		response: reflect.TypeFor[toolbelt.CatalogInfo](), status: http.StatusOK,
+	},
+	engineRoute(http.MethodPost, "/catalog/refresh", postCatalogRefresh, nil, nil, reflect.TypeFor[JobResponse]()),
+	engineRoute(http.MethodPost, "", postAdd, nil, reflect.TypeFor[toolbelt.AddRequest](), reflect.TypeFor[JobResponse]()),
+	engineRoute(http.MethodPost, "/update", postUpdate, nil, reflect.TypeFor[UpdateRequest](), reflect.TypeFor[JobResponse]()),
+	engineRoute(http.MethodPatch, "/{name}", patchTool, reflect.TypeFor[NameParams](), reflect.TypeFor[toolbelt.PatchRequest](), reflect.TypeFor[JobResponse]()),
+	engineRoute(http.MethodPost, "/{name}/install", postInstall, reflect.TypeFor[NameParams](), nil, reflect.TypeFor[JobResponse]()),
+	func() route {
+		rt := engineRoute(http.MethodDelete, "/{name}", deleteTool, reflect.TypeFor[NameParams](), nil, reflect.TypeFor[RemoveResponse]())
+		rt.query = reflect.TypeFor[RemoveQuery]()
+		return rt
+	}(),
+	{
+		method: http.MethodPost, suffix: "/jobs/{id}/cancel", h: postCancel, params: reflect.TypeFor[JobParams](),
+		response: reflect.TypeFor[OKResponse](), codes: []Code{codeNotFound}, status: http.StatusOK,
+	},
 }
 
 // Handler builds the projection's routes under prefix (e.g.
@@ -187,9 +319,10 @@ var routes = []route{
 func Handler(e *toolbelt.Engine, prefix string) http.Handler {
 	prefix = strings.TrimSuffix(prefix, "/")
 	mux := http.NewServeMux()
-	for _, rt := range routes {
-		mux.HandleFunc(rt.method+" "+prefix+rt.suffix, func(w http.ResponseWriter, r *http.Request) {
-			rt.h(e, w, r)
+	for i := range routes {
+		h := routes[i].h
+		mux.HandleFunc(routes[i].method+" "+prefix+routes[i].suffix, func(w http.ResponseWriter, r *http.Request) {
+			h(e, w, r)
 		})
 	}
 	return withNoStore(mux)
@@ -362,9 +495,7 @@ func postAdd(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 }
 
 func postUpdate(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Names []string `json:"names,omitempty"`
-	}
+	var req UpdateRequest
 	if r.ContentLength != 0 {
 		if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
 			httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
@@ -423,7 +554,7 @@ func postCancel(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		httpserver.WriteError(w, r, http.StatusNotFound, "not_found", "no such job")
 		return
 	}
-	httpserver.OK(w)
+	httpserver.WriteJSON(w, OKResponse{OK: true})
 }
 
 // writeEngineError maps engine sentinels onto wire responses.
@@ -432,13 +563,13 @@ func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var rl *toolbelt.GitHubRateLimitError
 	switch {
 	case errors.As(err, &dep):
-		httpserver.WriteJSONStatus(w, http.StatusConflict, dependentsResponse{
+		httpserver.WriteJSONStatus(w, http.StatusConflict, DependentsResponse{
 			Error:      dep.Error(),
 			Code:       "has_dependents",
 			Dependents: dep.Dependents,
 		})
 	case errors.As(err, &rl):
-		httpserver.WriteJSONStatus(w, http.StatusServiceUnavailable, rateLimitResponse{
+		httpserver.WriteJSONStatus(w, http.StatusServiceUnavailable, RateLimitResponse{
 			Error:     err.Error(),
 			Code:      toolbelt.ErrorCodeGitHubRateLimited,
 			RateLimit: rl.Wire(),
