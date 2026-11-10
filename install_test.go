@@ -20,6 +20,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cplieger/go/httpclient"
 	"github.com/cplieger/toolbelt/v3/internal/retain"
 )
 
@@ -274,6 +275,34 @@ func TestDownloadOnce_failsOnATruncatedBody(t *testing.T) {
 	}
 	if strings.Contains(out.joined(), "downloaded") {
 		t.Errorf("a failed download reported success: %q", out.joined())
+	}
+}
+
+// TestDownloadOnce_refusesASuccessOtherThan200 pins that only a 200 carries the
+// artifact. httpclient.CheckStatus is nil for every 2xx, so a 204 or a 206
+// would otherwise read as a finished download with no file written, and it
+// must not be retried, since the same answer comes back.
+func TestDownloadOnce_refusesASuccessOtherThan200(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusPartialContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			out := &collector{}
+			in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: out.add}
+			dest := filepath.Join(t.TempDir(), "artifact")
+
+			err := in.downloadOnce(t.Context(), srv.URL+"/tool.raw", dest)
+			if err == nil {
+				t.Fatalf("downloadOnce on a %d = nil, want a refusal", status)
+			}
+			if !httpclient.IsPermanent(err) {
+				t.Errorf("downloadOnce on a %d = %v, want a permanent error", status, err)
+			}
+			if strings.Contains(out.joined(), "downloaded") {
+				t.Errorf("a refused download reported success: %q", out.joined())
+			}
+		})
 	}
 }
 
