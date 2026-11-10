@@ -12,8 +12,8 @@ github.com/cplieger/go/pathinside v1.0.0 h1:6AkF/TcxRRaYX11jd3sqwcsPuRBVUcML53bo
 github.com/cplieger/go/pathinside v1.0.0/go.mod h1:+Fj6L8z2GUfDFi/uvAzoxF1iIADDf83g4fMbrvelDUY=
 github.com/cplieger/go/scheduler v1.0.0 h1:9hfHmwGHDeV3CenwffaNrOVQ/l9i5XiEz5U4RspoApw=
 github.com/cplieger/go/scheduler v1.0.0/go.mod h1:2cQv1OLOFwmyVNBbR/ocU1I6Qbg46787ZS+a0xZKHJI=
-github.com/cplieger/go/ssrf v1.1.0-dev.2 h1:y3Le2mtAnpJQLKeyc2ip4WHUMe0HoNmkGfmMnTtMXQA=
-github.com/cplieger/go/ssrf v1.1.0-dev.2/go.mod h1:kK0nCpWxIgDL8rx7xUweZrPlELrcjWKq7m6vAMx4Cz8=
+github.com/cplieger/go/ssrf v1.1.0-dev.3 h1:ZN+aLUmWSse2feKMwh1aC/pRBmOQFwZs7AhGeGGPrMo=
+github.com/cplieger/go/ssrf v1.1.0-dev.3/go.mod h1:NM/Y0w3KzamJrsVku+hemTQD1YtzGNM//ZdI651XdzY=
 github.com/cplieger/go/textsafe v1.0.0 h1:cQhZdSsiwSI9VpRjGoib5N59K9uC7fLzqIg8DrmQneU=
 github.com/cplieger/go/textsafe v1.0.0/go.mod h1:5IH0ZWTC+U864nzWGtcwGkp+PtA5hrlcfY2zLY/TexM=
 github.com/cplieger/go/urlform v1.1.0 h1:zjV25IpBkcL0rT8urvSdnYHNJKxOo6WNZpSrwOjEG1I=
