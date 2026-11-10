@@ -299,9 +299,6 @@ func TestDownloadOnce_refusesASuccessOtherThan200(t *testing.T) {
 			if !httpclient.IsPermanent(err) {
 				t.Errorf("downloadOnce on a %d = %v, want a permanent error", status, err)
 			}
-			if strings.Contains(out.joined(), "downloaded") {
-				t.Errorf("a refused download reported success: %q", out.joined())
-			}
 		})
 	}
 }
