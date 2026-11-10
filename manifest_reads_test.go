@@ -28,9 +28,8 @@ func manifestStates() []manifestState {
 				t.Fatalf("Setup: mkfifo: %v", err)
 			}
 		}},
-		{name: "adopted absence", put: func(t *testing.T, e *Engine) {
+		{name: "held absence, failed seed write", put: func(t *testing.T, e *Engine) {
 			removeManifestFile(t, e)
-			// A failed seed write keeps the adopted absence on disk.
 			write := atomicWrite
 			atomicWrite = func(string, []byte) (bool, error) { return false, errors.New("disk full") }
 			_, err := e.SyncManifest(nil, SeenAbsent)
@@ -72,11 +71,11 @@ func TestManifestReads(t *testing.T) {
 		load, add string
 		aKept     bool
 	}{
-		"held absence":        {load: "a,b", add: "a,b,c", aKept: true},
-		"held unparseable":    {load: "a,b", addErr: ErrManifestInvalid, aKept: true},
-		"held fifo":           {load: "a,b", addErr: filesafe.ErrNotRegular, aKept: true},
-		"adopted absence":     {load: "gopls", add: "c,gopls", aKept: false},
-		"adopted unparseable": {loadErr: ErrManifestInvalid, addErr: ErrManifestInvalid, aKept: true},
+		"held absence":                    {load: "a,b", add: "a,b,c", aKept: true},
+		"held unparseable":                {load: "a,b", addErr: ErrManifestInvalid, aKept: true},
+		"held fifo":                       {load: "a,b", addErr: filesafe.ErrNotRegular, aKept: true},
+		"held absence, failed seed write": {load: "a,b", add: "a,b,c", aKept: true},
+		"adopted unparseable":             {loadErr: ErrManifestInvalid, addErr: ErrManifestInvalid, aKept: true},
 	}
 	for _, st := range manifestStates() {
 		w := want[st.name]

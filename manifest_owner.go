@@ -70,14 +70,14 @@ func (e *Engine) ReplaceManifest(content []byte, check func(current []byte) erro
 	return nil
 }
 
-// SyncManifest adopts tools.json as the caller read it: seen holds the bytes
-// of a regular file (non-nil, possibly empty) and is nil otherwise. It does
-// nothing and reports false when the file no longer holds that read. A valid
-// file the engine did not write, or one an engine write folded a hand edit
-// into, is applied; an absent one becomes the seed, written back. Both report
-// true and enqueue a ReconcileMissing pass. An unreadable file is refused and
-// its error returned. A polling caller passes an absent or unreadable read
-// only once two consecutive polls saw it; until then reads keep the applied manifest.
+// SyncManifest adopts tools.json as the caller read it: seen holds a regular file's bytes
+// (non-nil, possibly empty) and is nil otherwise. It does nothing and reports false when the
+// file no longer holds that read. A valid file the engine did not write, or one an engine write
+// folded a hand edit into, is applied; an absent one becomes the seed, written back. Both report
+// true and enqueue a ReconcileMissing pass. A failed seed write returns its error and adopts
+// nothing, so the caller's next read retries it. An unreadable file is refused and its error
+// returned. A polling caller passes an absent or unreadable read only once two consecutive polls
+// saw it; until then reads keep the applied manifest.
 func (e *Engine) SyncManifest(seen []byte, kind SeenKind) (changed bool, err error) {
 	changed, err = e.store.sync(seen, kind)
 	if changed {
@@ -184,11 +184,7 @@ func (s *store) sync(seen []byte, kind SeenKind) (changed bool, err error) {
 		s.applied, s.foreign = r, false
 		return true, nil
 	case SeenAbsent:
-		if s.applied.kind == SeenAbsent {
-			return false, nil
-		}
 		if err := s.writeSeedLocked(); err != nil {
-			s.applied = manifestRead{kind: SeenAbsent}
 			return false, err
 		}
 		s.foreign = false

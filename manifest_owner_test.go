@@ -315,7 +315,7 @@ func TestMutateManifest_AHeldAbsenceStartsFromTheAppliedManifest(t *testing.T) {
 			t.Errorf("Add over a held absence wrote %s, want a,b,c", names)
 		}
 	})
-	t.Run("adopted absence, failed seed write", func(t *testing.T) {
+	t.Run("absence whose seed write failed", func(t *testing.T) {
 		e := newTestEngineClient(t, nil, http.DefaultClient, seed)
 		addTemplate(t, e, "a")
 		removeManifestFile(t, e)
@@ -336,8 +336,16 @@ func TestMutateManifest_AHeldAbsenceStartsFromTheAppliedManifest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("LoadManifest = %v", err)
 		}
-		if got := sortedToolNames(m); got != "gopls" {
-			t.Errorf("LoadManifest after an adopted absence = %s, want the seed gopls", got)
+		if got := sortedToolNames(m); got != "a,gopls" {
+			t.Errorf("LoadManifest after a failed seed write = %s, want the applied a,gopls", got)
+		}
+		atomicWrite = write
+		if changed, err := e.SyncManifest(nil, SeenAbsent); !changed || err != nil {
+			t.Errorf("SyncManifest with the write working = %v, %v; want true, nil", changed, err)
+		}
+		got, err := ParseManifest(readManifestFile(t, e))
+		if err != nil || sortedToolNames(got) != "gopls" {
+			t.Errorf("tools.json after the retried seed write = %v, %v; want the seed gopls", got, err)
 		}
 	})
 	t.Run("adopted absence, nil seed", func(t *testing.T) {
