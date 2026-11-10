@@ -7,6 +7,8 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
+
+	"github.com/cplieger/go/filesafe"
 )
 
 // ErrManifestInvalid is wrapped by every refusal of a tools.json document:
@@ -55,10 +57,11 @@ func WriteManifest(configDir string, content []byte) error {
 
 // ReplaceManifest writes content verbatim as tools.json under the store lock,
 // then enqueues a ReconcileMissing pass. It writes nothing and returns the
-// refusal when check (nil accepts) refuses the bytes on disk (nil when no
-// regular file is there), when ParseManifest refuses content, or when content
-// drops a row the current manifest holds and the live catalog marks essential
-// (ErrEssential, naming the tool).
+// refusal when check (nil accepts) refuses the bytes on disk (nil when the
+// file is absent or not a regular file), when check is set and a file there
+// cannot be read (the read's error), when ParseManifest refuses content, or
+// when content drops a row the current manifest holds and the live catalog
+// marks essential (ErrEssential, naming the tool).
 func (e *Engine) ReplaceManifest(content []byte, check func(current []byte) error) error {
 	if err := e.store.replace(content, check, e.cat()); err != nil {
 		return err
@@ -145,6 +148,9 @@ func (s *store) replace(content []byte, check func([]byte) error, c *Catalog) er
 	defer s.mu.Unlock()
 	r := s.readManifestLocked()
 	if check != nil {
+		if r.kind == SeenUnreadable && r.data == nil && !errors.Is(r.err, filesafe.ErrNotRegular) {
+			return r.err
+		}
 		if err := check(r.data); err != nil {
 			return err
 		}

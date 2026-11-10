@@ -141,8 +141,11 @@ const manifestFile = "tools.json"
 // out-of-band hand edit is picked up on the next operation; an absent or
 // unreadable one is answered from applied until SyncManifest adopts it.
 type store struct {
-	seed         *Manifest
-	log          *slog.Logger
+	seed *Manifest
+	log  *slog.Logger
+	// open, when set under mu, replaces the manifest's open, so a test can
+	// fail a read of a regular file as a broken mount does.
+	open         func(path string) (*os.File, error)
 	manifestPath string
 	statePath    string
 	// applied is the read the store last wrote or adopted; its zero kind
@@ -205,11 +208,19 @@ func (s *store) seedManifest() *Manifest {
 // symlink and opens without blocking, so a FIFO at the path is refused as
 // not a regular file instead of holding mu until a writer appears.
 func (s *store) readManifestLocked() manifestRead {
-	f, err := os.OpenFile(s.manifestPath, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	open := s.open
+	if open == nil {
+		open = func(path string) (*os.File, error) { return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) }
+	}
+	f, err := open(s.manifestPath)
 	if errors.Is(err, fs.ErrNotExist) {
 		return manifestRead{kind: SeenAbsent}
 	}
 	if err != nil {
+		// A socket's open fails with ENXIO before any descriptor exists to refuse.
+		if info, serr := os.Stat(s.manifestPath); serr == nil && !info.Mode().IsRegular() {
+			return manifestRead{kind: SeenUnreadable, err: fmt.Errorf("%s: %w", s.manifestPath, filesafe.ErrNotRegular)}
+		}
 		return manifestRead{kind: SeenUnreadable, err: err}
 	}
 	defer func() { _ = f.Close() }()

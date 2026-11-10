@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -423,6 +424,75 @@ func TestReadManifest_AFIFOIsRefusedWithoutBlocking(t *testing.T) {
 			t.Errorf("LoadManifest through a symlink = %v, %v; want the row x", m, err)
 		}
 	})
+}
+
+func TestReplaceManifest_AFileItCannotReadRefusesACheckedSave(t *testing.T) {
+	e := newTestEngine(t, nil)
+	orig := readManifestFile(t, e)
+	e.store.mu.Lock()
+	e.store.open = func(path string) (*os.File, error) {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EIO}
+	}
+	e.store.mu.Unlock()
+	t.Cleanup(func() {
+		e.store.mu.Lock()
+		e.store.open = nil
+		e.store.mu.Unlock()
+	})
+
+	checked := false
+	err := e.ReplaceManifest(manifestDoc(templateRow("x")), func([]byte) error {
+		checked = true
+		return nil
+	})
+	if !errors.Is(err, syscall.EIO) {
+		t.Errorf("ReplaceManifest = %v, want the read's EIO", err)
+	}
+	if checked {
+		t.Error("check ran over a tools.json that could not be read")
+	}
+	if got := readManifestFile(t, e); !bytes.Equal(got, orig) {
+		t.Errorf("tools.json = %q after the refusal, want it unchanged %q", got, orig)
+	}
+	doc := manifestDoc(templateRow("x"))
+	if err := e.ReplaceManifest(doc, nil); err != nil {
+		t.Errorf("ReplaceManifest with no check = %v, want the write", err)
+	}
+	if got := readManifestFile(t, e); !bytes.Equal(got, doc) {
+		t.Errorf("tools.json = %q, want the unchecked write %q", got, doc)
+	}
+}
+
+func TestReplaceManifest_ACheckSeesNilForAnAbsentOrNonRegularFile(t *testing.T) {
+	for name, plant := range map[string]func(path string) error{
+		"absent":    os.Remove,
+		"directory": func(path string) error { return errors.Join(os.Remove(path), os.Mkdir(path, 0o755)) },
+		"FIFO":      func(path string) error { return errors.Join(os.Remove(path), syscall.Mkfifo(path, 0o644)) },
+		"socket": func(path string) error {
+			return errors.Join(os.Remove(path), syscall.Mknod(path, syscall.S_IFSOCK|0o644, 0))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			if err := plant(e.store.manifestPath); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			checked := false
+			err := e.ReplaceManifest(manifestDoc(templateRow("x")), func(current []byte) error {
+				checked = true
+				if current != nil {
+					t.Errorf("check saw %q, want nil", current)
+				}
+				return nil
+			})
+			if !checked {
+				t.Errorf("check did not run (ReplaceManifest = %v)", err)
+			}
+			if name == "absent" && err != nil {
+				t.Errorf("ReplaceManifest over an absent tools.json = %v, want the write", err)
+			}
+		})
+	}
 }
 
 func TestReplaceManifest_RefusesDroppingAnEssentialRow(t *testing.T) {
