@@ -658,7 +658,12 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return httpclient.CheckStatus(res)
+		if statusErr := httpclient.CheckStatus(res); statusErr != nil {
+			return statusErr
+		}
+		// CheckStatus is nil for every 2xx; only a 200 carries the artifact,
+		// and the same answer would come back on a retry.
+		return httpclient.Permanent(fmt.Errorf("download answered status %d, want 200", res.StatusCode))
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
