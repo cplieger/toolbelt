@@ -20,9 +20,9 @@ var ErrManifestInvalid = errors.New("toolbelt: invalid manifest")
 // so wrapping it changes no error a consumer already shows.
 type manifestError struct{ err error }
 
-func (e *manifestError) Error() string        { return e.err.Error() }
-func (e *manifestError) Unwrap() error        { return e.err }
-func (e *manifestError) Is(target error) bool { return target == ErrManifestInvalid }
+func (e *manifestError) Error() string      { return e.err.Error() }
+func (e *manifestError) Unwrap() error      { return e.err }
+func (*manifestError) Is(target error) bool { return target == ErrManifestInvalid }
 
 func invalidManifest(err error) error { return &manifestError{err: err} }
 
