@@ -69,7 +69,8 @@ type Config struct {
 	GitHubToken func(ctx context.Context) (string, error)
 	// Logger receives engine-level log lines. Nil means slog.Default().
 	Logger *slog.Logger
-	// Seed is the manifest written when none exists (fresh volume).
+	// Seed is the manifest written when none exists: by New on a fresh
+	// volume, and by SyncManifest when it adopts a removed tools.json.
 	// Nil seeds an empty manifest. See DefaultSeed.
 	Seed *Manifest
 	// ConfigDir holds tools.json + tools-state.json (the persistent

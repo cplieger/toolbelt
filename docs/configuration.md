@@ -13,7 +13,7 @@ This page lists every `Config` field, the helpers that fill `Config.Refresh` fro
 | `CatalogPath` | The catalog baked into your image, and the first-boot or offline fallback when `Refresh` is set |
 | `Refresh` | Runtime catalog refresh: the catalog URL, the schedule interval (0 = on demand only) and the names checked before each swap. Nil keeps the baked catalog |
 | `CatalogOverlays` | Your overlay files, applied again to every catalog the engine loads, so the patches survive a refresh |
-| `Seed` | The manifest written when none exists. Nil writes an empty manifest |
+| `Seed` | The manifest written when none exists: by `New` on a fresh volume, and by `SyncManifest` when it adopts a removed `tools.json`. Nil writes an empty manifest |
 | `System` | Binaries baked into your image, reported read-only in `Inventory` |
 | `KeepVersions` | How many replaced versions stay under `opt/<name>/` for rollback, the most recently installed first. 0 means the default of 1, and a negative value keeps none |
 | `VerifyRootIntegrity` | Refuse to start over an unsafe tools tree. Off by default. See below |
