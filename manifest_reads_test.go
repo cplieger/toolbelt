@@ -11,7 +11,7 @@ import (
 )
 
 // manifestState puts an engine's tools.json into one state of the one rule:
-// a read the store holds (no SyncManifest yet) or one SyncManifest adopted.
+// a read the store holds or one SyncManifest adopted.
 type manifestState struct {
 	put  func(t *testing.T, e *Engine)
 	name string
