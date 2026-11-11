@@ -10,7 +10,7 @@ require (
 	github.com/cplieger/go/keyenc v1.3.0
 	github.com/cplieger/go/pathinside v1.1.0
 	github.com/cplieger/go/scheduler v1.1.0
-	github.com/cplieger/go/ssrf v1.1.0-dev.7
+	github.com/cplieger/go/ssrf v1.1.0
 	github.com/cplieger/go/textsafe v1.1.0
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-version v1.9.0
