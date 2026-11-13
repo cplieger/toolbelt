@@ -23,9 +23,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/httpx/v5"
-	"github.com/cplieger/pathinside/v2"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/go/pathinside"
+	"github.com/cplieger/go/textsafe"
+	"github.com/cplieger/toolbelt/v3/internal/retain"
 )
 
 // installer executes install/uninstall plans for every source kind.
@@ -161,16 +162,23 @@ func (in *installer) logf(format string, args ...any) {
 // ~200 MB; anything past this is a broken or hostile URL.
 const maxArtifactSize = 1 << 30
 
-// Transient suffixes inside a tool's opt dir: the extraction target
-// before a publish, and the superseded tree kept during one. Neither is
-// ever a retention candidate.
+// Transient names inside a tool's opt dir: the extraction target
+// (staged before an atomic swap) and the previous tree held during that
+// swap, each "."+version+suffix. A version cannot start with a dot
+// (grammarTag), so residue never shares a name with a version tree.
 const (
 	stagingSuffix = ".staging"
 	backupSuffix  = ".old"
 )
 
+// residue is the transient name of version under its tool's opt dir.
+func residue(versDir, suffix string) string {
+	return filepath.Join(filepath.Dir(versDir), "."+filepath.Base(versDir)+suffix)
+}
+
 // DefaultKeepVersions is how many superseded versions of a tool the
-// engine retains when Config.KeepVersions is unset: one, so a bad update
+// engine retains when Config.KeepVersions is unset, the count
+// retain.Keep(0) returns: one, so a bad update
 // always has a previous tree under <ToolsDir>/opt/<name>/ to fall back
 // to instead of only a re-download.
 const DefaultKeepVersions = 1
@@ -233,16 +241,28 @@ func (in *installer) installFromSpec(ctx context.Context, name, version string, 
 	}
 	defer os.RemoveAll(tmp)
 
-	artifact := filepath.Join(tmp, lastPathSegment(spec.URL))
-	if derr := in.download(ctx, spec.URL, artifact); derr != nil {
+	dl := filepath.Join(tmp, lastPathSegment(spec.URL))
+	if derr := in.download(ctx, spec.URL, dl); derr != nil {
 		return nil, "", derr
 	}
-	checksum, err = in.verifyArtifact(ctx, name, version, artifact, spec)
+	f, err := os.Open(dl)
+	if err != nil {
+		return nil, "", err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	// One descriptor for the digest and the extraction: what is unpacked is
+	// what was verified, whatever happens to the name in between.
+	art := downloaded{data: io.NewSectionReader(f, 0, fi.Size()), asset: filepath.Base(dl)}
+	checksum, err = in.verifyArtifact(ctx, name, version, art, spec)
 	if err != nil {
 		return nil, "", err
 	}
 
-	versDir, declared, err := in.extractAndSwap(ctx, name, version, spec, artifact)
+	versDir, declared, err := in.extractAndSwap(ctx, name, version, spec, art.data)
 	if err != nil {
 		return nil, "", err
 	}
@@ -265,16 +285,23 @@ func (in *installer) installAqua(ctx context.Context, name, version string, aq *
 	return in.installFromSpec(ctx, name, version, spec)
 }
 
+// downloaded is a fetched artifact: its content, read through the descriptor
+// the digest covers, and its asset name, which a checksum list keys on.
+type downloaded struct {
+	data  *io.SectionReader
+	asset string
+}
+
 // verifyArtifact enforces the checksum invariant before the download is
 // extracted or published, and reports how integrity was established. A
 // declared checksum source that fails to resolve, fetch, parse or match
 // REFUSES the install; a definition declaring none still installs, but
 // logs the tool/version/URL at Warn so the gap is observable rather than
 // inferred.
-func (in *installer) verifyArtifact(ctx context.Context, name, version, artifact string, spec *InstallSpec) (string, error) {
+func (in *installer) verifyArtifact(ctx context.Context, name, version string, art downloaded, spec *InstallSpec) (string, error) {
 	switch {
 	case spec.ChecksumURL != "":
-		if verr := in.verifyChecksum(ctx, artifact, spec); verr != nil {
+		if verr := in.verifyChecksum(ctx, art, spec); verr != nil {
 			return "", in.refuseUnverified(name, version, spec.URL, verr)
 		}
 		in.logf("checksum verified (%s)", spec.ChecksumAlg)
@@ -310,7 +337,7 @@ func (in *installer) refuseUnverified(name, version, url string, cause error) er
 // publish keeps a backup so a same-version reinstall has no window with the
 // tool absent, flushes staging before the rename and the parent after it,
 // and restores the backup when a barrier fails.
-func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact string) (string, []declaredBin, error) {
+func (in *installer) extractAndSwap(ctx context.Context, name, version string, spec *InstallSpec, artifact *io.SectionReader) (string, []declaredBin, error) {
 	// The version is a path component from here on, and only the sources
 	// routed through this function have that constraint (see
 	// versionpolicy.go). Asserting it here is what stops a wider
@@ -319,10 +346,10 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 		return "", nil, fmt.Errorf("refusing to install %s: version %q is not a path component", name, version)
 	}
 	versDir := filepath.Join(in.optDir(), name, version)
-	staging := versDir + stagingSuffix
+	staging := residue(versDir, stagingSuffix)
 	declared, err := in.stageArtifact(ctx, name, version, spec, artifact, staging)
 	if err == nil {
-		err = publishStaged(name, version, staging, versDir)
+		err = in.publishStaged(name, version, staging, versDir)
 	}
 	if err != nil {
 		_ = os.RemoveAll(staging)
@@ -334,7 +361,7 @@ func (in *installer) extractAndSwap(ctx context.Context, name, version string, s
 // stageArtifact extracts the artifact into staging and resolves the
 // declared executables against that tree, so a refusal happens before
 // anything is published.
-func (in *installer) stageArtifact(ctx context.Context, name, version string, spec *InstallSpec, artifact, staging string) ([]declaredBin, error) {
+func (in *installer) stageArtifact(ctx context.Context, name, version string, spec *InstallSpec, artifact *io.SectionReader, staging string) ([]declaredBin, error) {
 	// Declared names come from a registry and are published as bin/<name>,
 	// which the publish clears before linking.
 	for _, f := range spec.Files {
@@ -367,9 +394,11 @@ func (in *installer) stageArtifact(ctx context.Context, name, version string, sp
 	return declared, nil
 }
 
-// publishStaged swaps the staged tree in as the live version directory.
-func publishStaged(name, version, staging, versDir string) error {
-	backup := versDir + backupSuffix
+// publishStaged swaps the staged tree in as the live version directory and
+// stamps it with the current time, which retention ranks predecessors by: a
+// rename keeps the staged root's mtime.
+func (in *installer) publishStaged(name, version, staging, versDir string) error {
+	backup := residue(versDir, backupSuffix)
 	if err := os.RemoveAll(backup); err != nil {
 		return err
 	}
@@ -388,6 +417,11 @@ func publishStaged(name, version, staging, versDir string) error {
 		_ = os.RemoveAll(versDir)
 		restoreBackup(versDir, backup)
 		return fmt.Errorf("commit install of %s %s: %w", name, version, err)
+	}
+	// Not fatal: a mis-ranked predecessor costs only which superseded tree is kept.
+	now := time.Now()
+	if err := os.Chtimes(versDir, now, now); err != nil {
+		in.logger().Warn("toolbelt: could not record the install time of a version directory", "path", versDir, "error", err)
 	}
 	_ = os.RemoveAll(backup)
 	return nil
@@ -476,8 +510,8 @@ func (in *installer) linkDeclaredBins(versDir string, bins []declaredBin) ([]str
 
 // resolveInsideInstall resolves one declared file to a real path proven
 // to sit inside the install dir, and leaves it executable. Symlinks are
-// resolved BEFORE stat/chmod/link, because tar/unzip faithfully recreate
-// symlink members even though they sanitize .. and absolute paths.
+// resolved BEFORE stat/chmod/link, because extraction keeps an archive's
+// in-tree symlink members and a declared name can be one.
 // Residual gap: containment is a name-based TOCTOU, since no inode
 // identity carries into enforceExecutable's open or linkBin's publish.
 func resolveInsideInstall(installRoot pathinside.Root, target, src string) (string, error) {
@@ -542,8 +576,8 @@ func searchInstallTree(root, guess, base string) (string, error) {
 }
 
 // walkInstallTree returns the regular files under root named base, and
-// separately every regular file carrying an execute bit. tar and unzip
-// both preserve archive modes, so the executable set is upstream's own
+// separately every regular file carrying an execute bit. Extraction keeps
+// a member's execute bits, so the executable set is upstream's own
 // statement about which members are programs.
 func walkInstallTree(root, base string) (named, executable []string, err error) {
 	// WalkDir does not follow symlinks, so a link planted by the archive
@@ -605,9 +639,9 @@ func binDirRank(p string) int {
 // download fetches url to dest with a size cap, retrying transient
 // failures (a fresh attempt truncates and rewrites dest).
 func (in *installer) download(ctx context.Context, rawURL, dest string) error {
-	_, err := httpx.Do(ctx, func(ctx context.Context) (struct{}, error) {
+	_, err := httpclient.Do(ctx, func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, in.downloadOnce(ctx, rawURL, dest)
-	}, httpx.WithMaxAttempts(2), httpx.WithLabel("download "+lastPathSegment(rawURL)))
+	}, httpclient.WithMaxAttempts(2), httpclient.WithLabel("download "+lastPathSegment(rawURL)))
 	return err
 }
 
@@ -624,7 +658,12 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return httpx.CheckHTTPStatus(res)
+		if statusErr := httpclient.CheckStatus(res); statusErr != nil {
+			return statusErr
+		}
+		// CheckStatus is nil for every 2xx; only a 200 carries the artifact,
+		// and the same answer would come back on a retry.
+		return httpclient.Permanent(fmt.Errorf("download answered status %d, want 200", res.StatusCode))
 	}
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -638,7 +677,7 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 		return err
 	}
 	if n > maxArtifactSize {
-		return httpx.Permanent(fmt.Errorf("artifact exceeds %d byte cap", int64(maxArtifactSize)))
+		return httpclient.Permanent(fmt.Errorf("artifact exceeds %d byte cap", int64(maxArtifactSize)))
 	}
 	in.logf("downloaded %s (%.1f MB)", filepath.Base(dest), float64(n)/1e6)
 	return nil
@@ -647,15 +686,15 @@ func (in *installer) downloadOnce(ctx context.Context, rawURL, dest string) erro
 // verifyChecksum fetches the checksum artifact and compares the
 // download's digest. The checksum file may be a bare digest or the
 // standard "digest  filename" list (sha256sum style).
-func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *InstallSpec) error {
-	body, err := httpx.GetBytes(ctx, in.client, spec.ChecksumURL,
-		httpx.WithMaxAttempts(3), httpx.WithMaxBodyBytes(1<<20))
+func (in *installer) verifyChecksum(ctx context.Context, art downloaded, spec *InstallSpec) error {
+	body, err := httpclient.GetBytes(ctx, in.client, spec.ChecksumURL,
+		httpclient.WithMaxAttempts(3), httpclient.WithMaxBodyBytes(1<<20))
 	if err != nil {
 		return fmt.Errorf("fetch checksum: %w", err)
 	}
-	want := findChecksum(string(body), filepath.Base(artifact), spec.ChecksumAlg)
+	want := findChecksum(string(body), art.asset, spec.ChecksumAlg)
 	if want == "" {
-		return fmt.Errorf("checksum file has no entry for %s", filepath.Base(artifact))
+		return fmt.Errorf("checksum file has no entry for %s", art.asset)
 	}
 
 	var h hash.Hash
@@ -667,12 +706,7 @@ func (in *installer) verifyChecksum(ctx context.Context, artifact string, spec *
 	default:
 		return fmt.Errorf("unsupported checksum algorithm %q", spec.ChecksumAlg)
 	}
-	f, err := os.Open(artifact)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, io.NewSectionReader(art.data, 0, art.data.Size())); err != nil {
 		return err
 	}
 	got := hex.EncodeToString(h.Sum(nil))
@@ -740,17 +774,38 @@ func isHexDigest(s string, n int) bool {
 	return true
 }
 
-// pruneOldVersions removes superseded versioned install dirs, keeping the
-// current version plus the `keep` most recent previous ones (see
-// retained) so a bad update has a fallback. Best-effort: a failure is
-// logged and disk is left as-is.
+// pruneOldVersions removes a tool's transient residue (every dot-prefixed
+// entry), then the superseded version dirs retain.Victims names, keeping the current
+// version and the `keep` most recently activated previous ones so a bad
+// update has a fallback. Best-effort: a failure is logged and disk is left
+// as-is.
 func (in *installer) pruneOldVersions(name, current string, keep int) {
 	root := filepath.Join(in.optDir(), name)
-	entries, err := os.ReadDir(root)
+	dirents, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
-	for _, victim := range prunable(entries, current, keep) {
+	names := make(map[string]bool, len(dirents))
+	for _, e := range dirents {
+		names[e.Name()] = true
+	}
+	var victims []string
+	entries := make([]retain.Entry, 0, len(dirents))
+	for _, e := range dirents {
+		switch n := e.Name(); {
+		case strings.HasPrefix(n, "."), n != current && legacyResidue(n, names):
+			victims = append(victims, n)
+		default:
+			var mod time.Time
+			if fi, err := e.Info(); err == nil {
+				mod = fi.ModTime()
+			}
+			entries = append(entries, retain.Entry{Name: n, Activated: mod})
+		}
+	}
+	// Every engine tree can serve: the engine does not probe its predecessors.
+	victims = append(victims, retain.Victims(entries, current, keep, func(string) retain.Role { return retain.Fallback })...)
+	for _, victim := range victims {
 		if err := os.RemoveAll(filepath.Join(root, victim)); err != nil {
 			in.logf("could not prune %s/%s: %v", name, victim, err)
 			continue
@@ -759,54 +814,17 @@ func (in *installer) pruneOldVersions(name, current string, keep int) {
 	}
 }
 
-// prunable selects entries under a tool's opt root that go: never the
-// current version, always transient .staging/.old residue, and the
-// remaining superseded versions newest-first (mtime, name tiebreak)
-// past the first `retained`.
-func prunable(entries []os.DirEntry, current string, keep int) []string {
-	type candidate struct {
-		modTime time.Time
-		name    string
-	}
-	var victims []string
-	var supers []candidate
-	for _, e := range entries {
-		switch name := e.Name(); {
-		case name == current:
-		case strings.HasSuffix(name, stagingSuffix), strings.HasSuffix(name, backupSuffix):
-			victims = append(victims, name)
-		default:
-			var mod time.Time
-			if fi, err := e.Info(); err == nil {
-				mod = fi.ModTime()
-			}
-			supers = append(supers, candidate{modTime: mod, name: name})
+// legacyResidue reports whether n is <version>.staging or <version>.old
+// beside its own version's tree, as a crash under the undotted residue names
+// leaves it. Its mtime is the crash's, so ranked as a version it would take
+// the predecessor's slot.
+func legacyResidue(n string, names map[string]bool) bool {
+	for _, suffix := range []string{stagingSuffix, backupSuffix} {
+		if stem, ok := strings.CutSuffix(n, suffix); ok && names[stem] {
+			return true
 		}
 	}
-	slices.SortFunc(supers, func(a, b candidate) int {
-		if !a.modTime.Equal(b.modTime) {
-			return b.modTime.Compare(a.modTime)
-		}
-		return strings.Compare(b.name, a.name)
-	})
-	for _, c := range supers[min(retained(keep), len(supers)):] {
-		victims = append(victims, c.name)
-	}
-	return victims
-}
-
-// retained normalizes a configured retention count: 0 (unset) means
-// DefaultKeepVersions, and a negative value keeps none (the
-// prune-everything-superseded behavior).
-func retained(keep int) int {
-	switch {
-	case keep == 0:
-		return DefaultKeepVersions
-	case keep < 0:
-		return 0
-	default:
-		return keep
-	}
+	return false
 }
 
 // linkBin force-replaces bin/<name> with a symlink to target and flushes
@@ -923,7 +941,7 @@ func (in *installer) streamCmd(cmd *exec.Cmd, label string) error {
 }
 
 // keepTail's kept suffix never exceeds n bytes nor starts mid-rune, the
-// runesafe.CapBytesTail rule applied in place to reuse b.
+// textsafe.CapBytesTail rule applied in place to reuse b.
 func keepTail(b []byte, n int) []byte {
 	if len(b) <= n {
 		return b
@@ -968,11 +986,11 @@ func commandFailed(label string, err error, output string) error {
 			lines = append(lines, line)
 		}
 	}
-	msg := runesafe.SanitizeSingleLine(strings.Join(lines, " | "))
+	msg := textsafe.SanitizeSingleLine(strings.Join(lines, " | "))
 	if msg == "" {
 		return fmt.Errorf("%s failed: %w", label, err)
 	}
-	if tail := runesafe.CapBytesTail(msg, maxCommandOutput); len(tail) < len(msg) {
+	if tail := textsafe.CapBytesTail(msg, maxCommandOutput); len(tail) < len(msg) {
 		msg = "..." + tail
 	}
 	return fmt.Errorf("%s failed: %w (%s)", label, err, msg)

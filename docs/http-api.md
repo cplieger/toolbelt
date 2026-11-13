@@ -12,6 +12,8 @@ mux.Handle("/api/tools", h)
 mux.Handle("/api/tools/", h)
 ```
 
+A host that binds every route itself, with its own types and access rule per route, calls `httpapi.Routes()` instead. Each `Route` carries its method, its path suffix under your prefix, the Go types of its path wildcards, body, query and reply, its success status, every error code it can answer with that code's status, and `Handler(engine)`, which serves it with the cache policy below. Bind each one at `Method + " " + prefix + Suffix`, so the handler can read its wildcards. `Handler` serves exactly these routes.
+
 The handler has no authentication and adds no middleware except its own cache policy. Wrap it in your own stack, such as an origin check or a gate that accepts only loopback connections. It speaks JSON in both directions and caps a request body at 64 KiB.
 
 ## Routes
@@ -63,4 +65,4 @@ To follow job progress, use the `Config` callbacks or poll `GET {prefix}/jobs`.
 
 Every response carries `Cache-Control: no-store`, including success bodies, rejected requests, engine errors, and the router's own 404, 405 and redirect replies. You need no no-store middleware of your own.
 
-A `Cache-Control` your stack already set on the response is left as it is, the same rule `webhttp.JSONHeaders` applies to `X-Content-Type-Options`. A stricter policy such as `no-store, no-cache, must-revalidate`, or a weaker one on purpose, stays yours to set.
+A `Cache-Control` your stack already set on the response is left as it is, the same rule `httpserver.JSONHeaders` applies to `X-Content-Type-Options`. A stricter policy such as `no-store, no-cache, must-revalidate`, or a weaker one on purpose, stays yours to set.

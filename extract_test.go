@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,7 +15,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/cplieger/pathinside/v2"
+	"github.com/cplieger/go/pathinside"
 )
 
 // installBase stands in for the version directory the containment rule
@@ -384,7 +385,7 @@ func TestExtractArtifact_RefusesAFormatItCannotExtract(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err := extractArtifact(t.Context(), artifact, format, destDir, "tool")
+			err := extractArtifact(t.Context(), openArtifact(t, artifact), format, destDir, "tool")
 			if err == nil {
 				t.Fatalf("extractArtifact(format %q) = nil, want the unsupported-format refusal", format)
 			}
@@ -403,16 +404,10 @@ func TestExtractArtifact_RefusesAFormatItCannotExtract(t *testing.T) {
 }
 
 // TestExtractArtifact_TarDropsTheArchivedOwner pins that a tar member's
-// recorded owner never reaches the installed tree. GNU tar run as root
-// restores that owner by default, so a release built by some uid installs
-// files owned by that uid, an identity the host may give to anyone. Every tar
-// format shares the one flag, so the plain and gzip spellings stand for all.
-//
-// Only a root run can tell the flag's presence from its absence, because an
-// unprivileged tar cannot chown at all. The root run therefore first proves,
-// with tar's own default, that this tar really restores the archived owner,
-// and fails as INVALID otherwise. The unprivileged run is the witness that the
-// flag is accepted and extraction still works.
+// recorded owner never reaches the installed tree: a release built by some uid
+// would otherwise install files owned by that uid, an identity the host may
+// give to anyone. Run as root it is the case that matters, since only root
+// could restore an owner.
 func TestExtractArtifact_TarDropsTheArchivedOwner(t *testing.T) {
 	t.Parallel()
 	euid, egid := os.Geteuid(), os.Getegid()
@@ -421,25 +416,6 @@ func TestExtractArtifact_TarDropsTheArchivedOwner(t *testing.T) {
 		archived++
 	}
 	tarball := ownedTarball(t, archived)
-
-	if euid == 0 {
-		dir := t.TempDir()
-		cmd, err := systemCommand(t.Context(), "tar", "-xf", "-", "-C", dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmd.Stdin = bytes.NewReader(tarball)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("witness tar: %v: %s", err, out)
-		}
-		if uid, _ := ownerOf(t, filepath.Join(dir, "pkg", "tool")); uid != archived {
-			t.Fatalf("INVALID: tar as root without --no-same-owner stored uid %d, want the archived %d; "+
-				"this tar never restores owners, so the test below is vacuous", uid, archived)
-		}
-	} else {
-		t.Logf("running as uid %d: tar cannot chown, so only flag acceptance is exercised", euid)
-	}
-
 	for name, format := range map[string]string{"tar": formatTar, "tar.gz": formatTarGz} {
 		t.Run(name, func(t *testing.T) {
 			base := t.TempDir()
@@ -464,7 +440,7 @@ func TestExtractArtifact_TarDropsTheArchivedOwner(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := extractArtifact(t.Context(), artifact, format, destDir, "tool"); err != nil {
+			if err := extractArtifact(t.Context(), openArtifact(t, artifact), format, destDir, "tool"); err != nil {
 				t.Fatalf("extractArtifact(%s): %v", format, err)
 			}
 			seen := 0
@@ -535,56 +511,16 @@ func ownerOf(t *testing.T, path string) (uid, gid int) {
 	return int(st.Uid), int(st.Gid)
 }
 
-// TestExtractArtifact_RawEnforcesTheStoredExecutableMode pins that the mode of
-// a plain-binary artifact is what the filesystem STORED, not what the extract
-// asked for. os.Rename carries the artifact's own mode onto the installed
-// name, so a group-writable download stays group-writable unless something
-// brings it back — and a 0775 binary that the very next step publishes as
-// bin/<name> on PATH is writable by every member of its group.
-//
-// The drift is REAL rather than mocked: the artifact is genuinely 0o777 on disk
-// and the rename genuinely preserves it, which the witness below asserts before
-// the assertion that matters. If a filesystem ever clamped either, the test
-// would pass without exercising enforcement at all, so it fails as INVALID
-// instead.
-func TestExtractArtifact_RawEnforcesTheStoredExecutableMode(t *testing.T) {
+// TestExtractArtifact_RawLandsAsBinExecMode pins that a plain binary lands
+// with its bytes and as binExecMode whatever mode the download carries.
+func TestExtractArtifact_RawLandsAsBinExecMode(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	srcDir := filepath.Join(base, "dl")
 	destDir := filepath.Join(base, "dest")
-	for _, d := range []string{srcDir, destDir} {
-		if err := os.Mkdir(d, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	// Witness: the wide mode is really stored, and really survives a rename
-	// into destDir. Both are preconditions for enforcement being what fixes it.
-	probe := filepath.Join(srcDir, "probe")
-	if err := os.WriteFile(probe, []byte("x"), 0o600); err != nil {
+	if err := os.Mkdir(destDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(probe, 0o777); err != nil {
-		t.Fatal(err)
-	}
-	probeOut := filepath.Join(destDir, "probe")
-	if err := os.Rename(probe, probeOut); err != nil {
-		t.Fatal(err)
-	}
-	wfi, err := os.Lstat(probeOut)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if wfi.Mode().Perm() != 0o777 {
-		t.Fatalf("INVALID: a 0777 artifact renamed into place stored %v; this filesystem "+
-			"leaves nothing for mode enforcement to correct, so the test below is vacuous",
-			wfi.Mode().Perm())
-	}
-	if err := os.Remove(probeOut); err != nil {
-		t.Fatal(err)
-	}
-
-	artifact := filepath.Join(srcDir, "rg-download")
+	artifact := filepath.Join(base, "rg-download")
 	if err := os.WriteFile(artifact, []byte("#!/bin/sh\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -592,7 +528,7 @@ func TestExtractArtifact_RawEnforcesTheStoredExecutableMode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := extractArtifact(t.Context(), artifact, formatRaw, destDir, "rg"); err != nil {
+	if err := extractArtifact(t.Context(), openArtifact(t, artifact), formatRaw, destDir, "rg"); err != nil {
 		t.Fatalf("extractArtifact: %v", err)
 	}
 	fi, err := os.Lstat(filepath.Join(destDir, "rg"))
@@ -600,21 +536,19 @@ func TestExtractArtifact_RawEnforcesTheStoredExecutableMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := fi.Mode().Perm(); got != binExecMode {
-		t.Fatalf("installed binary mode = %v, want %v: the stored mode was not enforced, "+
-			"leaving a group-writable executable bound for PATH", got, binExecMode)
+		t.Fatalf("installed binary mode = %v, want %v", got, binExecMode)
+	}
+	if b, err := os.ReadFile(filepath.Join(destDir, "rg")); err != nil || string(b) != "#!/bin/sh\n" {
+		t.Errorf("installed binary = %q, %v; want the artifact's bytes", b, err)
 	}
 }
 
 // TestResolveDeclaredFiles_EnforcesTheStoredExecutableMode pins the same
-// property on the publish path, where the target's mode comes from the
-// ARCHIVE: tar and unzip restore a member's recorded mode, so an archive can
-// hand toolbelt a group-writable file and the old pathname chmod would have
-// reported success whatever the filesystem did with its request. The
-// bin/<name> symlink that follows puts the result on PATH, which is what makes
-// 0775 rather than 0755 a security outcome and not a cosmetic one.
-//
-// The wider starting mode is REAL — set on disk before the call, asserted by
-// the witness — so enforcement is what brings it back.
+// property on the publish path, where a declared file's stored mode is
+// whatever the filesystem kept: an inheritable group ACE can widen what the
+// extraction asked for, and the bin/<name> symlink that follows puts the
+// result on PATH. The wider starting mode is real, set on disk and asserted by
+// the witness, so enforcement is what brings it back.
 func TestResolveDeclaredFiles_EnforcesTheStoredExecutableMode(t *testing.T) {
 	t.Parallel()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -762,9 +696,9 @@ func TestResolveDeclaredFiles_SearchSkipsAbsentNames(t *testing.T) {
 
 // searchFixture builds an installer over a temp tools dir and writes a
 // version tree, returning the installer and that tree. The two file lists
-// are kept apart because the search reads the EXECUTE BIT: tar and unzip
-// preserve archive modes, so a fixture that marks its README executable is
-// not the artifact it claims to be.
+// are kept apart because the search reads the EXECUTE BIT: extraction keeps
+// an archive member's execute bits, so a fixture that marks its README
+// executable is not the artifact it claims to be.
 func searchFixture(t *testing.T, exec, plain []string) (*installer, string) {
 	t.Helper()
 	toolsDir := t.TempDir()
@@ -788,4 +722,83 @@ func searchFixture(t *testing.T, exec, plain []string) (*installer, string) {
 		write(f, 0o644)
 	}
 	return &installer{toolsDir: toolsDir, output: func(string) {}}, versDir
+}
+
+// TestExtractArtifact_GrantsNoPrivilegeTheArchiveRecords pins F5's two root
+// escalations: GNU tar run as root keeps a member's setuid bit and creates a
+// device node the archive declares, whatever --no-same-owner says.
+func TestExtractArtifact_GrantsNoPrivilegeTheArchiveRecords(t *testing.T) {
+	t.Parallel()
+	t.Run("setuid", func(t *testing.T) {
+		t.Parallel()
+		destDir := extractTestTar(t, &tar.Header{Typeflag: tar.TypeReg, Name: "tool", Mode: 0o4777, Size: 3}, nil)
+		fi, err := os.Lstat(filepath.Join(destDir, "tool"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode(); got&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 || got.Perm() != 0o755 {
+			t.Errorf("a 4777 member landed as %v, want -rwxr-xr-x", got)
+		}
+	})
+	t.Run("char device", func(t *testing.T) {
+		t.Parallel()
+		var extractErr error
+		destDir := extractTestTar(t, &tar.Header{Typeflag: tar.TypeChar, Name: "null", Mode: 0o666, Devmajor: 1, Devminor: 3}, &extractErr)
+		if extractErr == nil || !strings.Contains(extractErr.Error(), "null") {
+			t.Errorf("extractArtifact = %v, want a refusal naming the device entry", extractErr)
+		}
+		if _, err := os.Lstat(filepath.Join(destDir, "null")); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Lstat(null) = %v, want not-exist: the device node was created", err)
+		}
+	})
+}
+
+// extractTestTar extracts a tar holding hdr (and hdr.Size bytes of body) into a
+// fresh directory and returns it. With errp nil any extraction error is fatal;
+// otherwise it is stored there.
+func extractTestTar(t *testing.T, hdr *tar.Header, errp *error) string {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(bytes.Repeat([]byte("x"), int(hdr.Size))); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	base := t.TempDir()
+	artifact := filepath.Join(base, "tool.tar")
+	if err := os.WriteFile(artifact, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	destDir := filepath.Join(base, "dest")
+	if err := os.Mkdir(destDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := extractArtifact(t.Context(), openArtifact(t, artifact), formatTar, destDir, "tool")
+	switch {
+	case errp != nil:
+		*errp = err
+	case err != nil:
+		t.Fatalf("extractArtifact: %v", err)
+	}
+	return destDir
+}
+
+// openArtifact opens path the way installFromSpec does, as one descriptor.
+func openArtifact(t *testing.T, path string) *io.SectionReader {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	fi, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return io.NewSectionReader(f, 0, fi.Size())
 }

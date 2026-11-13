@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/httpx/v5"
+	"github.com/cplieger/go/httpclient"
 )
 
 func githubTestClient(srv *httptest.Server, token func(context.Context) (string, error)) *http.Client {
@@ -324,9 +324,9 @@ func TestGitHubAPITransport_OtherForbiddenPassesThrough(t *testing.T) {
 	v := newTestVersionResolver(githubTestClient(srv, nil))
 
 	_, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, nil)
-	se, ok := errors.AsType[*httpx.StatusError](err)
+	se, ok := errors.AsType[*httpclient.StatusError](err)
 	if !ok || se.Code != http.StatusForbidden {
-		t.Fatalf("Latest(aqua:owner/repo) = %v (%T), want an *httpx.StatusError with code 403", err, err)
+		t.Fatalf("Latest(aqua:owner/repo) = %v (%T), want an *httpclient.StatusError with code 403", err, err)
 	}
 	if _, ok := errors.AsType[*GitHubRateLimitError](err); ok {
 		t.Errorf("Latest(aqua:owner/repo) = %v, classified as a rate limit with quota remaining", err)
@@ -457,8 +457,8 @@ func TestGitHubAPITransport_PlainForbiddenIsNotARateLimit(t *testing.T) {
 	v := newTestVersionResolver(githubTestClient(srv, nil))
 
 	_, err := v.Latest(t.Context(), &Tool{Source: "aqua:owner/repo"}, nil)
-	if se, ok := errors.AsType[*httpx.StatusError](err); !ok || se.Code != http.StatusForbidden {
-		t.Errorf("Latest(aqua:owner/repo) = %v (%T), want an *httpx.StatusError with code 403", err, err)
+	if se, ok := errors.AsType[*httpclient.StatusError](err); !ok || se.Code != http.StatusForbidden {
+		t.Errorf("Latest(aqua:owner/repo) = %v (%T), want an *httpclient.StatusError with code 403", err, err)
 	}
 	if errors.Is(err, ErrGitHubRateLimited) {
 		t.Errorf("Latest(aqua:owner/repo) = %v, classified as a rate limit with quota remaining and no secondary message", err)

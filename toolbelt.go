@@ -21,11 +21,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/cplieger/ssrf/v4"
+	"github.com/cplieger/go/ssrf"
+	"github.com/cplieger/toolbelt/v3/internal/custody"
 )
 
 // Source prefixes for Tool.Source. A source is "<kind>:<ref>" except
@@ -46,7 +49,7 @@ const (
 // version (or one that fails to parse) is an error at engine start.
 const ManifestVersion = 2
 
-// Config wires an Engine. ConfigDir and ToolsDir are required.
+// Config wires an Engine. ConfigDir and ToolsDir are required, with no ".." component.
 type Config struct {
 	// OnJobChanged, when non-nil, receives every job state transition
 	// (queued, running, done, failed, cancelled). Views carry no output
@@ -66,7 +69,8 @@ type Config struct {
 	GitHubToken func(ctx context.Context) (string, error)
 	// Logger receives engine-level log lines. Nil means slog.Default().
 	Logger *slog.Logger
-	// Seed is the manifest written when none exists (fresh volume).
+	// Seed is the manifest written when none exists: by New on a fresh
+	// volume, and by SyncManifest when it adopts a removed tools.json.
 	// Nil seeds an empty manifest. See DefaultSeed.
 	Seed *Manifest
 	// ConfigDir holds tools.json + tools-state.json (the persistent
@@ -96,6 +100,11 @@ type Config struct {
 	// System names image-baked binaries surfaced read-only in
 	// Inventory's System group (informational; not managed).
 	System []string
+	// TrustedUIDs lists users, beside root and this process's uid, whose
+	// ownership of, or write access to, a managed root or a directory above
+	// it VerifyRootIntegrity accepts: an account the operator knows is
+	// already privileged on the host. New rejects a negative entry.
+	TrustedUIDs []int
 	// KeepVersions is how many SUPERSEDED versions of a tool to retain
 	// under <ToolsDir>/opt/<name>/ (the current version is always kept),
 	// so a bad update can be rolled back. 0 means DefaultKeepVersions; a
@@ -198,10 +207,30 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 			limits: &rateLimitGate{},
 		},
 		CheckRedirect: ssrf.SafeRedirectPolicy(nil),
-		// Per-attempt bound: retry loops (httpx.GetBytes / httpx.Do) sit
+		// Per-attempt bound: retry loops (httpclient.GetBytes / httpclient.Do) sit
 		// OUTSIDE client.Do, so this caps one attempt, not the sequence.
 		Timeout: 15 * time.Minute,
 	}
+}
+
+// validate checks the fields New refuses before it touches the disk.
+func (cfg *Config) validate() error {
+	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
+		return errors.New("toolbelt: ConfigDir and ToolsDir are required")
+	}
+	// The root-integrity walk resolves ".." after a symlink while every managed
+	// path is Join-cleaned, so the two would judge and write different directories.
+	for _, f := range []struct{ name, dir string }{{"ConfigDir", cfg.ConfigDir}, {"ToolsDir", cfg.ToolsDir}} {
+		if slices.Contains(strings.Split(f.dir, "/"), "..") {
+			return fmt.Errorf("toolbelt: %s %q must not contain a \"..\" component", f.name, f.dir)
+		}
+	}
+	for _, uid := range cfg.TrustedUIDs {
+		if uid < 0 {
+			return fmt.Errorf("toolbelt: TrustedUIDs entry %d is not a uid", uid)
+		}
+	}
+	return nil
 }
 
 // New constructs and starts an Engine: initializes the manifest files
@@ -212,9 +241,10 @@ func newEngineClient(token func(context.Context) (string, error)) *http.Client {
 // an unfit managed root refuses construction with ErrRootIntegrity. New
 // is the seam because Inventory and EnsureInstalled probe synchronously too.
 func New(cfg *Config) (*Engine, error) {
-	if cfg.ConfigDir == "" || cfg.ToolsDir == "" {
-		return nil, errors.New("toolbelt: ConfigDir and ToolsDir are required")
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
+	trust := custody.Trust{UIDs: slices.Clone(cfg.TrustedUIDs)}
 	log := cfg.Logger
 	if log == nil {
 		log = slog.Default()
@@ -227,7 +257,7 @@ func New(cfg *Config) (*Engine, error) {
 	// returned afterwards would leak (the caller gets a nil Engine and can
 	// never Close it).
 	if cfg.VerifyRootIntegrity {
-		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir, trust); err != nil {
 			return nil, fmt.Errorf("toolbelt: %w", err)
 		}
 	}
@@ -251,7 +281,7 @@ func New(cfg *Config) (*Engine, error) {
 	// skipped any root that was absent, and New created those through
 	// whatever mode the filesystem stores. Still before newJobQueue.
 	if cfg.VerifyRootIntegrity {
-		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir); err != nil {
+		if err := verifyRootIntegrity(log, cfg.ConfigDir, cfg.ToolsDir, trust); err != nil {
 			return nil, fmt.Errorf("toolbelt: %w", err)
 		}
 	}

@@ -4,7 +4,7 @@
 
 toolbelt lets your Go server install, update and remove the developer tools its users ask for, on a persistent volume, while it runs.
 
-It replaces the image rebuild or install script a web IDE or agent sandbox would otherwise need for every new CLI, language server or runtime. It runs on Linux amd64 and arm64, needs Go 1.27.2 or later and is licensed under Apache-2.0. At run time it depends on `expr-lang/expr`, `hashicorp/go-version`, `golang.org/x/mod` and eight libraries by the same author.
+It replaces the image rebuild or install script a web IDE or agent sandbox would otherwise need for every new CLI, language server or runtime. It runs on Linux amd64 and arm64 and is licensed under Apache-2.0. At run time it depends on `expr-lang/expr`, `hashicorp/go-version`, `golang.org/x/mod` and eight libraries by the same author.
 
 ## Why use it
 
@@ -72,9 +72,12 @@ Without `GitHubToken`, GitHub API requests go without a token, and GitHub allows
 - `New` and `Close` start and stop an engine. `Inventory`, `Search` and `SearchWithCounts` read the manifest, the install state and the catalog.
 - `Add`, `Patch`, `Install`, `Update`, `Remove`, `RemoveWithDependents` and `Reconcile` change the manifest or the disk, each through a job. `EnsureInstalled` installs a tool and waits for it.
 - `ParseManifest` checks a `tools.json` document the way the engine reads it, so you can refuse a bad one before writing it.
+- `ReplaceManifest` writes a whole `tools.json` a person edited, under the engine's store lock, and queues a reconcile. It refuses a document that drops an essential tool. `WriteManifest` writes one while no engine runs on that directory.
+- `SyncManifest` applies a `tools.json` another process changed. A consumer that polls the file calls it with what it read; see [How toolbelt works](docs/how-it-works.md#editing-toolsjson).
 - `Jobs`, `Wait` and `CancelJob` follow the job queue. `RefreshCatalog` and `CatalogInfo` refresh and describe the catalog.
-- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity`, `ErrQueueFull`, `ErrShuttingDown` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
+- `ErrNotFound`, `ErrDisabled`, `ErrHasDependents`, `ErrEssential`, `ErrManifestInvalid`, `ErrUnknownJob`, `ErrRefreshNotConfigured`, `ErrRootIntegrity`, `ErrQueueFull`, `ErrShuttingDown` and `ErrGitHubRateLimited` match with `errors.Is`. A failed job's `Err()` returns its error, and a job GitHub's rate limit failed carries the code `github_rate_limited`.
 - `httpapi.Handler` serves the engine over HTTP, and `cmd/toolcatalog` compiles and checks a catalog.
+- `pin` installs and runs one release at a pinned version and SHA-256.
 
 The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/toolbelt/v3).
 
@@ -103,6 +106,7 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/too
 - [The catalog](docs/catalog.md) covers runtime refresh and the `toolcatalog` compiler.
 - [The REST handler](docs/http-api.md) lists the routes, the refusal codes and the cache policy.
 - [Security](docs/security-model.md) describes what the engine checks and what it trusts.
+- [Installing a pinned release with pin](docs/pin.md) covers the `pin` package: what a start does, who may write the tree, retention and links.
 
 ## Credits
 
@@ -118,7 +122,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
-This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
+This project was built with AI assistance. The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 

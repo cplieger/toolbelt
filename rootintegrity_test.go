@@ -2,6 +2,7 @@ package toolbelt
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,10 +11,12 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
+	"github.com/cplieger/toolbelt/v3/internal/custody"
 )
 
 // wantFinding is one expected root-integrity finding: the exact path the
@@ -65,16 +68,12 @@ func assertFindings(t *testing.T, err error, want []wantFinding) {
 	}
 }
 
-// TestNew_VerifyRootIntegrityRefusesUnfitRoots pins the opt-in check on
-// the states that make a managed root a root-code-execution surface: the
-// engine EXECUTES launchers out of this tree during probing and puts
-// bin/ first on PATH, so a root that is a symlink elsewhere, that is not
-// a directory at all, or that a non-owner can write must refuse
-// construction rather than be probed.
-//
-// Each case writes the bad state into real temp dirs (real symlinks,
-// real chmod — a mode question is not worth mocking) and calls the real
-// New.
+// TestNew_VerifyRootIntegrityRefusesUnfitRoots pins the opt-in check on the
+// states that make a managed root a root-code-execution surface: the engine
+// executes launchers out of this tree while probing and puts bin/ first on PATH,
+// so a root that is a symlink elsewhere, not a directory, or writable by a
+// non-owner refuses construction. Each case writes the bad state into real temp
+// dirs (real symlinks, real chmod) and calls the real New.
 func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 	cases := map[string]struct {
 		// setup writes the bad state and returns what the check must
@@ -124,7 +123,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, toolsDir)
 				chmod(t, toolsDir, 0o775)
-				return []wantFinding{{toolsDir, "group- or other-writable (mode 0775)"}}
+				return []wantFinding{{toolsDir, "mode 0775, can be modified by gid"}}
 			},
 		},
 		"python interpreters dir is group-writable": {
@@ -132,7 +131,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				dir := filepath.Join(toolsDir, "python", "interpreters")
 				mkdirs(t, configDir, dir)
 				chmod(t, dir, 0o775)
-				return []wantFinding{{dir, "group- or other-writable (mode 0775)"}}
+				return []wantFinding{{dir, "mode 0775, can be modified by gid"}}
 			},
 		},
 		"npm modules dir is group-writable": {
@@ -140,7 +139,7 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				dir := filepath.Join(toolsDir, "npm", "lib", "node_modules")
 				mkdirs(t, configDir, dir)
 				chmod(t, dir, 0o770)
-				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
+				return []wantFinding{{dir, "mode 0770, can be modified by gid"}}
 			},
 		},
 		"npm lib dir is a symlink out of the tree": {
@@ -159,21 +158,50 @@ func TestNew_VerifyRootIntegrityRefusesUnfitRoots(t *testing.T) {
 				dir := filepath.Join(toolsDir, "python", "tools")
 				mkdirs(t, configDir, dir)
 				chmod(t, dir, 0o770)
-				return []wantFinding{{dir, "group- or other-writable (mode 0770)"}}
+				return []wantFinding{{dir, "mode 0770, can be modified by gid"}}
 			},
 		},
 		"bin dir is other-writable": {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, filepath.Join(toolsDir, "bin"))
 				chmod(t, filepath.Join(toolsDir, "bin"), 0o757)
-				return []wantFinding{{filepath.Join(toolsDir, "bin"), "group- or other-writable (mode 0757)"}}
+				return []wantFinding{{filepath.Join(toolsDir, "bin"), "mode 0757, can be modified by everyone"}}
 			},
 		},
 		"config dir is other-writable": {
 			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
 				mkdirs(t, configDir, toolsDir)
 				chmod(t, configDir, 0o707)
-				return []wantFinding{{configDir, "group- or other-writable (mode 0707)"}}
+				return []wantFinding{{configDir, "mode 0707, can be modified by everyone"}}
+			},
+		},
+		"bin dir is writable by group 0": {
+			// No group is trusted: a non-root member of group 0 could write the
+			// bin the engine executes.
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				if os.Getegid() != 0 {
+					t.Skip("needs gid 0 for the fixture's group")
+				}
+				bin := filepath.Join(toolsDir, "bin")
+				mkdirs(t, configDir, bin)
+				chmod(t, bin, 0o775)
+				return []wantFinding{{bin, "can be modified by gid 0"}}
+			},
+		},
+		"tools dir is owned by another user": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				mkdirs(t, configDir, toolsDir)
+				if err := os.Chown(toolsDir, strangerID, -1); err != nil {
+					t.Skipf("cannot hand the fixture to uid %d (%v)", strangerID, err)
+				}
+				return []wantFinding{{toolsDir, fmt.Sprintf("is owned by uid %d", strangerID)}}
+			},
+		},
+		"bin dir is under an ancestor others can write": {
+			setup: func(t *testing.T, configDir, toolsDir string) []wantFinding {
+				mkdirs(t, configDir, filepath.Join(toolsDir, "bin"))
+				chmod(t, filepath.Dir(toolsDir), 0o777)
+				return []wantFinding{{filepath.Join(toolsDir, "bin"), "can be modified by"}}
 			},
 		},
 		"tools dir is a regular file": {
@@ -363,7 +391,7 @@ func TestNew_VerifyRootIntegrityLogsRefusal(t *testing.T) {
 	if !logs.has("ERROR", "REFUSING to start", "config_dir="+configDir, "tools_dir="+toolsDir) {
 		t.Errorf("no structured refusal at Error; lines=%v", logs.lines)
 	}
-	if !logs.has("finding_count=1", "findings="+toolsDir+" is group- or other-writable (mode 0777)") {
+	if !logs.has("finding_count=1", "findings="+toolsDir+" is not under this process's exclusive control: "+toolsDir+", mode 0777, can be modified by ") {
 		t.Errorf("refusal does not name the offending path and reason in a field; lines=%v", logs.lines)
 	}
 }
@@ -440,10 +468,8 @@ func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
 
 			orig := probeWritable
 			t.Cleanup(func() { probeWritable = orig })
-			probeWritable = func(ctx context.Context, dir string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
-				if err := os.Chmod(widened, 0o770); err != nil {
-					return atomicfile.ProbeResult{}, err
-				}
+			probeWritable = func(ctx context.Context, dir string, opts ...filesafe.WriteOption) (filesafe.ProbeResult, error) {
+				chmod(t, widened, 0o770)
 				return orig(ctx, dir, opts...)
 			}
 
@@ -455,7 +481,7 @@ func TestNew_VerifyRootIntegrityJudgesTheRootsItCreates(t *testing.T) {
 				e.Close()
 				t.Fatal("New returned an Engine over a root it created group-writable")
 			}
-			assertFindings(t, err, []wantFinding{{path: widened, reason: "group- or other-writable (mode 0770)"}})
+			assertFindings(t, err, []wantFinding{{path: widened, reason: "mode 0770, can be modified by gid"}})
 		})
 	}
 }
@@ -472,7 +498,7 @@ func TestInspectRoots_ReportsOnly(t *testing.T) {
 	mkdirs(t, configDir, toolsDir)
 	chmod(t, toolsDir, 0o777)
 
-	if findings := inspectRoots(configDir, toolsDir); len(findings) != 1 {
+	if findings := inspectRoots(configDir, toolsDir, custody.Trust{}); len(findings) != 1 {
 		t.Fatalf("findings = %+v, want the one writable root", findings)
 	}
 	fi, err := os.Lstat(toolsDir)
@@ -506,7 +532,7 @@ func TestInspectRoots_ToleratesSymlinkedAncestor(t *testing.T) {
 	configDir := filepath.Join(root, "link", "config")
 	mkdirs(t, configDir)
 	toolsDir := filepath.Join(root, "link", "tools")
-	if findings := inspectRoots(configDir, toolsDir); len(findings) != 0 {
+	if findings := inspectRoots(configDir, toolsDir, custody.Trust{}); len(findings) != 0 {
 		t.Errorf("a volume behind a symlinked ancestor was refused: %+v", findings)
 	}
 }
@@ -532,6 +558,9 @@ func chmod(t *testing.T, path string, mode os.FileMode) {
 	}
 }
 
+// strangerID is a uid and gid no test process holds.
+const strangerID = 54321
+
 func symlink(t *testing.T, target, link string) {
 	t.Helper()
 	if err := os.Symlink(target, link); err != nil {
@@ -543,5 +572,137 @@ func writeFile(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(fmt.Errorf("write %s: %w", path, err))
+	}
+}
+
+// TestNew_VerifyRootIntegrityHonoursTrustedUIDs grants a stranger write
+// through a real POSIX.1e list, whose mask makes the mode read 0775: the
+// check names the user, and accepts it once TrustedUIDs declares it.
+func TestNew_VerifyRootIntegrityHonoursTrustedUIDs(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	toolsDir := filepath.Join(root, "tools")
+	mkdirs(t, configDir, toolsDir)
+	if err := grantUserWrite(toolsDir, strangerID); err != nil {
+		t.Skipf("this filesystem takes no POSIX.1e list: %v", err)
+	}
+	fi, err := os.Lstat(toolsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o775 {
+		t.Fatalf("INVALID: the list left mode %04o, want the mask in the group bits (0775)", perm)
+	}
+
+	_, err = New(&Config{ConfigDir: configDir, ToolsDir: toolsDir, VerifyRootIntegrity: true, Logger: quietLogger()})
+	assertFindings(t, err, []wantFinding{{toolsDir, fmt.Sprintf("can be modified by uid %d", strangerID)}})
+
+	e, err := New(&Config{
+		ConfigDir: configDir, ToolsDir: toolsDir, VerifyRootIntegrity: true,
+		TrustedUIDs: []int{strangerID}, Logger: quietLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New refused a writer TrustedUIDs declares: %v", err)
+	}
+	e.Close()
+}
+
+// grantUserWrite sets path's access list to u::rwx, u:uid:rwx, g::r-x,
+// m::rwx, o::r-x.
+func grantUserWrite(path string, uid int) error {
+	entry := func(tag, perm uint16, id uint32) []byte {
+		b := binary.LittleEndian.AppendUint16(nil, tag)
+		b = binary.LittleEndian.AppendUint16(b, perm)
+		return binary.LittleEndian.AppendUint32(b, id)
+	}
+	const undefined = 0xFFFFFFFF
+	blob := binary.LittleEndian.AppendUint32(nil, 2)
+	for _, e := range [][]byte{
+		entry(0x01, 7, undefined), entry(0x02, 7, uint32(uid)), entry(0x04, 5, undefined),
+		entry(0x10, 7, undefined), entry(0x20, 5, undefined),
+	} {
+		blob = append(blob, e...)
+	}
+	return syscall.Setxattr(path, "system.posix_acl_access", blob, 0)
+}
+
+// TestNew_VerifyRootIntegrityReportsOneFindingPerRoot pins that a root
+// failing two legs is reported once, by the first: consumers count
+// findings per directory.
+func TestNew_VerifyRootIntegrityReportsOneFindingPerRoot(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	toolsDir := filepath.Join(root, "tools")
+	outside := filepath.Join(root, "outside")
+	mkdirs(t, configDir, toolsDir, filepath.Join(outside, "bin"))
+	chmod(t, filepath.Join(outside, "bin"), 0o777)
+	symlink(t, outside, filepath.Join(toolsDir, "python"))
+
+	_, err := New(&Config{ConfigDir: configDir, ToolsDir: toolsDir, VerifyRootIntegrity: true, Logger: quietLogger()})
+	detail, ok := errors.AsType[*RootIntegrityError](err)
+	if !ok {
+		t.Fatalf("New = %v, want a *RootIntegrityError", err)
+	}
+	bin := filepath.Join(toolsDir, "python", "bin")
+	var reasons []string
+	for _, f := range detail.Findings {
+		if f.Path == bin {
+			reasons = append(reasons, f.Reason)
+		}
+	}
+	if len(reasons) != 1 || !strings.Contains(reasons[0], "mode 0777, can be modified by") {
+		t.Errorf("findings for %s = %q, want one, the writable leg", bin, reasons)
+	}
+}
+
+func TestNew_RefusesANegativeTrustedUID(t *testing.T) {
+	root := t.TempDir()
+	_, err := New(&Config{
+		ConfigDir: filepath.Join(root, "config"), ToolsDir: filepath.Join(root, "tools"),
+		TrustedUIDs: []int{1000, -1},
+	})
+	if err == nil || err.Error() != "toolbelt: TrustedUIDs entry -1 is not a uid" {
+		t.Errorf("New = %v, want the negative uid refused", err)
+	}
+	if _, serr := os.Stat(filepath.Join(root, "config")); serr == nil {
+		t.Error("New created the config dir before refusing its Config")
+	}
+}
+
+func TestNew_RefusesADotDotRoot(t *testing.T) {
+	root := t.TempDir()
+	tests := map[string]struct {
+		cfg   *Config
+		field string
+	}{
+		"config dir, inside": {&Config{ConfigDir: root + "/link/../config", ToolsDir: root + "/tools"}, "ConfigDir"},
+		"config dir, ending": {&Config{ConfigDir: root + "/config/x/..", ToolsDir: root + "/tools"}, "ConfigDir"},
+		"tools dir, inside":  {&Config{ConfigDir: root + "/config", ToolsDir: root + "/link/../tools"}, "ToolsDir"},
+		"tools dir, ending":  {&Config{ConfigDir: root + "/config", ToolsDir: root + "/tools/x/.."}, "ToolsDir"},
+		"both dirs":          {&Config{ConfigDir: root + "/x/../config", ToolsDir: root + "/x/../tools"}, "ConfigDir"},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := New(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), "toolbelt: "+tc.field+" ") || !strings.Contains(err.Error(), `must not contain a ".." component`) {
+				t.Errorf("New = %v, want the dot-dot %s refused", err, tc.field)
+			}
+		})
+	}
+	if _, serr := os.Stat(filepath.Join(root, "config")); serr == nil {
+		t.Error("New created the config dir before refusing its Config")
+	}
+}
+
+// TestManagedDirs_IsTheJudgedSet freezes the directories the integrity
+// check judges: a consumer's boot repair tightens exactly these.
+func TestManagedDirs_IsTheJudgedSet(t *testing.T) {
+	got := managedDirs("/t")
+	want := []string{
+		"/t/bin", "/t/opt", "/t/npm", "/t/npm/bin", "/t/npm/lib", "/t/npm/lib/node_modules",
+		"/t/python", "/t/python/bin", "/t/python/tools", "/t/python/interpreters",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("managedDirs = %q, want %q", got, want)
 	}
 }

@@ -2,6 +2,8 @@
 
 This page explains the files the engine keeps, the life of a tool, how dependencies are handled and what each engine call does. It is for a developer wiring toolbelt into a server.
 
+The `pin` package is separate from the engine: it installs one pinned release into its own tree under its own `Root`, as [Installing a pinned release with pin](pin.md) describes.
+
 ## Three files
 
 The engine uses three data files. The manifest and the state live under `ConfigDir` on your persistent volume. The catalog is read from `Config.CatalogPath`, usually baked into your image, and a refreshed copy is cached under `ConfigDir`.
@@ -12,7 +14,24 @@ The engine uses three data files. The manifest and the state live under `ConfigD
 | `tools-state.json` | the engine | what is installed, the binary names each tool owns, the last error |
 | the file at `Config.CatalogPath`, plus `tool-catalog.cached.json` under `ConfigDir` | your image build, and the engine once a runtime refresh succeeds | install knowledge: sources, download templates, checksum locations, dependencies, the registries' license texts |
 
-The engine reads `tools.json` again on every operation, so a hand edit takes effect on the next call. It accepts only manifest schema version 2. Any other version fails `New`, and the engine never rewrites or backs up a manifest it does not recognise.
+It accepts only manifest schema version 2. Any other version fails `New`, and the engine never rewrites or backs up a manifest it does not recognise.
+
+## Editing tools.json
+
+The engine reads `tools.json` again on every operation, so a valid hand edit takes effect on the next call. The engine keeps the last manifest it wrote or adopted, called the applied manifest, and answers from it whenever the file is absent or cannot be read:
+
+- A read (an inventory, a reconcile plan) gets the applied manifest. An absent or broken `tools.json` is never read as an empty manifest, so a reconcile never removes every installed tool because the file was missing for a moment. An editor that saves by renaming the old file away leaves exactly that moment.
+- An engine write (an install, a patch) over an absent file builds on the applied manifest. Over a file it cannot read, it is refused and writes nothing, so the person's bytes are kept.
+
+The applied manifest moves only when the engine writes the file or when you call `SyncManifest`:
+
+- `SyncManifest(seen, kind)` takes what your own read of the file found: its bytes, or nil when it found no regular file, and its kind (`SeenValid`, `SeenAbsent` or `SeenUnreadable`). When the file no longer holds that read, it does nothing. A valid edit is applied and a reconcile is queued. An absence is replaced by the configured seed, written back, and a reconcile is queued, which removes the tools the seed does not list. An unreadable file is refused, and its error matches `ErrManifestInvalid` or `filesafe.ErrNotRegular`.
+- If you poll the file, pass an absent or unreadable read only once two consecutive polls saw it. A save caught in the middle is then never taken for a removal.
+- A consumer that never calls `SyncManifest` still applies valid hand edits at the next call, and keeps working on the applied manifest while the file is absent or broken.
+
+To write the file for a person, use `ReplaceManifest(content, check)` while the engine runs. It writes the bytes as given under the store lock, so no install can write over them or be written over, and queues a reconcile. `check` sees the bytes on disk first and can refuse a stale save. It refuses a document `ParseManifest` refuses, and one that drops a tool the catalog marks essential (`ErrEssential`). With no engine running, `WriteManifest` validates and writes the file the same way, without the catalog check.
+
+A FIFO or another non-regular file at `tools.json` is refused at once, with an error matching `filesafe.ErrNotRegular`.
 
 ## The life of a tool
 
@@ -61,7 +80,7 @@ Disabling an essential tool still works. It uninstalls the files and keeps the e
 ## Engine calls
 
 - `New(cfg *Config) (*Engine, error)` starts an engine. It writes the seed manifest when none exists and starts the job worker. It also writes and removes a test file in `ConfigDir` before the worker starts. When that write fails, or when the filesystem widens the file's mode, for example through an inherited ACL, `New` returns an error naming the directory. When only the cleanup of that file fails, it logs a warning and starts. `Close()` stops the catalog schedule and the worker, cancels the running job and returns once they have stopped.
-- `Inventory() (*Inventory, error)` returns every manifest entry joined with its install state, the system group from `Config.System`, the Debian packages present with no manifest entry, and the active job.
+- `Inventory() (*Inventory, error)` returns every manifest entry joined with its install state, the system group from `Config.System`, the Debian packages present with no manifest entry, and the active job. Each installed row's `commands` names what it puts on PATH: the bin names the engine linked for it or, for an `apt:` row, the files dpkg records it placing directly in `/usr/bin`, `/usr/sbin`, `/bin` or `/sbin`. A library package lists none.
 - `Search(q string) []CatalogEntry` searches the catalog and hides names already in the manifest. An empty query returns the catalog entries marked `featured`, sorted by name.
 - `SearchWithCounts(q string) SearchCounts` answers one query from the catalog, the uninstallable entries and the Debian package index at once. `Search`, `SearchUnavailable` and `SearchApt` each return one part of it. Each part carries its match count before the cut, and `AptState` says whether the Debian index is `unavailable`, `indexing` or `available`. That lets a client say "still indexing" rather than reporting a package as missing. `SearchApt`'s own bool treats the first two as one.
 - `Add(ctx, *AddRequest) (*Job, error)` records a new tool and starts its install. With `Disabled: true` it adds a template instead, starts no job and returns a nil job.

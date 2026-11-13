@@ -316,7 +316,6 @@ func (q *jobQueue) dropQueuedLocked(j *job, cause CancelCause) {
 	j.state = JobCancelled
 	j.ended = time.Now()
 	q.pushRecentLocked(j)
-	q.notifyLocked(j)
 }
 
 // Active returns the running (or oldest queued) job, if any.
@@ -489,7 +488,6 @@ func (q *jobQueue) worker() {
 		q.mu.Lock()
 		q.active = nil
 		q.pushRecentLocked(j)
-		q.notifyLocked(j)
 		q.mu.Unlock()
 	}
 }
@@ -578,8 +576,9 @@ func (q *jobQueue) runOne(ctx context.Context, j *job) {
 }
 
 // pushRecentLocked is a job's one terminal publication: it appends to
-// history with the cap applied, records the terminal view and releases
-// the job's waiters. Caller holds mu.
+// history with the cap applied, records the terminal view, tells
+// onChanged, and only then releases the job's waiters, so a Wait return
+// means the consumer already saw the terminal state. Caller holds mu.
 func (q *jobQueue) pushRecentLocked(j *job) {
 	q.recent = append(q.recent, j)
 	if len(q.recent) > jobHistory {
@@ -592,6 +591,7 @@ func (q *jobQueue) pushRecentLocked(j *job) {
 	// EnsureInstalled) want the lines for logs and error context.
 	j.final = j.view(true)
 	q.terminal[j.id] = j.final
+	q.notifyLocked(j)
 	close(j.done)
 	// Bound the map: keep terminal states for at most 4x the history
 	// window by evicting ids that fell out of recent long ago.

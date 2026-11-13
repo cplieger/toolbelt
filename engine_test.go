@@ -1881,8 +1881,8 @@ func TestInstallAqua_SymlinkEscapeRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	final := waitJob(t, e, job.ID)
-	if final.State != JobFailed || !strings.Contains(final.Error, "escapes") {
-		t.Errorf("job = %+v, want symlink-escape failure", final)
+	if final.State != JobFailed || !strings.Contains(final.Error, "unpack: bin/tool: symlink target") {
+		t.Errorf("job = %+v, want the extraction to refuse the symlink", final)
 	}
 	if _, err := os.Lstat(filepath.Join(e.toolsDir, "bin", "tool")); !os.IsNotExist(err) {
 		t.Error("escaping symlink was published to bin/")
@@ -2090,7 +2090,7 @@ type logCapture struct {
 	mu    sync.Mutex
 }
 
-func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
+func (*logCapture) Enabled(context.Context, slog.Level) bool { return true }
 
 func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
 	var b strings.Builder
@@ -2297,7 +2297,7 @@ func TestVerifyArtifact_DeclaredWithoutSourceRefuses(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := in.verifyArtifact(t.Context(), "tool", "v1", artifact, tc.spec)
+			got, err := in.verifyArtifact(t.Context(), "tool", "v1", downloaded{data: openArtifact(t, artifact), asset: "artifact"}, tc.spec)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Errorf("verifyArtifact = %q, %v; want error containing %q", got, err, tc.wantErr)
@@ -2336,7 +2336,7 @@ func TestPruneOldVersions_Retention(t *testing.T) {
 			ages := map[string]time.Duration{
 				"v0.9.0": 96 * time.Hour, "v1.0.0": 72 * time.Hour,
 				"v2.0.0": 48 * time.Hour, "v3.0.0": 0,
-				"v3.0.0" + stagingSuffix: 0, "v2.0.0" + backupSuffix: 0,
+				".v3.0.0" + stagingSuffix: 0, ".v2.0.0" + backupSuffix: 0,
 			}
 			for name, age := range ages {
 				p := filepath.Join(root, name)

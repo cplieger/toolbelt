@@ -62,6 +62,7 @@ var aptBasePriorities = map[string]bool{
 // answer, and this engine knows when it ran one — a TTL would either
 // serve a stale list right after an install or re-enumerate for nothing.
 type aptDiscovery struct {
+	cmds   map[string][]string // per-package commands, filled lazily by commands
 	cached []AptPackage
 	mu     sync.Mutex
 	loaded bool
@@ -73,6 +74,7 @@ func (d *aptDiscovery) Invalidate() {
 	d.mu.Lock()
 	d.loaded = false
 	d.cached = nil
+	d.cmds = nil
 	d.mu.Unlock()
 }
 

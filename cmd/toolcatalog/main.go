@@ -31,7 +31,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/cplieger/toolbelt/v3"
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 func main() {
@@ -157,7 +157,8 @@ func readRequirements(path string) []string {
 		log.Fatalf("toolcatalog verify: read requirements: %v", err)
 	}
 	var names []string
-	for line := range strings.SplitSeq(string(data), "\n") {
+	// A leading byte-order mark is not a name: an editor may save one.
+	for line := range strings.SplitSeq(strings.TrimPrefix(string(data), "\ufeff"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -557,13 +558,11 @@ func resolveBackend(aquaDir, backend string) (string, *toolbelt.AquaPackage, err
 		if !ok {
 			return "", nil, errUnsupported
 		}
+		// backendSkip decides which loadAquaDef errors leave the tool
+		// unavailable, exactly as for aqua:.
 		aq, err := loadAquaDef(aquaDir, aquaRef)
 		if err != nil {
-			// The translation table names a package the pinned aqua
-			// registry does not carry, or carries in a shape the runtime
-			// cannot evaluate. Not fatal: the tool is simply unavailable,
-			// exactly as it was before the table existed.
-			return "", nil, errUnsupported
+			return "", nil, err
 		}
 		return "aqua:" + aquaRef, aq, nil
 	case "github":

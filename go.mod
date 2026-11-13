@@ -4,16 +4,18 @@ go 1.27.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/cplieger/atomicfile/v4 v4.2.0
-	github.com/cplieger/httpx/v5 v5.3.0
-	github.com/cplieger/keyenc v1.1.0
-	github.com/cplieger/pathinside/v2 v2.1.0
-	github.com/cplieger/runesafe/v3 v3.2.0
-	github.com/cplieger/scheduler/v4 v4.3.0
-	github.com/cplieger/ssrf/v4 v4.6.0
-	github.com/cplieger/webhttp/v4 v4.1.0
+	github.com/cplieger/go/filesafe v1.1.0
+	github.com/cplieger/go/httpclient v1.2.0
+	github.com/cplieger/go/httpserver v1.4.0
+	github.com/cplieger/go/keyenc v1.3.0
+	github.com/cplieger/go/pathinside v1.1.0
+	github.com/cplieger/go/scheduler v1.1.0
+	github.com/cplieger/go/ssrf v1.1.0
+	github.com/cplieger/go/textsafe v1.1.0
 	github.com/expr-lang/expr v1.17.8
 	github.com/hashicorp/go-version v1.9.0
-	go.yaml.in/yaml/v3 v3.0.6
+	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/mod v0.43.0
 )
+
+require github.com/cplieger/go/urlform v1.2.0 // indirect

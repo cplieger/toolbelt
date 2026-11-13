@@ -198,6 +198,14 @@ func TestProbeInstalled_ExecutesTheTool(t *testing.T) {
 			want: true, wantMode: "package",
 		},
 		{
+			name: "npm library package whose package.json carries a byte-order mark",
+			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
+				writeNpmPackage(t, e, "@size-limit/preset-app", utf8BOM+`{"name":"@size-limit/preset-app","version":"14.3.0"}`)
+				return Tool{Source: "npm:@size-limit/preset-app"}, ToolStatus{InstalledVersion: "14.3.0"}
+			},
+			want: true, wantMode: "package",
+		},
+		{
 			name: "npm library package at another version",
 			setup: func(t *testing.T, e *Engine) (Tool, ToolStatus) {
 				writeNpmPackage(t, e, "@size-limit/preset-app", `{"name":"@size-limit/preset-app","version":"14.2.0"}`)

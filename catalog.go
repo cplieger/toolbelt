@@ -448,11 +448,16 @@ type overlayDoc struct {
 	Entries map[string]CatalogEntry `json:"entries"`
 }
 
-// ApplyOverlay merges one overlay JSON document into the catalog.
-// Shared by cmd/toolcatalog (compile time: base + app overlays) and the
-// engine's catalog load/refresh pipeline (runtime: consumer overlay
-// files re-applied over every fetched catalog, so display patches
-// survive refreshes).
+// decodeOverlay decodes an overlay document, ignoring one leading UTF-8
+// byte-order mark.
+func decodeOverlay(data []byte) (overlayDoc, error) {
+	var ov overlayDoc
+	err := json.Unmarshal(stripBOM(data), &ov)
+	return ov, err
+}
+
+// ApplyOverlay merges one overlay JSON document into the catalog, ignoring one
+// leading UTF-8 byte-order mark.
 //
 // resolveAqua, when non-nil, loads an aqua install definition for a
 // source-bearing `aqua:` entry that does not embed one — the compile
@@ -461,8 +466,8 @@ type overlayDoc struct {
 // aqua entries must carry their definition inline (display-field
 // patches, the common runtime overlay, need no definition at all).
 func ApplyOverlay(c *Catalog, data []byte, resolveAqua func(ref string) (*AquaPackage, error)) error {
-	var ov overlayDoc
-	if err := json.Unmarshal(data, &ov); err != nil {
+	ov, err := decodeOverlay(data)
+	if err != nil {
 		return err
 	}
 	return applyOverlayDoc(c, ov, resolveAqua)

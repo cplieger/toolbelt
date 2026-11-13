@@ -2,7 +2,6 @@ package toolbelt
 
 import (
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -10,13 +9,14 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/cplieger/pathinside/v2"
+	"github.com/cplieger/go/pathinside"
+	"github.com/cplieger/toolbelt/v3/internal/custody"
 )
 
 // Root integrity: an opt-in prerequisite check (Config.VerifyRootIntegrity).
 // The install probe EXECUTES what it finds in the tool tree, and that
-// bin dir goes first on PATH, so a symlinked or group/other-writable
-// managed root is a root-code-execution surface for a root process.
+// bin dir goes first on PATH, so a managed root another account can write,
+// or redirect, is a root-code-execution surface for a root process.
 //
 // REPORT-ONLY (repair belongs to the consumer's entrypoint); absence is
 // not a finding (a fresh volume has almost none of these yet); a
@@ -28,8 +28,9 @@ type RootIntegrityFinding struct {
 	// Path is the offending directory as the check inspected it:
 	// ConfigDir, ToolsDir, or one of the directories beneath ToolsDir.
 	Path string
-	// Reason states what disqualified it, in operator terms ("is a
-	// symlink", "is group- or other-writable (mode 0775)").
+	// Reason states the first thing that disqualified it, in operator
+	// terms ("is a symlink", "is not under this process's exclusive
+	// control: /tools, mode 0775, can be modified by gid 1001").
 	Reason string
 }
 
@@ -49,7 +50,7 @@ func (e *RootIntegrityError) Error() string {
 }
 
 // Is makes errors.Is(err, ErrRootIntegrity) match.
-func (e *RootIntegrityError) Is(target error) bool { return target == ErrRootIntegrity }
+func (*RootIntegrityError) Is(target error) bool { return target == ErrRootIntegrity }
 
 // findingLines renders one "<path> <reason>" line per finding. The
 // message and the log field share it so an operator reading either sees
@@ -65,10 +66,10 @@ func findingLines(findings []RootIntegrityFinding) []string {
 // verifyRootIntegrity inspects the managed roots and, when any of them
 // is unfit, logs the refusal where an operator will see it and returns
 // the *RootIntegrityError naming every one. Nil means every root that
-// exists is a real directory, writable by its owner alone, that still
-// resolves inside the tool tree.
-func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string) error {
-	findings := inspectRoots(configDir, toolsDir)
+// exists is a real directory under the exclusive control of this process
+// (custody.Trust.Verify) that still resolves inside the tool tree.
+func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string, trust custody.Trust) error {
+	findings := inspectRoots(configDir, toolsDir, trust)
 	if len(findings) == 0 {
 		return nil
 	}
@@ -78,15 +79,20 @@ func verifyRootIntegrity(log *slog.Logger, configDir, toolsDir string) error {
 	return &RootIntegrityError{Findings: findings}
 }
 
-// inspectRoots judges every managed root: ConfigDir, ToolsDir, and the
-// managedDirs beneath it. Each parent is judged too, since it can redirect
-// the directory beneath it. ConfigDir is exempt from the
-// containment leg alone (it is legitimately outside ToolsDir), not from
-// the symlink, type or mode legs.
-func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
-	out, _ := inspectRootDir(configDir)
-	toolsFindings, toolsIsDir := inspectRootDir(toolsDir)
-	out = append(out, toolsFindings...)
+// inspectRoots judges every managed root, ConfigDir, ToolsDir and the
+// managedDirs beneath it, and reports at most one finding per root: the first
+// leg it fails. ConfigDir is exempt from the containment leg alone (it is
+// legitimately outside ToolsDir).
+func inspectRoots(configDir, toolsDir string, trust custody.Trust) []RootIntegrityFinding {
+	var out []RootIntegrityFinding
+	add := func(path, reason string) {
+		if reason != "" {
+			out = append(out, RootIntegrityFinding{Path: path, Reason: reason})
+		}
+	}
+	configReason, _ := inspectRootDir(configDir, trust)
+	add(configDir, configReason)
+	toolsReason, toolsIsDir := inspectRootDir(toolsDir, trust)
 
 	// Judged against the RESOLVED ToolsDir: a volume may sit behind a
 	// symlinked ancestor (/config -> /mnt/config), and comparing against
@@ -94,19 +100,20 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 	toolsRoot, contained := pathinside.Root(""), false
 	if toolsIsDir {
 		resolved, err := filepath.EvalSymlinks(toolsDir)
-		if err != nil {
-			out = append(out, RootIntegrityFinding{Path: toolsDir, Reason: "cannot be resolved: " + err.Error()})
-		} else {
+		if err != nil && toolsReason == "" {
+			toolsReason = "cannot be resolved: " + err.Error()
+		} else if err == nil {
 			toolsRoot, contained = pathinside.Root(resolved), true
 		}
 	}
+	add(toolsDir, toolsReason)
 
 	for _, path := range managedDirs(toolsDir) {
-		findings, isDir := inspectRootDir(path)
-		out = append(out, findings...)
-		if isDir && contained {
-			out = append(out, inspectContainment(toolsRoot, path)...)
+		reason, isDir := inspectRootDir(path, trust)
+		if reason == "" && isDir && contained {
+			reason = inspectContainment(toolsRoot, path)
 		}
+		add(path, reason)
 	}
 
 	slices.SortFunc(out, func(a, b RootIntegrityFinding) int {
@@ -118,33 +125,29 @@ func inspectRoots(configDir, toolsDir string) []RootIntegrityFinding {
 	return out
 }
 
-// inspectRootDir applies the per-path legs and reports whether the path
-// is a real directory (which is what makes the containment leg
-// meaningful for it).
-//
-// os.Lstat, never os.Stat: a root that IS a symlink must be refused, not
-// followed. Every failure other than not-exist is a finding — an
-// unreadable root is not assumed clean.
-func inspectRootDir(path string) ([]RootIntegrityFinding, bool) {
+// inspectRootDir returns the first leg path fails ("" for none) and
+// whether it is a real directory, which the containment leg needs. Lstat,
+// so a root that is a symlink is refused, not followed; an unreadable root
+// is not assumed clean. Writers are judged by principal, not mode bits:
+// under a POSIX.1e list the group bits are its mask, so a mode test would
+// refuse a writer TrustedUIDs declares.
+func inspectRootDir(path string, trust custody.Trust) (string, bool) {
 	fi, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// Nothing to judge: a fresh volume has almost none of these yet.
-		return nil, false
+		return "", false
 	case err != nil:
-		return []RootIntegrityFinding{{Path: path, Reason: "cannot be inspected: " + err.Error()}}, false
+		return "cannot be inspected: " + err.Error(), false
 	case fi.Mode()&os.ModeSymlink != 0:
-		return []RootIntegrityFinding{{Path: path, Reason: "is a symlink"}}, false
+		return "is a symlink", false
 	case !fi.IsDir():
-		return []RootIntegrityFinding{{Path: path, Reason: "is not a directory"}}, false
+		return "is not a directory", false
 	}
-	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
-		return []RootIntegrityFinding{{
-			Path:   path,
-			Reason: fmt.Sprintf("is group- or other-writable (mode %04o)", perm),
-		}}, true
+	if err := trust.Verify(path, true); err != nil {
+		return "is " + err.Error(), true
 	}
-	return nil, true
+	return "", true
 }
 
 // inspectContainment resolves a real directory and confirms it is still
@@ -154,16 +157,13 @@ func inspectRootDir(path string) ([]RootIntegrityFinding, bool) {
 //
 // The tree travels as a pathinside.Root constructed once by inspectRoots,
 // so the containment pair cannot be supplied transposed.
-func inspectContainment(toolsRoot pathinside.Root, path string) []RootIntegrityFinding {
+func inspectContainment(toolsRoot pathinside.Root, path string) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return []RootIntegrityFinding{{Path: path, Reason: "cannot be resolved: " + err.Error()}}
+		return "cannot be resolved: " + err.Error()
 	}
 	if !toolsRoot.Contains(resolved) {
-		return []RootIntegrityFinding{{
-			Path:   path,
-			Reason: "resolves to " + resolved + ", outside the tool tree",
-		}}
+		return "resolves to " + resolved + ", outside the tool tree"
 	}
-	return nil
+	return ""
 }

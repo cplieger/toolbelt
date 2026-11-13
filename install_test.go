@@ -19,6 +19,9 @@ import (
 	"testing/synctest"
 	"time"
 	"unicode/utf8"
+
+	"github.com/cplieger/go/httpclient"
+	"github.com/cplieger/toolbelt/v3/internal/retain"
 )
 
 // setgidParent returns a temp directory with S_ISGID set, having first
@@ -175,7 +178,7 @@ func TestExtractAndSwap_verifiesTheStoredModeOfThePublishedVersionTree(t *testin
 	}
 
 	spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "rg"}}}
-	versDir, _, err := in.extractAndSwap(t.Context(), "rg", "1.0.0", spec, artifact)
+	versDir, _, err := in.extractAndSwap(t.Context(), "rg", "1.0.0", spec, openArtifact(t, artifact))
 	if err != nil {
 		t.Fatalf("extractAndSwap: %v", err)
 	}
@@ -272,6 +275,31 @@ func TestDownloadOnce_failsOnATruncatedBody(t *testing.T) {
 	}
 	if strings.Contains(out.joined(), "downloaded") {
 		t.Errorf("a failed download reported success: %q", out.joined())
+	}
+}
+
+// TestDownloadOnce_refusesASuccessOtherThan200 pins that only a 200 carries the
+// artifact. httpclient.CheckStatus is nil for every 2xx, so a 204 or a 206
+// would otherwise read as a finished download with no file written, and it
+// must not be retried, since the same answer comes back.
+func TestDownloadOnce_refusesASuccessOtherThan200(t *testing.T) {
+	for _, status := range []int{http.StatusNoContent, http.StatusPartialContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(status)
+			}))
+			out := &collector{}
+			in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: out.add}
+			dest := filepath.Join(t.TempDir(), "artifact")
+
+			err := in.downloadOnce(t.Context(), srv.URL+"/tool.raw", dest)
+			if err == nil {
+				t.Fatalf("downloadOnce on a %d = nil, want a refusal", status)
+			}
+			if !httpclient.IsPermanent(err) {
+				t.Errorf("downloadOnce on a %d = %v, want a permanent error", status, err)
+			}
+		})
 	}
 }
 
@@ -789,7 +817,7 @@ func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t 
 			t.Fatal(err)
 		}
 		liveSpec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: "tool"}}}
-		versDir, declared, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", liveSpec, live)
+		versDir, declared, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", liveSpec, openArtifact(t, live))
 		if err != nil {
 			t.Fatalf("baseline publish: %v", err)
 		}
@@ -801,7 +829,7 @@ func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t 
 			t.Fatal(err)
 		}
 
-		_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+		_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, artifact))
 		if err == nil || !strings.Contains(err.Error(), "missing after extract") {
 			t.Fatalf("reinstall from a defective artifact = %v, want the missing declared file refused", err)
 		}
@@ -832,7 +860,7 @@ func TestExtractAndSwap_RefusesAnArtifactMissingADeclaredFileBeforePublishing(t 
 			t.Fatal(err)
 		}
 
-		_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+		_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, artifact))
 		if err == nil || !strings.Contains(err.Error(), "missing after extract") {
 			t.Fatalf("install from a defective artifact = %v, want the missing declared file refused", err)
 		}
@@ -878,7 +906,7 @@ func TestExtractAndSwap_RefusesADeclaredNameThatIsNotAPathComponent(t *testing.T
 			}
 			spec := &InstallSpec{Format: formatRaw, Files: []AquaFile{{Name: name}}}
 
-			_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, artifact)
+			_, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, artifact))
 			if err == nil || !strings.Contains(err.Error(), "not a path component") {
 				t.Fatalf("extractAndSwap(name %q) = %v, want the name refused", name, err)
 			}
@@ -903,7 +931,7 @@ func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *test
 	if err := os.WriteFile(first, []byte("#!/bin/sh\necho live\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	versDir, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, first)
+	versDir, _, err := in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, first))
 	if err != nil {
 		t.Fatalf("baseline publish: %v", err)
 	}
@@ -921,7 +949,7 @@ func TestExtractAndSwap_restoresThePreviousTreeWhenTheCommitBarrierFails(t *test
 		t.Fatal(err)
 	}
 
-	_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, second)
+	_, _, err = in.extractAndSwap(t.Context(), "tool", "1.0.0", spec, openArtifact(t, second))
 	if err == nil || !strings.Contains(err.Error(), "commit install") {
 		t.Fatalf("reinstall = %v, want the commit barrier failure", err)
 	}
@@ -1233,5 +1261,193 @@ func TestInstallNpm_CreatesTheModuleTreeFirst(t *testing.T) {
 		if got := storedDirMode(t, d); got != managedDirStoredMode {
 			t.Errorf("mode of %s = %v, want %v", d, got, managedDirStoredMode)
 		}
+	}
+}
+
+// TestPruneSuperseded_prunesReleaseTrees pins that a release: source's
+// versioned trees are retained like aqua's: release installs publish
+// opt/<name>/<version> too, so without a prune each update leaks a tree.
+func TestPruneSuperseded_prunesReleaseTrees(t *testing.T) {
+	e := newTestEngine(t, nil)
+	root := filepath.Join(e.inst.optDir(), "r")
+	for name, age := range map[string]time.Duration{"v3.0.0": 0, "v2.0.0": time.Hour, "v1.0.0": 2 * time.Hour} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(p, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e.pruneSuperseded("r", &Tool{Source: "release:github/o/r", Version: "v3.0.0"})
+
+	if _, err := os.Stat(filepath.Join(root, "v2.0.0")); err != nil {
+		t.Errorf("the retained predecessor was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "v1.0.0")); !os.IsNotExist(err) {
+		t.Errorf("stat of the oldest release tree = %v, want it pruned", err)
+	}
+}
+
+// tarGzWithRoot is tarGz with a "./" directory member dated mtime first, the
+// shape a release built with `tar -C dir .` carries.
+func tarGzWithRoot(t *testing.T, mtime time.Time, members map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "./", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: mtime}); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	for _, name := range slices.Sorted(maps.Keys(members)) {
+		content := members[name]
+		if err := tw.WriteHeader(&tar.Header{Name: "./" + name, Mode: 0o755, Size: int64(len(content)), ModTime: mtime}); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("Setup: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestInstallFromSpec_recordsTheActivationTime pins that a published version
+// directory carries its install time: retention ranks predecessors by it, and an
+// archive whose "./" member is dated 2019 would otherwise rank the newer
+// predecessor oldest and prune it.
+func TestInstallFromSpec_recordsTheActivationTime(t *testing.T) {
+	old := time.Date(2019, 1, 1, 0, 0, 0, 0, time.UTC)
+	assets := map[string][]byte{
+		"/v1.0.0.tar.gz": tarGz(t, map[string]string{"tool": "#!/bin/sh\necho 1\n"}),
+		"/v2.0.0.tar.gz": tarGzWithRoot(t, old, map[string]string{"tool": "#!/bin/sh\necho 2\n"}),
+		"/v3.0.0.tar.gz": tarGz(t, map[string]string{"tool": "#!/bin/sh\necho 3\n"}),
+	}
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(assets[r.URL.Path])
+	}))
+	in := &installer{toolsDir: t.TempDir(), client: srv.Client(), output: func(string) {}}
+	root := filepath.Join(in.optDir(), "tool")
+	for _, v := range []string{"v1.0.0", "v2.0.0", "v3.0.0"} {
+		spec := &InstallSpec{URL: srv.URL + "/" + v + ".tar.gz", Format: "tar.gz", Files: []AquaFile{{Name: "tool", Src: "tool"}}}
+		if _, _, err := in.installFromSpec(t.Context(), "tool", v, spec); err != nil {
+			t.Fatalf("installFromSpec(%s): %v", v, err)
+		}
+		if v == "v2.0.0" {
+			fi, err := os.Stat(filepath.Join(root, v))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := time.Since(fi.ModTime()); d < 0 || d > time.Minute {
+				t.Errorf("%s's directory mtime is %v, want its install time", v, fi.ModTime())
+			}
+		}
+	}
+
+	in.pruneOldVersions("tool", "v3.0.0", 1)
+
+	if _, err := os.Stat(filepath.Join(root, "v2.0.0")); err != nil {
+		t.Errorf("the most recently installed predecessor was pruned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "v1.0.0")); !os.IsNotExist(err) {
+		t.Errorf("stat of the oldest install = %v, want it pruned", err)
+	}
+}
+
+// DefaultKeepVersions is the count retain.Keep gives an unset KeepVersions.
+func TestDefaultKeepVersions_isRetainsDefault(t *testing.T) {
+	if got := retain.Keep(0); got != DefaultKeepVersions {
+		t.Errorf("retain.Keep(0) = %d, want DefaultKeepVersions (%d)", got, DefaultKeepVersions)
+	}
+}
+
+// A version may end in .old or .staging: residue names start with a dot,
+// which no version can, so such an active tree is never swept.
+func TestPruneOldVersions_keepsAnActiveVersionNamedLikeResidue(t *testing.T) {
+	for _, current := range []string{"v1.0.old", "nightly.staging"} {
+		in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+		root := filepath.Join(in.optDir(), "tool")
+		for _, n := range []string{current, "." + current + stagingSuffix, "." + current + backupSuffix} {
+			if err := os.MkdirAll(filepath.Join(root, n), managedDirMode); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		in.pruneOldVersions("tool", current, 1)
+
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != current {
+			t.Errorf("after pruning, opt/tool holds %v, want only the active %s", entries, current)
+		}
+	}
+}
+
+// A <version>.staging or <version>.old beside its own version's tree is a
+// crashed install's residue, not a predecessor: its mtime is the crash's.
+func TestPruneOldVersions_removesOldStyleResidue(t *testing.T) {
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+	root := filepath.Join(in.optDir(), "tool")
+	for name, age := range map[string]time.Duration{
+		"v3.0.0": 0, "v2.0.0": 48 * time.Hour, "v3.0.0" + stagingSuffix: 47 * time.Hour, "v2.0.0" + backupSuffix: time.Hour,
+	} {
+		p := filepath.Join(root, name)
+		if err := os.MkdirAll(p, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		when := time.Now().Add(-age)
+		if err := os.Chtimes(p, when, when); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	in.pruneOldVersions("tool", "v3.0.0", 1)
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if !slices.Equal(left, []string{"v2.0.0", "v3.0.0"}) {
+		t.Errorf("after pruning, opt/tool holds %v, want [v2.0.0 v3.0.0]", left)
+	}
+}
+
+// Residue never shares a name with a version: publishing v1.0 twice, the second
+// time over a backup, leaves a retained v1.0.old version alone.
+func TestPublishStaged_leavesAVersionNamedLikeItsBackup(t *testing.T) {
+	in := &installer{toolsDir: t.TempDir(), output: func(string) {}}
+	root := filepath.Join(in.optDir(), "tool")
+	versDir := filepath.Join(root, "v1.0")
+	kept := filepath.Join(root, "v1.0.old", "tool")
+	if err := os.MkdirAll(filepath.Dir(kept), managedDirMode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kept, []byte("v1.0.old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		staging := residue(versDir, stagingSuffix)
+		if err := os.MkdirAll(staging, managedDirMode); err != nil {
+			t.Fatal(err)
+		}
+		if err := in.publishStaged("tool", "v1.0", staging, versDir); err != nil {
+			t.Fatalf("publishStaged: %v", err)
+		}
+	}
+	if body, err := os.ReadFile(kept); err != nil || string(body) != "v1.0.old" {
+		t.Errorf("the retained v1.0.old version = %q, %v; want it untouched", body, err)
 	}
 }

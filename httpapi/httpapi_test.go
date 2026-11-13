@@ -686,7 +686,7 @@ func TestRoutes_EssentialRemovalIsACodedRefusal(t *testing.T) {
 	}
 }
 
-// TestCachePolicy_SuccessfulCancel covers webhttp.Ok, the one writer
+// TestCachePolicy_SuccessfulCancel covers httpserver.OK, the one writer
 // class the table above cannot reach without a job actually queued.
 func TestCachePolicy_SuccessfulCancel(t *testing.T) {
 	e, h := newHandler(t)

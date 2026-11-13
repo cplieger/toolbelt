@@ -11,23 +11,23 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/cplieger/atomicfile/v4"
+	"github.com/cplieger/go/filesafe"
 )
 
 // probeCall records what New asked the config-dir probe for.
 type probeCall struct {
 	dir  string
-	opts []atomicfile.Option
+	opts []filesafe.WriteOption
 }
 
 // stubProbe replaces the config-dir probe for one test. A root test process
 // writes through a 0o555 directory, so a refused probe has to be staged.
-func stubProbe(t *testing.T, res atomicfile.ProbeResult) *[]probeCall {
+func stubProbe(t *testing.T, res filesafe.ProbeResult) *[]probeCall {
 	t.Helper()
 	orig := probeWritable
 	t.Cleanup(func() { probeWritable = orig })
 	var calls []probeCall
-	probeWritable = func(_ context.Context, dir string, opts ...atomicfile.Option) (atomicfile.ProbeResult, error) {
+	probeWritable = func(_ context.Context, dir string, opts ...filesafe.WriteOption) (filesafe.ProbeResult, error) {
 		calls = append(calls, probeCall{dir: dir, opts: opts})
 		res.Dir = dir
 		return res, nil
@@ -49,23 +49,23 @@ func seededConfigDir(t *testing.T) string {
 }
 
 func TestNew_RefusesUnwritableConfigDir(t *testing.T) {
-	modeErr := fmt.Errorf("%w: probe: asked for 0600, filesystem stored 0670", atomicfile.ErrModeNotStored)
+	modeErr := fmt.Errorf("%w: probe: asked for 0600, filesystem stored 0670", filesafe.ErrModeNotStored)
 	cases := []struct {
 		name     string
-		res      atomicfile.ProbeResult
+		res      filesafe.ProbeResult
 		wantIs   error
 		wantText string
 	}{
 		{
 			name:     "read_only_volume",
-			res:      atomicfile.ProbeResult{Stage: atomicfile.ProbeStageCreate, Err: syscall.EROFS},
+			res:      filesafe.ProbeResult{Phase: filesafe.ProbePhaseCreate, Err: syscall.EROFS},
 			wantIs:   syscall.EROFS,
 			wantText: "is not writable (create probe file failed)",
 		},
 		{
 			name:     "mode_widening_acl",
-			res:      atomicfile.ProbeResult{Stage: atomicfile.ProbeStageCreate, Err: modeErr},
-			wantIs:   atomicfile.ErrModeNotStored,
+			res:      filesafe.ProbeResult{Phase: filesafe.ProbePhaseCreate, Err: modeErr},
+			wantIs:   filesafe.ErrModeNotStored,
 			wantText: "cannot keep an owner-only staging file, typically because an inherited ACL",
 		},
 	}
@@ -95,8 +95,8 @@ func TestNew_RefusesUnwritableConfigDir(t *testing.T) {
 // could not unlink proves the store's rename-published writes will succeed.
 func TestNew_WarnsOnProbeTeardownFailure(t *testing.T) {
 	dir := seededConfigDir(t)
-	stubProbe(t, atomicfile.ProbeResult{
-		Stage: atomicfile.ProbeStageRemove, Err: syscall.EBUSY, Name: ".probe-leftover", Leaked: true,
+	stubProbe(t, filesafe.ProbeResult{
+		Phase: filesafe.ProbePhaseRemove, Err: syscall.EBUSY, Name: ".probe-leftover", Leaked: true,
 	})
 	logs := &logCapture{}
 	e, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools"), Logger: slog.New(logs)})
@@ -114,7 +114,7 @@ func TestNew_WarnsOnProbeTeardownFailure(t *testing.T) {
 // WithMode(engineFileMode) leave the replayed file at 0o600.
 func TestNew_ProbesConfigDirWithEngineFileMode(t *testing.T) {
 	dir := seededConfigDir(t)
-	calls := stubProbe(t, atomicfile.ProbeResult{})
+	calls := stubProbe(t, filesafe.ProbeResult{})
 	e, err := New(&Config{ConfigDir: dir, ToolsDir: filepath.Join(dir, "tools")})
 	if err != nil {
 		t.Fatalf("New(ConfigDir=%q) = %v, want success", dir, err)
@@ -124,8 +124,8 @@ func TestNew_ProbesConfigDirWithEngineFileMode(t *testing.T) {
 		t.Fatalf("probe calls = %d, want 1", len(*calls))
 	}
 	replay := filepath.Join(t.TempDir(), "replay")
-	opts := append([]atomicfile.Option{atomicfile.WithMode(0o600)}, (*calls)[0].opts...)
-	if _, err := atomicfile.WriteFile(t.Context(), replay, []byte("x"), opts...); err != nil {
+	opts := append([]filesafe.WriteOption{filesafe.WithMode(0o600)}, (*calls)[0].opts...)
+	if _, err := filesafe.WriteFile(t.Context(), replay, []byte("x"), opts...); err != nil {
 		t.Fatalf("Setup: replay write: %v", err)
 	}
 	info, err := os.Stat(replay)

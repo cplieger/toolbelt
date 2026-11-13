@@ -259,7 +259,7 @@ func TestSystemBinDirs_ProductionSetIsTheImageContract(t *testing.T) {
 // Skipped where a binary is genuinely absent, so it never fails for the image's
 // own reasons.
 func TestSystemBinDirs_ResolveTheRealImageBinaries(t *testing.T) {
-	for _, name := range []string{"apt-get", "apt-cache", "apt-mark", "dpkg", "dpkg-query", "tar", "unzip", "gunzip", "xz", "bash"} {
+	for _, name := range []string{"apt-get", "apt-cache", "apt-mark", "dpkg", "dpkg-query", "xz", "zstd", "bash"} {
 		if _, err := os.Stat(filepath.Join("/usr/bin", name)); err != nil {
 			t.Logf("%s is not baked into this host; skipping it", name)
 			continue

@@ -36,9 +36,9 @@ var (
 	ErrUnknownJob = errors.New("unknown job")
 	// ErrRootIntegrity marks a New refused by the opt-in root-integrity
 	// check (Config.VerifyRootIntegrity): a managed root is a symlink,
-	// is not a directory, is group- or other-writable, cannot be
-	// inspected, or resolves outside the tool tree. *RootIntegrityError
-	// names each one.
+	// is not a directory, is owned or writable by another account (itself
+	// or a directory above it), cannot be inspected, or resolves outside
+	// the tool tree. *RootIntegrityError names each one.
 	ErrRootIntegrity = errors.New("managed root failed the integrity check")
 	// ErrQueueFull marks a job refused because the queue already holds its
 	// cap of waiting jobs. Transient: the request may be retried, and a
@@ -59,7 +59,7 @@ func (e *DependentsError) Error() string {
 }
 
 // Is makes errors.Is(err, ErrHasDependents) match.
-func (e *DependentsError) Is(target error) bool { return target == ErrHasDependents }
+func (*DependentsError) Is(target error) bool { return target == ErrHasDependents }
 
 // defaultBackends maps a source kind to the tool that must be installed
 // first for the backend to function at all.
@@ -163,11 +163,25 @@ func (e *Engine) toolInfo(name string, t *Tool, s *ToolStatus, installing bool, 
 	// gone.
 	if v.Installed {
 		v.Checksum = s.Checksum
+		v.Commands = e.rowCommands(t, s)
 	}
 	if latest := e.versions.Cached(t, e.aquaDef(t.Source)); latest != "" && latest != t.Version {
 		v.Latest = latest
 	}
 	return v
+}
+
+// rowCommands is ToolInfo.Commands for an installed row.
+func (e *Engine) rowCommands(t *Tool, s *ToolStatus) []string {
+	if pkg, ok := strings.CutPrefix(t.Source, SourceApt+":"); ok {
+		if e.aptSeen == nil {
+			return aptCommands(pkg)
+		}
+		return slices.Clone(e.aptSeen.commands(pkg))
+	}
+	cmds := slices.Concat(s.Bins, s.PMBins)
+	slices.Sort(cmds)
+	return slices.Compact(cmds)
 }
 
 // installedFor is the row-level installed flag. Enabled entries use the
@@ -1121,16 +1135,17 @@ func (e *Engine) executeJob(ctx context.Context, j *job, output func(string)) er
 // (resolveInstallTarget) rather than failing the whole job here.
 func (e *Engine) hydrateStatic() error {
 	c := e.cat()
-	err := e.store.MutateManifest(func(m *Manifest) error {
-		merged := false
-		for name := range m.Tools {
-			t := m.Tools[name]
-			if h, ok := hydrated(c, name, &t); ok {
-				m.Tools[name] = h
-				merged = true
-			}
-		}
-		if !merged {
+	// A read first: a merge is refused over a held unreadable tools.json even
+	// when it would write nothing, and every job runs this before planning.
+	m, err := e.store.LoadManifest()
+	if err != nil {
+		return err
+	}
+	if !hydrateRows(c, m) {
+		return nil
+	}
+	err = e.store.MutateManifest(func(m *Manifest) error {
+		if !hydrateRows(c, m) {
 			return errHydratedAlready
 		}
 		return nil
@@ -1139,6 +1154,20 @@ func (e *Engine) hydrateStatic() error {
 		return nil
 	}
 	return err
+}
+
+// hydrateRows hydrates every row of m the catalog completes and reports
+// whether any merged.
+func hydrateRows(c *Catalog, m *Manifest) bool {
+	merged := false
+	for name := range m.Tools {
+		t := m.Tools[name]
+		if h, ok := hydrated(c, name, &t); ok {
+			m.Tools[name] = h
+			merged = true
+		}
+	}
+	return merged
 }
 
 // errHydratedAlready aborts hydrateStatic's write when no row merged, so a
@@ -1778,11 +1807,11 @@ func (e *Engine) recordFailure(name string, cause error) error {
 }
 
 // pruneSuperseded applies the retention policy to a tool's versioned
-// install trees, after its new version is durably recorded. Only aqua
-// sources publish versioned trees; the other backends own a single
+// install trees, after its new version is durably recorded. Only aqua and
+// release sources publish versioned trees; the other backends own a single
 // unversioned dir that must never be swept.
 func (e *Engine) pruneSuperseded(name string, t *Tool) {
-	if kind, _, _ := strings.Cut(t.Source, ":"); kind != SourceAqua {
+	if kind, _, _ := strings.Cut(t.Source, ":"); kind != SourceAqua && kind != SourceRelease {
 		return
 	}
 	e.inst.pruneOldVersions(name, t.Version, e.keepVersions)
