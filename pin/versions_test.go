@@ -355,6 +355,11 @@ func TestSelectActiveExcludesAnUnparseableVersionAnswer(t *testing.T) {
 			if sel, ok := m.selectActive(t.Context()); ok {
 				t.Errorf("selectActive accepted %q (selected %q)", tc.out, sel.version)
 			}
+			// A probe that yields no version is spared as evidence, unlike a
+			// replaced artifact, which selection removes.
+			if !exists(filepath.Join(env.versionDir(pinnedVersion), sentinelName)) {
+				t.Errorf("selectActive removed %s after a probe that yielded no version, want it spared", pinnedVersion)
+			}
 		})
 	}
 }
@@ -798,8 +803,8 @@ func assertMismatchLoggedOnce(t *testing.T, logs *logRecorder, version string) {
 
 // TestRetentionPrunesAPredecessorWhoseArtifactAnswersAnotherVersion pins that a
 // replaced predecessor is deleted rather than spared. It can never serve, its
-// sentinel claims a version its artifact is not, and sparing it kept such
-// directories on the volume forever, each one a full install.
+// sentinel claims a version its artifact is not, and sparing it would keep it
+// on the volume forever, a full install with a false sentinel.
 func TestRetentionPrunesAPredecessorWhoseArtifactAnswersAnotherVersion(t *testing.T) {
 	logs := captureLogs(t)
 	env := newFakeEnv(t)

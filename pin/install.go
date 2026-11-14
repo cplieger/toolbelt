@@ -495,10 +495,12 @@ func (m *Manager) writeSentinel(dir string) error {
 // returns nil. The delete and the rename go through one [os.Root], because both
 // land at the same name in a directory another principal may write.
 func (m *Manager) publish(stage *stageTree) error {
-	// The destination exists only when selection refused the pinned directory
-	// and it is being replaced; the retained predecessor covers the crash window
-	// between the remove and the rename. The delete goes through an [os.Root], since
-	// this is the one entry here another principal may have replaced.
+	// The destination exists only when selection left the refused pinned
+	// directory in place (a failed probe or a wide entry), or when its removal of
+	// a replaced artifact failed and this delete is the second attempt; the
+	// retained predecessor covers the crash window between the remove and the
+	// rename. The delete goes through an [os.Root], since this is the one entry
+	// here another principal may have replaced.
 	root, err := os.OpenRoot(m.versionsDir)
 	if err != nil {
 		return fmt.Errorf("opening the installation root to clear the previous %s directory: %w", m.cfg.Version, err)
