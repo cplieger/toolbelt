@@ -606,6 +606,46 @@ func TestProbeAndAssertionsLeadPATHWithTheBinaryDir(t *testing.T) {
 	}
 }
 
+// TestEveryCommandCarriesTheConfiguredEnv pins Config.Env: the staged and the
+// published artifact's probe and assertions all see it, so a switch the caller
+// needs in every process running the artifact reaches the ones pin spawns.
+func TestEveryCommandCarriesTheConfiguredEnv(t *testing.T) {
+	const want = "TOOLKIT_NO_UPDATE=1"
+	env := newFakeEnv(t)
+	m := env.manager(func(c *Config) { c.Env = []string{want} })
+
+	var mu sync.Mutex
+	var probes, asserts int
+	var missing []string
+	inner := m.run
+	m.run = func(ctx context.Context, c *command) ([]byte, error) {
+		mu.Lock()
+		if slices.Equal(c.Args, env.release.ProbeArgs) {
+			probes++
+		} else {
+			asserts++
+		}
+		if !slices.Contains(c.Env, want) {
+			missing = append(missing, fmt.Sprintf("%s %v: %v", c.Path, c.Args, c.Env))
+		}
+		mu.Unlock()
+		return inner(ctx, c)
+	}
+
+	if err := m.Ensure(t.Context()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if probes < 2 || asserts < 2 {
+		t.Fatalf("probes = %d, assertions = %d; want each run against the staged and the published artifact", probes, asserts)
+	}
+	for _, cmd := range missing {
+		t.Errorf("command ran without %s: %s", want, cmd)
+	}
+}
+
 // TestPathEnvNeverAdmitsTheWorkingDirectory pins the degenerate half of the
 // lead-PATH rule. An empty PATH element means the working directory, so
 // appending an empty inherited PATH would leave a trailing separator and hand
@@ -880,6 +920,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 		c.Assertions = append(c.Assertions, Assertion{Name: "extra", Args: []string{"settings", "extra", "true"}})
 		c.TrustedUIDs = []int{4000}
 		c.FormerLinkDirs = []string{"old-bin"}
+		c.Env = []string{"TOOLKIT_NO_UPDATE=1"}
 	})
 	m, err := New(cfg)
 	if err != nil {
@@ -897,6 +938,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 	cfg.Purge.Artifacts[0] = "../escaped"
 	cfg.Purge.Names[0] = "mutated"
 	cfg.FormerLinkDirs[0] = "mutated"
+	cfg.Env[0] = "mutated"
 
 	checks := map[string]string{
 		"Digests":         m.cfg.Digests["amd64"],
@@ -905,6 +947,7 @@ func TestNewSnapshotsTheCallerConfig(t *testing.T) {
 		"Purge.Artifacts": m.cfg.Purge.Artifacts[0],
 		"Purge.Names":     m.cfg.Purge.Names[0],
 		"FormerLinkDirs":  m.cfg.FormerLinkDirs[0],
+		"Env":             m.cfg.Env[0],
 		"resolved digest": m.digest,
 	}
 	for field, got := range checks {

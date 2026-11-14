@@ -4,6 +4,7 @@ package pin
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -505,8 +506,9 @@ func TestSelectionAndRetentionAgreeOnEveryRefusal(t *testing.T) {
 			m := env.manager(mutate...)
 			m.checkCustody()
 
-			sel, selected := m.selectActive(t.Context())
+			// Retention first: selection removes a replaced artifact's directory.
 			retained := m.predecessorRole(t.Context(), pinnedVersion) == retain.Fallback
+			sel, selected := m.selectActive(t.Context())
 			if selected != retained {
 				t.Errorf("selectActive = %v but predecessorRole-is-fallback = %v for the same directory; retention promises the answers agree, and a retained version selection refuses is not a fallback",
 					selected, retained)
@@ -751,4 +753,153 @@ func TestReactivationRecordsTheActivationAndRetainsByIt(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("version directories = %v, want %v (the re-activated one and the one active before it)", got, want)
 	}
+}
+
+// replacedVersion is what a replaced artifact answers in the mismatch tests: a
+// newer release written over a pinned directory, the way a vendor's self-updater
+// renames its download over the running path.
+const replacedVersion = "2.15.0"
+
+// placeReplaced places a complete version directory whose artifact answers
+// replacedVersion while its name and sentinel still claim version.
+func (e *fakeEnv) placeReplaced(version string) string {
+	e.t.Helper()
+	dir := e.placeVersion(version)
+	if err := writeFakeBinary(filepath.Join(dir, e.release.Name), replacedVersion); err != nil {
+		e.t.Fatalf("writeFakeBinary: %v", err)
+	}
+	return dir
+}
+
+// mismatchReports returns the records at level that report version's artifact
+// answering replacedVersion.
+func mismatchReports(logs *logRecorder, level slog.Level, version string) []logRecord {
+	var out []logRecord
+	for _, r := range logs.at(level, "reported") {
+		if r.attrs["version"] == version && r.attrs["reported"] == replacedVersion {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// assertMismatchLoggedOnce pins the operator's view of one replaced directory:
+// one Error naming it and the version its artifact answered, and no Warn
+// repeating it from retention.
+func assertMismatchLoggedOnce(t *testing.T, logs *logRecorder, version string) {
+	t.Helper()
+	if got := mismatchReports(logs, slog.LevelError, version); len(got) != 1 {
+		t.Errorf("Error records reporting %s's artifact as %s = %v, want exactly one", version, replacedVersion, got)
+	}
+	if got := mismatchReports(logs, slog.LevelWarn, version); len(got) != 0 {
+		t.Errorf("Warn records reporting %s's artifact as %s = %v, want none beside the Error", version, replacedVersion, got)
+	}
+}
+
+// TestRetentionPrunesAPredecessorWhoseArtifactAnswersAnotherVersion pins that a
+// replaced predecessor is deleted rather than spared. It can never serve, its
+// sentinel claims a version its artifact is not, and sparing it kept such
+// directories on the volume forever, each one a full install.
+func TestRetentionPrunesAPredecessorWhoseArtifactAnswersAnotherVersion(t *testing.T) {
+	logs := captureLogs(t)
+	env := newFakeEnv(t)
+	env.placeVersion(pinnedVersion)
+	env.placeReplaced(prevVersion)
+	env.placeVersion(oldVersion)
+	m := env.manager()
+
+	if err := m.Ensure(t.Context()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if exists(env.versionDir(prevVersion)) {
+		t.Errorf("the replaced predecessor %s survived retention, so its false %s stays on the volume", prevVersion, sentinelName)
+	}
+	if !exists(env.versionDir(oldVersion)) {
+		t.Errorf("the working predecessor %s was pruned; it is the one fallback retention keeps", oldVersion)
+	}
+	if got := m.Version(); got != pinnedVersion {
+		t.Errorf("Version() = %q, want the pin %q", got, pinnedVersion)
+	}
+	assertMismatchLoggedOnce(t, logs, prevVersion)
+}
+
+// TestAReplacedPinIsRemovedWhenItCannotBeReinstalled pins the failed-install
+// half: the predecessor serves, and the replaced pin directory goes rather than
+// waiting, with its false sentinel, for an install that may never succeed.
+func TestAReplacedPinIsRemovedWhenItCannotBeReinstalled(t *testing.T) {
+	logs := captureLogs(t)
+	env := newFakeEnv(t)
+	env.placeReplaced(pinnedVersion)
+	env.placeVersion(prevVersion)
+	env.onFetch = func(io.Writer) error { return errors.New("injected fetch failure") }
+	m := env.manager()
+
+	if err := m.Ensure(t.Context()); err == nil {
+		t.Fatal("Ensure returned nil although the pin could not be reinstalled")
+	}
+	if got := m.Version(); got != prevVersion {
+		t.Errorf("Version() = %q, want the working predecessor %q", got, prevVersion)
+	}
+	if exists(env.versionDir(pinnedVersion)) {
+		t.Errorf("the replaced pin directory survived, so its %s still claims %s", sentinelName, pinnedVersion)
+	}
+	assertMismatchLoggedOnce(t, logs, pinnedVersion)
+}
+
+// TestAReplacedPinIsReinstalledFromTheVerifiedArchive pins the success half:
+// the pin directory is rebuilt from the digest-verified download, so what is on
+// the volume afterwards answers the version its sentinel claims.
+func TestAReplacedPinIsReinstalledFromTheVerifiedArchive(t *testing.T) {
+	logs := captureLogs(t)
+	env := newFakeEnv(t)
+	dir := env.placeReplaced(pinnedVersion)
+	env.placeVersion(prevVersion)
+	m := env.manager()
+
+	if err := m.Ensure(t.Context()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if got := env.fetchCount(); got != 1 {
+		t.Errorf("fetches = %d, want 1 reinstall of the pin", got)
+	}
+	if got := m.Version(); got != pinnedVersion {
+		t.Errorf("Version() = %q, want the reinstalled pin %q", got, pinnedVersion)
+	}
+	out, err := env.probeAnswer(filepath.Join(dir, toolName))
+	if err != nil {
+		t.Fatalf("probeAnswer: %v", err)
+	}
+	if got := lastFieldOfFirstLine(string(out)); got != pinnedVersion {
+		t.Errorf("the pin directory's artifact answers %q after the reinstall, want %q", got, pinnedVersion)
+	}
+	if !exists(env.versionDir(prevVersion)) {
+		t.Errorf("the working predecessor %s was pruned", prevVersion)
+	}
+	assertMismatchLoggedOnce(t, logs, pinnedVersion)
+}
+
+// TestRescanRemovesAReplacedPin pins the no-download path: a rescan cannot
+// reinstall, so it serves the predecessor and removes the replaced pin
+// directory, reporting it once.
+func TestRescanRemovesAReplacedPin(t *testing.T) {
+	logs := captureLogs(t)
+	env := newFakeEnv(t)
+	env.placeReplaced(pinnedVersion)
+	env.placeVersion(prevVersion)
+	m := env.manager()
+
+	ok, err := m.Rescan(t.Context())
+	if err != nil || !ok {
+		t.Fatalf("Rescan = (%v, %v), want (true, nil) on the predecessor", ok, err)
+	}
+	if got := m.Version(); got != prevVersion {
+		t.Errorf("Version() = %q, want the working predecessor %q", got, prevVersion)
+	}
+	if exists(env.versionDir(pinnedVersion)) {
+		t.Errorf("the replaced pin directory survived the rescan, so its %s still claims %s", sentinelName, pinnedVersion)
+	}
+	if got := env.fetchCount(); got != 0 {
+		t.Errorf("fetches = %d, want none: a rescan only re-derives from disk", got)
+	}
+	assertMismatchLoggedOnce(t, logs, pinnedVersion)
 }
