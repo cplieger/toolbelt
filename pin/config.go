@@ -71,6 +71,12 @@ type Config struct {
 	// and the Required ones against the staged artifact before it is
 	// published. At least one must be Required.
 	Assertions []Assertion
+	// Env holds NAME=value variables added to every command run against an
+	// artifact, the version probe and the assertions alike, on top of this
+	// process's environment: a switch the artifact must see wherever it runs,
+	// such as one that stops it updating itself. PATH is refused, because each
+	// command's PATH is led by the artifact's own directory (see [Manager.PathEnv]).
+	Env []string
 	// Purge sweeps a previous installer's layout once. Nil skips it.
 	Purge *Purge
 	// Untrusted activates only versions THIS process installed from a
@@ -170,6 +176,7 @@ func (c *Config) snapshot() Config {
 	out.Digests = maps.Clone(c.Digests)
 	out.TrustedUIDs = slices.Clone(c.TrustedUIDs)
 	out.FormerLinkDirs = slices.Clone(c.FormerLinkDirs)
+	out.Env = slices.Clone(c.Env)
 	if c.Assertions != nil {
 		out.Assertions = make([]Assertion, 0, len(c.Assertions))
 		for _, a := range c.Assertions {
@@ -273,14 +280,34 @@ func (c *Config) validateFormerLinkDirs() error {
 	return nil
 }
 
-// validateLists checks the assertions and the uids.
+// validateLists checks the assertions, the environment and the uids.
 func (c *Config) validateLists() error {
 	if err := validateAssertions(c.Assertions); err != nil {
+		return err
+	}
+	if err := validateEnv(c.Env); err != nil {
 		return err
 	}
 	for _, uid := range c.TrustedUIDs {
 		if uid < 0 {
 			return fmt.Errorf("pin: TrustedUIDs entry %d is not a uid", uid)
+		}
+	}
+	return nil
+}
+
+// validateEnv refuses an entry exec cannot pass on (no NAME=, or a NUL byte)
+// and one naming PATH, which [binPathEnv] owns.
+func validateEnv(env []string) error {
+	for i, kv := range env {
+		name, _, ok := strings.Cut(kv, "=")
+		switch {
+		case !ok || name == "":
+			return fmt.Errorf("pin: Env[%d] %q is not NAME=value", i, kv)
+		case strings.IndexByte(kv, 0) >= 0:
+			return fmt.Errorf("pin: Env[%d] holds a NUL byte", i)
+		case name == "PATH":
+			return fmt.Errorf("pin: Env[%d] sets PATH, which this package leads with the artifact's own directory", i)
 		}
 	}
 	return nil

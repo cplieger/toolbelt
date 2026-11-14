@@ -10,7 +10,7 @@ The `pin` package installs one upstream release at a version and SHA-256 you pin
 
 1. It checks who can write the versions directory, `<Root>/<Name>-versions`, and every directory above it. Nothing on the volume is deleted or written before this check, and a tree it refuses is never changed.
 2. It runs the one-shot `Purge` of a previous installer's layout and removes version directories an interrupted install left.
-3. It picks the version to run. That is the pinned version when its directory is complete, else the most recently activated other complete version. Each candidate's binary must answer `ProbeArgs` with the version its directory claims.
+3. It picks the version to run. That is the pinned version when its directory is complete, else the most recently activated other complete version. Each candidate's binary must answer `ProbeArgs` with the version its directory claims. A directory whose binary answers another version was replaced after it was installed, so it is logged as an error and removed.
 4. When the pinned version is not usable, it installs it. The archive is downloaded to an unlinked file, its SHA-256 is checked against `Digests`, and it is unpacked from that same file. The staged binary must answer the probe with the pinned version and pass every `Required` assertion before the directory is renamed into place.
 5. It runs every assertion against the selected binary, publishes the convenience link in `LinkDir` and removes old versions.
 
@@ -21,6 +21,8 @@ The `pin` package installs one upstream release at a version and SHA-256 you pin
 ## Assertions
 
 An `Assertion` is a command run against the binary with a 10-second limit, such as `settings app.disableAutoupdates true`. A failing `Required` assertion withholds readiness, and before publication it refuses the install. Any other assertion only logs a warning. `New` refuses a config with no `Required` assertion. Declare the setting that stops the program updating itself, or the cheapest command that must succeed against a working install.
+
+`Env` adds `NAME=value` variables to every command `pin` runs against the binary: the version probe and the assertions, on the staged and the installed binary alike. Put a variable there that the binary must see in every process that runs it, such as one that stops it updating itself, and set the same variable on the commands your server runs. `New` refuses an entry that sets `PATH`, because `pin` leads each command's `PATH` with the binary's own directory.
 
 ## Who may write the tree
 
@@ -36,7 +38,7 @@ When the check refuses the tree, no version on it is activated. The purge, the s
 
 Each version lives in `<Root>/<Name>-versions/<version>/`, holding the binary and a `.complete` file written last. A directory without it is an interrupted install and is removed at the next start. `Version` returns the active version, `Path` the binary's absolute path, `PathEntry` its directory and `PathEnv` a `PATH` overlay that leads with it. Run `Path`, never the convenience link.
 
-Retention keeps the active version and the most recently activated other version that would still be selected, so a bad pin falls back to the version that ran before it. A failed install removes nothing. Every activation sets its directory's modification time, which is the order retention reads.
+Retention keeps the active version and the most recently activated other version that would still be selected, so a bad pin falls back to the version that ran before it. A failed install removes no version that could still serve. Every activation sets its directory's modification time, which is the order retention reads.
 
 The convenience link `<Root>/<LinkDir>/<Name>` points at the active binary for an operator using a shell. A link this manager published under another name, such as a sidecar an older release shipped, is removed. An entry another owner put in `LinkDir` is never replaced or removed. When you move `LinkDir`, list the old directories in `FormerLinkDirs`. Each activation that may write the tree removes the links this manager published there, so none is left pointing at a removed version, and leaves every other entry alone. A former directory that resolves to `LinkDir` through a symlink, in either direction, is skipped, so keeping the old name as a symlink to the new one is safe.
 

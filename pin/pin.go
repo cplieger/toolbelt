@@ -571,6 +571,12 @@ func binPathEnv(bin string) []string {
 	return pathEnv(filepath.Dir(bin))
 }
 
+// commandEnv is the overlay every command run against bin carries:
+// [Config.Env], then [binPathEnv].
+func (m *Manager) commandEnv(bin string) []string {
+	return append(slices.Clone(m.cfg.Env), binPathEnv(bin)...)
+}
+
 // applyAssertions runs every configured assertion against bin. A required
 // failure is returned (it withholds readiness); a best-effort failure only
 // warns.
@@ -579,7 +585,7 @@ func (m *Manager) applyAssertions(ctx context.Context, bin string) error {
 	for _, a := range m.cfg.Assertions {
 		_, err := m.run(ctx, &command{
 			Path:    bin,
-			Env:     binPathEnv(bin),
+			Env:     m.commandEnv(bin),
 			Args:    a.Args,
 			Timeout: assertionTimeout,
 		})
@@ -609,7 +615,7 @@ func (m *Manager) applyRequiredAssertions(ctx context.Context, bin string) error
 		}
 		if _, err := m.run(ctx, &command{
 			Path:    bin,
-			Env:     binPathEnv(bin),
+			Env:     m.commandEnv(bin),
 			Args:    a.Args,
 			Timeout: assertionTimeout,
 		}); err != nil {

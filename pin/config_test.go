@@ -63,8 +63,13 @@ func TestConfigValidationRefusesEachBrokenField(t *testing.T) {
 		"duplicate assertion": {mutate: func(c *Config) {
 			c.Assertions = append(c.Assertions, Assertion{Name: c.Assertions[0].Name, Args: []string{"x"}})
 		}, wantErr: "two entries named"},
-		"negative trusted uid": {mutate: func(c *Config) { c.TrustedUIDs = []int{-1} }, wantErr: "is not a uid"},
-		"complete config":      {mutate: func(*Config) {}},
+		"negative trusted uid":          {mutate: func(c *Config) { c.TrustedUIDs = []int{-1} }, wantErr: "is not a uid"},
+		"env entry with no separator":   {mutate: func(c *Config) { c.Env = []string{"TOOLKIT_NO_UPDATE"} }, wantErr: "Env[0]"},
+		"env entry with no name":        {mutate: func(c *Config) { c.Env = []string{"A=1", "=1"} }, wantErr: "Env[1]"},
+		"env entry with a NUL":          {mutate: func(c *Config) { c.Env = []string{"A=1\x00B=2"} }, wantErr: "NUL"},
+		"env entry setting PATH":        {mutate: func(c *Config) { c.Env = []string{"PATH=/usr/bin"} }, wantErr: "sets PATH"},
+		"env entry with an empty value": {mutate: func(c *Config) { c.Env = []string{"TOOLKIT_NO_UPDATE="} }},
+		"complete config":               {mutate: func(*Config) {}},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

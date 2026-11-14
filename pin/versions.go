@@ -40,7 +40,7 @@ func selfContained(path string) bool {
 func (m *Manager) probeVersion(ctx context.Context, bin string) (string, error) {
 	out, err := m.run(ctx, &command{
 		Path:    bin,
-		Env:     binPathEnv(bin),
+		Env:     m.commandEnv(bin),
 		Args:    m.cfg.ProbeArgs,
 		Timeout: probeTimeout,
 	})
@@ -140,6 +140,7 @@ func (m *Manager) activatable(ctx context.Context, version string) activation {
 // directory under a CLEAN verdict is this deployment's own earlier install, which
 // no process will ever activate (installed is per-process), so it is prunable;
 // under a REFUSED verdict it may be another principal's install, so it is immune.
+// A replaced artifact is prunable: it can never serve and its sentinel is false.
 func (m *Manager) predecessorRole(ctx context.Context, version string) retain.Role {
 	a := m.activatable(ctx, version)
 	switch a.stage {
@@ -156,10 +157,14 @@ func (m *Manager) predecessorRole(ctx context.Context, version string) retain.Ro
 		m.log.Warn("not counting a version directory towards retention: selection would refuse it because an entry is not provably private to this process",
 			"package", m.cfg.Name, "version", version, "offender", a.entry, "reason", a.reason)
 		return retain.Immune
-	case stageProbeFailed, stageVersionMismatch:
+	case stageProbeFailed:
 		m.log.Warn("not counting a version directory towards retention: it would not survive selection's version probe",
-			"package", m.cfg.Name, "version", version, "reported", a.reported, "error", a.err)
+			"package", m.cfg.Name, "version", version, "error", a.err)
 		return retain.Immune
+	case stageVersionMismatch:
+		m.log.Error("pruning a version directory: its artifact reports a different version than the directory and sentinel claim, so the install was replaced or tampered with",
+			"package", m.cfg.Name, "version", version, "reported", a.reported, "path", a.bin)
+		return retain.Prunable
 	}
 	return retain.Fallback
 }
@@ -247,8 +252,9 @@ func (m *Manager) wideArtifact(dir string) (name, reason string) {
 // selectActive picks the version to run: the pin when it is activatable, else the
 // most recently activated other complete version, else none. A sentinel is not
 // proof: each candidate's primary artifact must answer the version its directory
-// claims, and one that does not is excluded so the pin reinstalls. The checks
-// live in [Manager.activatable]; the wording and severity stay here.
+// claims, and one that does not is removed, so the pin reinstalls and no false
+// sentinel stays behind. The checks live in [Manager.activatable]; the wording
+// and severity stay here.
 func (m *Manager) selectActive(ctx context.Context) (selection, bool) {
 	for _, version := range preferPin(m.completeVersions(), m.cfg.Version) {
 		a := m.activatable(ctx, version)
@@ -276,9 +282,12 @@ func (m *Manager) selectActive(ctx context.Context) (selection, bool) {
 				"package", m.cfg.Name, "version", version, "path", a.bin, "error", a.err)
 			continue
 		case stageVersionMismatch:
-			m.log.Error("excluding a version directory: its artifact reports a different version than the directory and sentinel claim, so the install was replaced or tampered with",
+			m.log.Error("removing a version directory: its artifact reports a different version than the directory and sentinel claim, so the install was replaced or tampered with",
 				"package", m.cfg.Name, "version", version, "reported", a.reported,
 				"path", a.bin)
+			// activatable probes only under a clean custody verdict, so this is a
+			// delete mayMutateTree allows.
+			m.removeUnderRoot([]string{version})
 			continue
 		}
 		return a.sel, true
@@ -307,7 +316,8 @@ func preferPin(entries []retain.Entry, pin string) []string {
 // syncs the installation root so the removals are durable. Failures warn: disk
 // hygiene must not brick a start. A predecessor counts towards the one kept
 // only when it would survive selection (see predecessorRole), and one selection
-// refuses for a state this library did not create is spared as evidence.
+// refuses for a state this library did not create is spared as evidence, except
+// a replaced artifact, which is pruned.
 func (m *Manager) pruneSuperseded(ctx context.Context, active string) {
 	victims := retain.Victims(m.completeVersions(), active, retainPredecessors, func(name string) retain.Role {
 		return m.predecessorRole(ctx, name)
