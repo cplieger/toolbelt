@@ -54,7 +54,8 @@ type Config struct {
 	// OnJobChanged, when non-nil, receives every job state transition
 	// (queued, running, done, failed, cancelled). Views carry no output
 	// tail; stream output via OnJobOutput or poll Jobs(). It runs under the
-	// job queue's lock, so it must not block or call the Engine.
+	// job queue's lock, so it must not block or call the Engine. The job is
+	// never nil.
 	OnJobChanged func(*Job)
 	// OnJobOutput, when non-nil, receives coalesced batches of a running
 	// job's output lines (~150 ms cadence).
