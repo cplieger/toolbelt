@@ -1738,8 +1738,8 @@ func (e *Engine) settleAptHold(ctx context.Context, name string, installErr erro
 }
 
 // resolveInstallTarget prepares the entry installTool is about to act on:
-// it reads the manifest row, refuses one the catalog could not hydrate,
-// and resolves (and persists) a sparse entry's version. A nil Tool with a
+// it reads the manifest row and resolves it (resolveRow), recording a
+// resolve failure on the row as an install failure is. A nil Tool with a
 // nil error means there is nothing to install — a disabled template,
 // which is a no-op rather than a failure, so a reconcile pass carrying
 // one does not fail the whole job.
@@ -1756,21 +1756,33 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 		output(fmt.Sprintf("%s is disabled, so it was skipped", name))
 		return nil, nil
 	}
-	if t.Source == "" {
-		return nil, e.unhydratedError(name, &t)
-	}
-	if t.Version != "" {
-		return &t, nil
-	}
-	latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
-	if err != nil {
-		return nil, fmt.Errorf("resolve latest version: %w", err)
-	}
-	if err := e.persistVersion(name, latest); err != nil {
+	if err := e.resolveRow(ctx, name, &t); err != nil {
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: resolve error not recorded", "tool", name, "error", serr)
+		}
 		return nil, err
 	}
-	t.Version = latest
 	return &t, nil
+}
+
+// resolveRow completes one enabled row for install: it refuses a row the
+// catalog could not hydrate and resolves and persists a sparse row's version.
+func (e *Engine) resolveRow(ctx context.Context, name string, t *Tool) error {
+	if t.Source == "" {
+		return e.unhydratedError(name, t)
+	}
+	if t.Version != "" {
+		return nil
+	}
+	latest, err := e.versions.Latest(ctx, t, e.aquaDef(t.Source))
+	if err != nil {
+		return fmt.Errorf("resolve latest version: %w", err)
+	}
+	if err := e.persistVersion(name, latest); err != nil {
+		return err
+	}
+	t.Version = latest
+	return nil
 }
 
 // unhydratedError explains a row hydrateStatic left without a source: the

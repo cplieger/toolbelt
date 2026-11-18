@@ -135,6 +135,58 @@ func TestAptUnavailable_RowsFailAtOnceWithTheReason(t *testing.T) {
 	}
 }
 
+// TestInstall_ResolveFailureIsRecordedOnTheRow: a row that fails before its
+// install starts (no version to resolve, no install knowledge) carries the
+// cause in the inventory's last_error, through an install job and a
+// reconcile alike, as a row failing during its install does.
+func TestInstall_ResolveFailureIsRecordedOnTheRow(t *testing.T) {
+	const notRoot = "apt packages need the container to run as root"
+	install := func(e *Engine) (*Job, error) { return e.Install("jq") }
+	reconcile := func(e *Engine) (*Job, error) {
+		j, _, err := e.Reconcile(ReconcileMissing)
+		return j, err
+	}
+	for _, tc := range []struct {
+		run  func(*Engine) (*Job, error)
+		name string
+		want string
+		row  Tool
+	}{
+		{name: "an unversioned apt row on a non-root host, installed", row: Tool{Source: "apt:jq"}, want: notRoot, run: install},
+		{name: "an unversioned apt row on a non-root host, reconciled", row: Tool{Source: "apt:jq"}, want: notRoot, run: reconcile},
+		{name: "a row with no install knowledge, installed", want: "no install knowledge exists", run: install},
+		{name: "a row with no install knowledge, reconciled", want: "no install knowledge exists", run: reconcile},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := stubApt(t)
+			fakeAptHost(t, 1000, writableDirs)
+			e := newTestEngine(t, nil)
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				m.Tools["jq"] = tc.row
+				return nil
+			}); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			jv, err := tc.run(e)
+			if err != nil {
+				t.Fatalf("enqueue = %v", err)
+			}
+			final := waitJob(t, e, jv.ID)
+
+			if final.State != JobFailed || !strings.Contains(final.Error, tc.want) {
+				t.Errorf("job = %s (%q), want failed with %q", final.State, final.Error, tc.want)
+			}
+			if got := inventoryRow(t, e, "jq").LastError; !strings.Contains(got, tc.want) {
+				t.Errorf("jq last_error = %q, want it to carry %q", got, tc.want)
+			}
+			if s.ran(t, "apt-get") {
+				t.Errorf("apt calls = %q, want none", s.lines(t))
+			}
+		})
+	}
+}
+
 // TestAptUnavailable_SearchListsPackagesAsUnavailable: every search where apt
 // cannot work, the first included, states the reason, never runs apt-get
 // update, reads the package list already on disk at most once, and lists its
