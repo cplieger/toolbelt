@@ -309,9 +309,8 @@ func aptFallbackAllows(pkg string) error {
 // reads the list on disk once, so a search can still say what apt would
 // offer, and never runs apt-get update.
 //
-// The indexing path never waits on a refresh: a concurrent search gets the
-// index as it stands (possibly empty) rather than blocking on a network
-// operation, since a prompt honest answer beats a late one.
+// refresh returns without waiting; a caller that needs the result waits on
+// a.refreshing.
 func (a *aptIndex) refresh() {
 	if a == nil {
 		return

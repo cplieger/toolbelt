@@ -1045,10 +1045,13 @@ func TestSearchReply_ListsAptPackagesAsUnavailableOnlyWhenAsked(t *testing.T) {
 					got.AptState, got.AptReason, got.AptAvailable, reason)
 			}
 			names := make([]string, 0, len(got.Results))
-			for _, h := range got.Results {
+			for i, h := range got.Results {
 				names = append(names, h.Name)
 				if h.Source != "apt:"+h.Name || !h.Apt || !h.Unavailable || h.Reason != reason || h.Version != "" {
 					t.Errorf("hit %+v, want apt:%s, apt and unavailable with reason %q and no version", h, h.Name, reason)
+				}
+				if i < len(sc.AptUnavailable) && h.Description != sc.AptUnavailable[i].Description {
+					t.Errorf("hit %d description = %q, want %q", i, h.Description, sc.AptUnavailable[i].Description)
 				}
 			}
 			if !slices.Equal(names, tc.wantNames) {

@@ -233,7 +233,8 @@ type SearchCounts struct {
 	Apt []AptHit
 	// AptUnavailable ranks the packages apt would offer from the list
 	// already on disk, where apt cannot install them: the Apt block's
-	// counterpart to Unavailable. Empty means no package list is on disk.
+	// counterpart to Unavailable. Empty when no package list is on disk or
+	// nothing in it matches.
 	AptUnavailable []AptHit
 	// InstallableMatched is how many entries Installable would hold had
 	// nothing cut it.
