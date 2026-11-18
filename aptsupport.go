@@ -78,23 +78,25 @@ func detectAptSupport() aptHost {
 // is empty when it can. Root and the writability of apt's directories are
 // read once per process; apt-get's presence on every call.
 func AptUnavailableReason() string {
-	if !hasSystemBin("apt-get") {
+	if !aptManagesHost() {
 		return aptNeedsDebian
 	}
 	return aptSupport().reason
 }
 
+// aptManagesHost reports whether apt is this host's package manager.
+func aptManagesHost() bool { return hasSystemBin("apt-get") }
+
 // AptAvailable reports whether this process can install apt packages (see
 // [AptUnavailableReason]). Consumers surface it rather than offering an
-// install that always fails, and the engine fails every apt: row at once with
-// the reason when it is false.
+// install that always fails.
 //
 // There is no sudo path by design: a library that shells out to sudo would
 // be inventing a privilege escalation its caller did not ask for.
 func AptAvailable() bool { return AptUnavailableReason() == "" }
 
 // ErrAptUnavailable marks an apt operation attempted where apt cannot work.
-// The error's own text is [AptUnavailableReason].
+// An error that Is this sentinel carries [AptUnavailableReason] as its text.
 var ErrAptUnavailable = errors.New("apt is unavailable")
 
 type aptUnavailableError struct{ reason string }

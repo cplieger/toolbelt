@@ -367,7 +367,12 @@ const searchUnavailableParam = "unavailable"
 func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	sc := e.SearchWithCounts(q)
+	httpserver.WriteJSON(w, searchReply(&sc, q, searchWantsUnavailable(r)))
+}
 
+// searchReply assembles the search route's body from one engine answer;
+// withUnavailable adds the opt-in uninstallable block.
+func searchReply(sc *toolbelt.SearchCounts, q string, withUnavailable bool) SearchResponse {
 	merged := mergeSearchHits(sc.Installable, sc.Apt, q)
 	res := SearchResponse{
 		Results:      make([]SearchHit, 0, len(merged)+len(sc.Unavailable)+len(sc.AptUnavailable)),
@@ -378,7 +383,7 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		Truncated:    sc.InstallableMatched > len(sc.Installable) || sc.AptMatched > len(sc.Apt),
 	}
 	res.Results = append(res.Results, merged...)
-	if searchWantsUnavailable(r) {
+	if withUnavailable {
 		for i := range sc.Unavailable {
 			res.Results = append(res.Results, searchHit(&sc.Unavailable[i], true))
 		}
@@ -387,7 +392,7 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		res.Truncated = res.Truncated || sc.UnavailableMatched > len(sc.Unavailable) ||
 			sc.AptUnavailableMatched > len(sc.AptUnavailable)
 	}
-	httpserver.WriteJSON(w, res)
+	return res
 }
 
 // mergeSearchHits projects both installable corpora into ONE

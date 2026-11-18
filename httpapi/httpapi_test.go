@@ -761,6 +761,12 @@ func newServerWithCatalog(t *testing.T, doc string) (*toolbelt.Engine, *httptest
 	return e, srv
 }
 
+// catalogHits drops the Debian packages from a reply: which ones match
+// depends on the package list of the host running the test.
+func catalogHits(results []SearchHit) []SearchHit {
+	return slices.DeleteFunc(slices.Clone(results), func(h SearchHit) bool { return h.Apt })
+}
+
 // TestRoutes_SearchHidesUnavailableUnlessAsked covers both sides of the
 // toggle. Hidden is the default because a dialog offering installs has no
 // use for a row it cannot act on; the opt-in exists because an agent
@@ -776,11 +782,12 @@ func TestRoutes_SearchHidesUnavailableUnlessAsked(t *testing.T) {
 	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=python", "", &hidden); code != http.StatusOK {
 		t.Fatalf("search status = %d, want 200", code)
 	}
-	if len(hidden.Results) != 1 {
-		t.Fatalf("default search returned %d results, want 1: %+v", len(hidden.Results), hidden.Results)
+	hiddenHits := catalogHits(hidden.Results)
+	if len(hiddenHits) != 1 {
+		t.Fatalf("default search returned %d catalog results, want 1: %+v", len(hiddenHits), hiddenHits)
 	}
-	if hidden.Results[0].Name != "pyright" {
-		t.Errorf("default search returned %q, want the installable pyright", hidden.Results[0].Name)
+	if hiddenHits[0].Name != "pyright" {
+		t.Errorf("default search returned %q, want the installable pyright", hiddenHits[0].Name)
 	}
 
 	// Opt in: the uninstallable block is appended after the installable one.
@@ -788,16 +795,17 @@ func TestRoutes_SearchHidesUnavailableUnlessAsked(t *testing.T) {
 	if code := call(t, srv, http.MethodGet, "/api/tools/search?q=python&unavailable=1", "", &shown); code != http.StatusOK {
 		t.Fatalf("opt-in search status = %d, want 200", code)
 	}
-	if len(shown.Results) != 2 {
-		t.Fatalf("opt-in search returned %d results, want 2: %+v", len(shown.Results), shown.Results)
+	shownHits := catalogHits(shown.Results)
+	if len(shownHits) != 2 {
+		t.Fatalf("opt-in search returned %d catalog results, want 2: %+v", len(shownHits), shownHits)
 	}
-	if shown.Results[0].Name != "pyright" || shown.Results[0].Unavailable {
-		t.Errorf("first result = %+v, want the installable pyright", shown.Results[0])
+	if shownHits[0].Name != "pyright" || shownHits[0].Unavailable {
+		t.Errorf("first result = %+v, want the installable pyright", shownHits[0])
 	}
-	if shown.Results[0].Reason != "" {
-		t.Errorf("an installable hit carries a reason: %q", shown.Results[0].Reason)
+	if shownHits[0].Reason != "" {
+		t.Errorf("an installable hit carries a reason: %q", shownHits[0].Reason)
 	}
-	got := shown.Results[1]
+	got := shownHits[1]
 	if got.Name != "python" || !got.Unavailable {
 		t.Fatalf("second result = %+v, want the unavailable python", got)
 	}
@@ -992,36 +1000,64 @@ func TestRoutes_SearchStatesWhyTheAptCorpusDidNotAnswer(t *testing.T) {
 		t.Errorf("apt_available = %v beside apt_state %q: the bool must be the state narrowed",
 			sr.AptAvailable, sr.AptState)
 	}
-	wantReason := ""
-	if toolbelt.AptState(sr.AptState) == toolbelt.AptStateUnavailable {
-		wantReason = toolbelt.AptUnavailableReason()
+	reasons := []string{
+		"",
+		"apt packages need a Debian-derived image with apt-get",
+		"apt packages need the container to run as root",
+		"apt packages need a writable root filesystem",
 	}
-	if sr.AptReason != wantReason {
-		t.Errorf("apt_reason = %q beside apt_state %q, want %q", sr.AptReason, sr.AptState, wantReason)
+	if unavailable := toolbelt.AptState(sr.AptState) == toolbelt.AptStateUnavailable; sr.AptReason == "" == unavailable || !slices.Contains(reasons, sr.AptReason) {
+		t.Errorf("apt_reason = %q beside apt_state %q, want one of %q exactly when unavailable", sr.AptReason, sr.AptState, reasons[1:])
 	}
 }
 
-// TestUnavailableAptHits_FlagsEachPackageWithTheReason: a package apt cannot
-// install here reaches the wire as the catalog's uninstallable entries do,
-// flagged unavailable with the reason, and still marked a Debian package.
-func TestUnavailableAptHits_FlagsEachPackageWithTheReason(t *testing.T) {
+// TestSearchReply_ListsAptPackagesAsUnavailableOnlyWhenAsked: where apt
+// cannot install, the reply states why, and the packages from the list on
+// disk join the opt-in unavailable block flagged with that reason, counted in
+// matched and in the cut.
+func TestSearchReply_ListsAptPackagesAsUnavailableOnlyWhenAsked(t *testing.T) {
 	const reason = "apt packages need a writable root filesystem"
-	got := unavailableAptHits([]toolbelt.AptHit{
-		{Name: "jq", Description: "lightweight and flexible command-line JSON processor"},
-		{Name: "tree", Description: "displays an indented directory tree"},
-	}, reason)
+	sc := toolbelt.SearchCounts{
+		AptState:  toolbelt.AptStateUnavailable,
+		AptReason: reason,
+		AptUnavailable: []toolbelt.AptHit{
+			{Name: "jq", Description: "lightweight and flexible command-line JSON processor"},
+			{Name: "jo", Description: "JSON output from a shell"},
+		},
+		AptUnavailableMatched: 3,
+	}
+	cases := []struct {
+		name          string
+		wantNames     []string
+		wantMatched   int
+		asked         bool
+		wantTruncated bool
+	}{
+		{name: "asked", asked: true, wantNames: []string{"jq", "jo"}, wantMatched: 3, wantTruncated: true},
+		{name: "not asked", wantNames: []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := searchReply(&sc, "j", tc.asked)
 
-	if len(got) != 2 {
-		t.Fatalf("hits = %+v, want two", got)
-	}
-	for i, name := range []string{"jq", "tree"} {
-		h := got[i]
-		if h.Name != name || h.Source != "apt:"+name || !h.Apt || !h.Unavailable || h.Reason != reason {
-			t.Errorf("hit %d = %+v, want %s from apt:%s, apt and unavailable with reason %q", i, h, name, name, reason)
-		}
-	}
-	if got[0].Description != "lightweight and flexible command-line JSON processor" {
-		t.Errorf("description = %q, want the package's", got[0].Description)
+			if got.AptState != "unavailable" || got.AptReason != reason || got.AptAvailable {
+				t.Errorf("apt_state = %q, apt_reason = %q, apt_available = %v; want unavailable, %q, false",
+					got.AptState, got.AptReason, got.AptAvailable, reason)
+			}
+			names := make([]string, 0, len(got.Results))
+			for _, h := range got.Results {
+				names = append(names, h.Name)
+				if h.Source != "apt:"+h.Name || !h.Apt || !h.Unavailable || h.Reason != reason || h.Version != "" {
+					t.Errorf("hit %+v, want apt:%s, apt and unavailable with reason %q and no version", h, h.Name, reason)
+				}
+			}
+			if !slices.Equal(names, tc.wantNames) {
+				t.Errorf("results = %v, want %v", names, tc.wantNames)
+			}
+			if got.Matched != tc.wantMatched || got.Truncated != tc.wantTruncated {
+				t.Errorf("matched = %d, truncated = %v; want %d, %v", got.Matched, got.Truncated, tc.wantMatched, tc.wantTruncated)
+			}
+		})
 	}
 }
 

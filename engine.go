@@ -233,7 +233,7 @@ type SearchCounts struct {
 	Apt []AptHit
 	// AptUnavailable ranks the packages apt would offer from the list
 	// already on disk, where apt cannot install them: the Apt block's
-	// counterpart to Unavailable, empty when no list is on disk.
+	// counterpart to Unavailable. Empty means no package list is on disk.
 	AptUnavailable []AptHit
 	// InstallableMatched is how many entries Installable would hold had
 	// nothing cut it.
@@ -394,10 +394,13 @@ func (e *Engine) searchApt(query string) (hits []AptHit, matched int, state AptS
 }
 
 // searchAptUnavailable ranks the list on disk without the candidate lookup
-// the Apt block pays for: no install will take one.
+// the Apt block pays for: no install will take one. It waits for the one
+// disk read, a local apt-cache run (refresh never runs apt-get update here),
+// so even the first reply carries the hits.
 func (e *Engine) searchAptUnavailable(query string) (hits []AptHit, matched int) {
 	if e.aptIdx.stale() {
 		e.aptIdx.refresh()
+		e.aptIdx.refreshing.Wait()
 	}
 	hits, matched, _ = e.aptIdx.Search(query)
 	return hits, matched
