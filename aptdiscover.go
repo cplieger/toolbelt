@@ -91,7 +91,7 @@ func (d *aptDiscovery) List(ctx context.Context) []AptPackage {
 	if d.loaded {
 		return d.cached
 	}
-	if !AptAvailable() {
+	if !aptManagesHost() {
 		d.loaded = true
 		return nil
 	}

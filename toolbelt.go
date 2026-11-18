@@ -304,6 +304,7 @@ func New(cfg *Config) (*Engine, error) {
 	// resolver's apt-cache read. Constructed before both so neither can
 	// hold a nil one.
 	e.aptIdx = newAptIndex(log)
+	logAptSupport(log)
 	e.aptSeen = &aptDiscovery{}
 	e.versions = newVersionResolver(client, e.aptIdx)
 	e.inst = &installer{

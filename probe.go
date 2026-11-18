@@ -233,8 +233,8 @@ func (e *Engine) probePipInterpreter(ref string) (identity string, failed probeV
 // apt package can be removed from under the process by anyone with a
 // container shell, and dpkg-query is a cheap local read.
 func probeApt(pkg, want string, s *ToolStatus) probeVerdict {
-	if !AptAvailable() {
-		return probeVerdict{OK: false, Mode: probeModePresence, Reason: "apt is unavailable on this host"}
+	if r := AptUnavailableReason(); r != "" {
+		return probeVerdict{OK: false, Mode: probeModePresence, Reason: r}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()

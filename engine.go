@@ -217,9 +217,12 @@ func (e *Engine) systemTools() []SystemTool {
 type SearchCounts struct {
 	// AptState says WHY the package list did or did not answer; see
 	// [AptState]. AptAvailable is the same verdict narrowed to a bool.
-	// It leads the struct because govet's fieldalignment wants the
-	// smaller pointer-bearing field ahead of the slices.
+	// The two strings lead the struct because govet's fieldalignment
+	// wants them ahead of the slices.
 	AptState AptState
+	// AptReason is [AptUnavailableReason] when AptState is
+	// [AptStateUnavailable], else empty.
+	AptReason string
 	// Installable is what [Engine.Search] returns: catalog entries with
 	// an install source, minus those already in the manifest.
 	Installable []CatalogEntry
@@ -228,12 +231,20 @@ type SearchCounts struct {
 	// Apt is what [Engine.SearchApt] returns; empty when AptAvailable is
 	// false.
 	Apt []AptHit
+	// AptUnavailable ranks the packages apt would offer from the list
+	// already on disk, where apt cannot install them: the Apt block's
+	// counterpart to Unavailable. Empty when no package list is on disk or
+	// nothing in it matches.
+	AptUnavailable []AptHit
 	// InstallableMatched is how many entries Installable would hold had
 	// nothing cut it.
 	InstallableMatched int
 	// UnavailableMatched is how many entries Unavailable would hold had
 	// nothing cut it.
 	UnavailableMatched int
+	// AptUnavailableMatched is how many packages AptUnavailable would hold
+	// had nothing cut it.
+	AptUnavailableMatched int
 	// AptMatched is how many packages Apt would hold had nothing cut it.
 	AptMatched int
 	// AptAvailable is the bool [Engine.SearchApt] returns: false means
@@ -252,6 +263,10 @@ func (e *Engine) SearchWithCounts(query string) SearchCounts {
 	sc.Unavailable, sc.UnavailableMatched = e.searchUnavailable(query)
 	sc.Apt, sc.AptMatched, sc.AptState = e.searchApt(query)
 	sc.AptAvailable = sc.AptState == AptStateAvailable
+	if sc.AptState == AptStateUnavailable {
+		sc.AptReason = AptUnavailableReason()
+		sc.AptUnavailable, sc.AptUnavailableMatched = e.searchAptUnavailable(query)
+	}
 	return sc
 }
 
@@ -352,8 +367,8 @@ type AptState string
 // name for the zero value: no search returns it, and it exists on the
 // wire only as the absence a consumer reads from an older engine.
 const (
-	// AptStateUnavailable means apt is not usable here (see
-	// [AptAvailable]), so no search will answer from the corpus.
+	// AptStateUnavailable means apt cannot install here (see
+	// [AptUnavailableReason]), so no search offers an installable package.
 	AptStateUnavailable AptState = "unavailable"
 	// AptStateIndexing means apt is usable and no package index is
 	// loaded. The first search starts the load and answers without it, so
@@ -377,6 +392,19 @@ func (e *Engine) searchApt(query string) (hits []AptHit, matched int, state AptS
 		return nil, 0, AptStateIndexing
 	}
 	return e.aptHitsWithCandidate(hits), matched, AptStateAvailable
+}
+
+// searchAptUnavailable ranks the list on disk without the candidate lookup
+// the Apt block pays for: no install will take one. It waits for the one
+// disk read, a local apt-cache run (refresh never runs apt-get update here),
+// so even the first reply carries the hits.
+func (e *Engine) searchAptUnavailable(query string) (hits []AptHit, matched int) {
+	if e.aptIdx.stale() {
+		e.aptIdx.refresh()
+		e.aptIdx.refreshing.Wait()
+	}
+	hits, matched, _ = e.aptIdx.Search(query)
+	return hits, matched
 }
 
 // aptHitsWithCandidate fills in the version apt would install, for the

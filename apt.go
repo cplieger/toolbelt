@@ -16,8 +16,8 @@ import (
 // apt writes into /usr, the container layer, so an apt entry dies with the
 // container and the boot converge re-applies it. Hence: detection reads the
 // dpkg status word, never a binary (aptQuery); uninstall drops the entry and
-// leaves the package (installer.uninstall); and a host that is not
-// Debian-derived or not root reports apt as a capability (AptAvailable).
+// leaves the package (installer.uninstall); and a host where apt cannot write
+// reports apt as a capability (AptAvailable).
 
 // aptNamePattern is the anchored package-name grammar. It is the first
 // of two gates and it exists to stop anything that is not shaped like a
@@ -39,10 +39,6 @@ var aptNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
 // docker.io, g++) cannot exclude either character, which is why the
 // oracle rather than the grammar is what makes this safe.
 const aptExpansionChars = ".+"
-
-// ErrAptUnavailable marks an apt operation attempted where apt cannot
-// work: a non-Debian host, or a process that is not root.
-var ErrAptUnavailable = errors.New("apt is not available without a Debian-derived host and root")
 
 // aptValidName reports whether s is shaped like a Debian package name
 // and cannot be read by apt-get as anything other than a name.
@@ -101,30 +97,9 @@ const aptStatusInstalled = "installed"
 // aptWantHold is the ${db:Status-Want} value apt-mark hold sets.
 const aptWantHold = "hold"
 
-// geteuid is a variable so tests can drive the apt paths against stub
-// binaries without running as root.
-var geteuid = os.Geteuid
-
 // aptHoldTimeout bounds an apt-mark call. It writes one dpkg selection and
 // touches no network, so this is a wedge guard rather than a work budget.
 const aptHoldTimeout = 30 * time.Second
-
-// AptAvailable reports whether this process can install apt packages: euid 0,
-// and apt-get present per resolveSystemBin, so this gate and the spawn it guards
-// answer about one file. Consumers surface it rather than offering an install
-// that always fails, and the engine's own converge skips apt when it is false.
-//
-// Root is required because apt writes to /usr and the dpkg database.
-// There is no sudo path here by design: the two consumers of this
-// library run as root deliberately, and a library that shells out to
-// sudo would be inventing a privilege escalation its caller did not ask
-// for.
-func AptAvailable() bool {
-	if geteuid() != 0 {
-		return false
-	}
-	return hasSystemBin("apt-get")
-}
 
 // aptStatus is one package's dpkg record. held is the selection apt-mark
 // sets, which dpkg reports as the "hold" want state (dpkg-query(1), Status),
@@ -364,8 +339,8 @@ func aptRecordStale(s *ToolStatus, st aptStatus) bool {
 // them, and a symlink would make an uninstall ambiguous between "drop
 // the entry" and "remove the package".
 func (in *installer) installApt(ctx context.Context, pkg, want string) (string, error) {
-	if !AptAvailable() {
-		return "", ErrAptUnavailable
+	if err := aptUnavailable(); err != nil {
+		return "", err
 	}
 	if err := in.aptKnownName(ctx, pkg); err != nil {
 		return "", err

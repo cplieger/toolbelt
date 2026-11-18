@@ -48,6 +48,9 @@ type aptIndex struct {
 	updateOnce sync.Once
 	loading    bool
 	closed     bool
+	// diskRead records the one read of the list already on disk that a host
+	// where apt cannot install gets: no apt-get update can refresh it there.
+	diskRead bool
 }
 
 // aptIndexTTL is how long a parsed index is considered current. It
@@ -75,15 +78,12 @@ func (a *aptIndex) ensureLists(ctx context.Context) error {
 	if a == nil {
 		return nil
 	}
+	if err := aptUnavailable(); err != nil {
+		return err
+	}
 	a.updateOnce.Do(func() {
-		if entries, err := os.ReadDir(aptListsDir); err == nil && len(entries) > 0 {
-			for _, e := range entries {
-				// The directory survives with only its `partial`/`auxfiles`
-				// subdirectories after a cleanup, which is not an index.
-				if !e.IsDir() {
-					return
-				}
-			}
+		if aptListsOnDisk() {
+			return
 		}
 		uctx, cancel := context.WithTimeout(ctx, aptUpdateBudget)
 		defer cancel()
@@ -100,6 +100,22 @@ func (a *aptIndex) ensureLists(ctx context.Context) error {
 		}
 	})
 	return a.updateErr
+}
+
+// aptListsOnDisk reports whether aptListsDir holds a package index file.
+// The directory survives with only its `partial`/`auxfiles` subdirectories
+// after a cleanup, which is not an index.
+func aptListsOnDisk() bool {
+	entries, err := os.ReadDir(aptListsDir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 func newAptIndex(log *slog.Logger) *aptIndex {
@@ -289,42 +305,47 @@ func aptFallbackAllows(pkg string) error {
 }
 
 // refresh updates the package index on its own goroutine, at most one
-// refresh at a time, and never after Close.
+// refresh at a time, and never after Close. Where apt cannot install it
+// reads the list on disk once, so a search can still say what apt would
+// offer, and never runs apt-get update.
 //
-// A caller never waits on another caller's refresh: a second concurrent
-// search gets the index as it stands (possibly empty, which Search
-// reports as unavailable) rather than blocking a request on a network
-// operation. This is a search surface, so a late-but-complete answer is
-// worth less than a prompt honest one.
+// refresh returns without waiting; a caller that needs the result waits on
+// a.refreshing.
 func (a *aptIndex) refresh() {
-	if a == nil || !AptAvailable() {
+	if a == nil {
+		return
+	}
+	update := AptAvailable()
+	if !update && !hasSystemBin("apt-cache") {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.loading || a.closed {
+	if a.loading || a.closed || !update && a.diskRead {
 		return
 	}
+	a.diskRead = a.diskRead || !update
 	ctx, cancel := context.WithCancel(context.Background())
 	a.loading = true
 	a.cancelRefresh = cancel
 	a.refreshing.Go(func() {
 		defer cancel()
 		names, err := a.load(ctx)
-		a.finishRefresh(names, err)
+		a.finishRefresh(names, err, update)
 	})
 }
 
 // finishRefresh records a background refresh's outcome. A failed refresh
 // keeps whatever list is already parsed: stale rather than none, the same
-// keep-last-good posture the catalog refresh takes.
-func (a *aptIndex) finishRefresh(names map[string]string, err error) {
+// keep-last-good posture the catalog refresh takes. A failed disk read where
+// apt cannot install (updated false) is no fault: images ship without a list.
+func (a *aptIndex) finishRefresh(names map[string]string, err error, updated bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.loading = false
 	a.cancelRefresh = nil
 	if err != nil {
-		if !a.closed {
+		if !a.closed && updated {
 			a.log.Warn("toolbelt: apt package index refresh failed", "error", err)
 		}
 		return
@@ -349,11 +370,12 @@ func (a *aptIndex) Close() {
 	a.refreshing.Wait()
 }
 
-// load runs apt-get update and parses the available-package list.
+// load runs apt-get update where apt can install, and parses the
+// available-package list.
 func (a *aptIndex) load(ctx context.Context) (map[string]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, aptUpdateBudget)
 	defer cancel()
-	if err := a.ensureLists(ctx); err != nil {
+	if err := a.ensureLists(ctx); err != nil && !errors.Is(err, ErrAptUnavailable) {
 		// Not fatal to the parse: an index from a previous run may still
 		// be on disk, and a stale one yields false negatives only.
 		a.log.Warn("toolbelt: apt-get update failed, parsing whatever index is on disk", "error", err)
