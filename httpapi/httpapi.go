@@ -51,8 +51,9 @@ type SearchHit struct {
 	// Version is the catalog's default pinned version, set only for
 	// entries without an upstream version source (manual installs).
 	Version string `json:"version,omitempty"`
-	// Reason names the registry backend that defeated the compiler, and
-	// is set only alongside Unavailable.
+	// Reason says why the hit cannot be installed: the registry backend
+	// that defeated the compiler, or for a Debian package
+	// [toolbelt.AptUnavailableReason]. Set only alongside Unavailable.
 	Reason string `json:"reason,omitempty"`
 	// Match names which field the query hit — see [toolbelt.MatchKind].
 	// Empty for the featured set and for an unavailable hit. On the wire
@@ -92,8 +93,12 @@ type SearchResponse struct {
 	// AptState names what the Debian corpus could say — see
 	// [toolbelt.AptState] for the three values. Absent from an engine
 	// predating the field, where AptAvailable is the whole answer.
-	AptState string      `json:"apt_state,omitempty"`
-	Results  []SearchHit `json:"results"`
+	AptState string `json:"apt_state,omitempty"`
+	// AptReason says why apt cannot install here, set only when AptState
+	// is unavailable, so a client can say why even when no Debian hit
+	// reaches the unavailable block.
+	AptReason string      `json:"apt_reason,omitempty"`
+	Results   []SearchHit `json:"results"`
 	// Matched is how many rows the query matched across the blocks
 	// Results holds, before each was cut to its cap. It is the
 	// denominator Truncated has no room for, so a client can say "25 of
@@ -365,8 +370,9 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 
 	merged := mergeSearchHits(sc.Installable, sc.Apt, q)
 	res := SearchResponse{
-		Results:      make([]SearchHit, 0, len(merged)+len(sc.Unavailable)),
+		Results:      make([]SearchHit, 0, len(merged)+len(sc.Unavailable)+len(sc.AptUnavailable)),
 		AptState:     string(sc.AptState),
+		AptReason:    sc.AptReason,
 		Matched:      sc.InstallableMatched + sc.AptMatched,
 		AptAvailable: sc.AptAvailable,
 		Truncated:    sc.InstallableMatched > len(sc.Installable) || sc.AptMatched > len(sc.Apt),
@@ -376,8 +382,10 @@ func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 		for i := range sc.Unavailable {
 			res.Results = append(res.Results, searchHit(&sc.Unavailable[i], true))
 		}
-		res.Matched += sc.UnavailableMatched
-		res.Truncated = res.Truncated || sc.UnavailableMatched > len(sc.Unavailable)
+		res.Results = append(res.Results, unavailableAptHits(sc.AptUnavailable, sc.AptReason)...)
+		res.Matched += sc.UnavailableMatched + sc.AptUnavailableMatched
+		res.Truncated = res.Truncated || sc.UnavailableMatched > len(sc.Unavailable) ||
+			sc.AptUnavailableMatched > len(sc.AptUnavailable)
 	}
 	httpserver.WriteJSON(w, res)
 }
@@ -425,6 +433,24 @@ func mergeSearchHits(catalog []toolbelt.CatalogEntry, apt []toolbelt.AptHit, que
 	hits := make([]SearchHit, 0, len(scored))
 	for i := range scored {
 		hits = append(hits, scored[i].hit)
+	}
+	return hits
+}
+
+// unavailableAptHits projects the Debian packages apt cannot install here
+// as the catalog's uninstallable entries are projected: flagged, with the
+// reason, and no candidate version.
+func unavailableAptHits(apt []toolbelt.AptHit, reason string) []SearchHit {
+	hits := make([]SearchHit, 0, len(apt))
+	for i := range apt {
+		hits = append(hits, SearchHit{
+			Name:        apt[i].Name,
+			Description: apt[i].Description,
+			Source:      toolbelt.SourceApt + ":" + apt[i].Name,
+			Apt:         true,
+			Unavailable: true,
+			Reason:      reason,
+		})
 	}
 	return hits
 }

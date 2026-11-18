@@ -3427,14 +3427,24 @@ func assertPatchFields(t *testing.T, got, want Tool) {
 	}
 }
 
-// fakeRoot makes AptAvailable answer as it does for root, so the apt paths
-// run against stubs unprivileged. Call it before newTestEngine: cleanups run
-// last in, first out, so the engine's worker stops before geteuid is restored.
+// fakeRoot makes AptAvailable answer as it does for root on a writable root
+// filesystem, so the apt paths run against stubs unprivileged (fakeAptHost).
 func fakeRoot(t *testing.T) {
 	t.Helper()
-	prev := geteuid
-	geteuid = func() int { return 0 }
-	t.Cleanup(func() { geteuid = prev })
+	fakeAptHost(t, 0, func(string) error { return nil })
+}
+
+// fakeAptHost makes the apt capability check see euid and writable as this
+// host's, and forgets the cached verdict so the next read detects again. Call
+// it before newTestEngine: cleanups run last in, first out, so the engine's
+// worker stops before the seams are restored.
+func fakeAptHost(t *testing.T, euid int, writable func(dir string) error) {
+	t.Helper()
+	prevEuid, prevWritable, prevSupport := geteuid, aptDirWritable, aptSupport
+	geteuid = func() int { return euid }
+	aptDirWritable = writable
+	aptSupport = sync.OnceValue(detectAptSupport)
+	t.Cleanup(func() { geteuid, aptDirWritable, aptSupport = prevEuid, prevWritable, prevSupport })
 }
 
 // aptStub models dpkg for one amd64 jq with logging apt-mark, apt-get,
@@ -3720,9 +3730,7 @@ func TestAptHold_FollowsThePin(t *testing.T) {
 		}
 	})
 	t.Run("a pin where apt is unavailable queues no job", func(t *testing.T) {
-		prev := geteuid
-		geteuid = func() int { return 1000 }
-		t.Cleanup(func() { geteuid = prev })
+		fakeAptHost(t, 1000, func(string) error { return nil })
 		s := stubApt(t)
 		e := newTestEngine(t, nil)
 		setAptRow(t, e, false, true)

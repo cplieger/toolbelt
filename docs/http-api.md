@@ -21,7 +21,7 @@ The handler has no authentication and adds no middleware except its own cache po
 | Route | Engine call | Notes |
 | --- | --- | --- |
 | `GET {prefix}` | `Inventory` | |
-| `GET {prefix}/search?q=` | `SearchWithCounts` | Add `&unavailable=1` to include tools the catalog cannot install, with the reason. See below |
+| `GET {prefix}/search?q=` | `SearchWithCounts` | Add `&unavailable=1` to include tools the catalog cannot install and Debian packages apt cannot install here, each with the reason. See below |
 | `POST {prefix}` | `Add` | 202 `{job}`, with a null job for a template |
 | `PATCH {prefix}/{name}` | `Patch` | Merges fields into an entry. A version or python change on an enabled entry starts a reinstall, enabling installs and disabling uninstalls, and a `requires` change that names a tool with no enabled entry installs that tool. 409 `has_dependents` with the names |
 | `POST {prefix}/{name}/install` | `Install` | 409 `disabled` on a template |
@@ -38,7 +38,7 @@ The handler has no authentication and adds no middleware except its own cache po
 
 `DELETE` takes `force` in the query, which removes every enabled entry that needs the tool, directly or through another entry. A cascade that includes an essential tool is refused whole.
 
-Search results leave out each entry's embedded install definition. In the reply, `truncated` is true when a block was cut to its limit, and `matched` is how many rows the query found before the cut. `apt_state` is `unavailable`, `indexing` or `available`, and `apt_available` gives the same answer as a bool.
+Search results leave out each entry's embedded install definition. In the reply, `truncated` is true when a block was cut to its limit, and `matched` is how many rows the query found before the cut. `apt_state` is `unavailable`, `indexing` or `available`, and `apt_available` gives the same answer as a bool. When `apt_state` is `unavailable`, `apt_reason` says why, for example `apt packages need a writable root filesystem`.
 
 ## Replies and refusals
 

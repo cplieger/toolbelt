@@ -992,6 +992,37 @@ func TestRoutes_SearchStatesWhyTheAptCorpusDidNotAnswer(t *testing.T) {
 		t.Errorf("apt_available = %v beside apt_state %q: the bool must be the state narrowed",
 			sr.AptAvailable, sr.AptState)
 	}
+	wantReason := ""
+	if toolbelt.AptState(sr.AptState) == toolbelt.AptStateUnavailable {
+		wantReason = toolbelt.AptUnavailableReason()
+	}
+	if sr.AptReason != wantReason {
+		t.Errorf("apt_reason = %q beside apt_state %q, want %q", sr.AptReason, sr.AptState, wantReason)
+	}
+}
+
+// TestUnavailableAptHits_FlagsEachPackageWithTheReason: a package apt cannot
+// install here reaches the wire as the catalog's uninstallable entries do,
+// flagged unavailable with the reason, and still marked a Debian package.
+func TestUnavailableAptHits_FlagsEachPackageWithTheReason(t *testing.T) {
+	const reason = "apt packages need a writable root filesystem"
+	got := unavailableAptHits([]toolbelt.AptHit{
+		{Name: "jq", Description: "lightweight and flexible command-line JSON processor"},
+		{Name: "tree", Description: "displays an indented directory tree"},
+	}, reason)
+
+	if len(got) != 2 {
+		t.Fatalf("hits = %+v, want two", got)
+	}
+	for i, name := range []string{"jq", "tree"} {
+		h := got[i]
+		if h.Name != name || h.Source != "apt:"+name || !h.Apt || !h.Unavailable || h.Reason != reason {
+			t.Errorf("hit %d = %+v, want %s from apt:%s, apt and unavailable with reason %q", i, h, name, name, reason)
+		}
+	}
+	if got[0].Description != "lightweight and flexible command-line JSON processor" {
+		t.Errorf("description = %q, want the package's", got[0].Description)
+	}
 }
 
 // TestMergeSearchHits_RanksNameHitsAboveDescriptionHits pins mergeSearchHits'

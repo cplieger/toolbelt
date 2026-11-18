@@ -235,8 +235,8 @@ func (v *versionResolver) latestGitLabRelease(ctx context.Context, rr releaseRef
 // so this is both the resolved version and the update signal, and it can
 // go DOWN when Debian reverts a package.
 func (v *versionResolver) latestApt(ctx context.Context, pkg string) (string, error) {
-	if !AptAvailable() {
-		return "", ErrAptUnavailable
+	if err := aptUnavailable(); err != nil {
+		return "", err
 	}
 	return aptPolicyCandidate(ctx, v.aptIdx, pkg)
 }
