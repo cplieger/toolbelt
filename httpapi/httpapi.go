@@ -21,7 +21,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/cplieger/go/httpserver"
+	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/toolbelt/v3"
 )
 
@@ -126,16 +126,14 @@ type JobsResponse struct {
 // DependentsResponse is the 409 envelope for refused remove/disable:
 // the standard error envelope plus the blocking tool names.
 type DependentsResponse struct {
-	Error      string   `json:"error"`
-	Code       string   `json:"code"`
+	httpserver.ErrorResponse
 	Dependents []string `json:"dependents"`
 }
 
 // RateLimitResponse is the 503 envelope for a request GitHub's API rate
 // limit refused: the standard error envelope plus the limit's detail.
 type RateLimitResponse struct {
-	Error     string                   `json:"error"`
-	Code      string                   `json:"code"`
+	httpserver.ErrorResponse
 	RateLimit toolbelt.GitHubRateLimit `json:"rate_limit"`
 }
 
@@ -594,16 +592,14 @@ func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var rl *toolbelt.GitHubRateLimitError
 	switch {
 	case errors.As(err, &dep):
-		httpserver.WriteJSONStatus(w, http.StatusConflict, DependentsResponse{
-			Error:      dep.Error(),
-			Code:       "has_dependents",
-			Dependents: dep.Dependents,
+		httpserver.WriteErrorBody(w, http.StatusConflict, DependentsResponse{
+			ErrorResponse: httpserver.NewErrorResponse(r, "has_dependents", dep.Error()),
+			Dependents:    dep.Dependents,
 		})
 	case errors.As(err, &rl):
-		httpserver.WriteJSONStatus(w, http.StatusServiceUnavailable, RateLimitResponse{
-			Error:     err.Error(),
-			Code:      toolbelt.ErrorCodeGitHubRateLimited,
-			RateLimit: rl.Wire(),
+		httpserver.WriteErrorBody(w, http.StatusServiceUnavailable, RateLimitResponse{
+			ErrorResponse: httpserver.NewErrorResponse(r, toolbelt.ErrorCodeGitHubRateLimited, err.Error()),
+			RateLimit:     rl.Wire(),
 		})
 	case errors.Is(err, toolbelt.ErrEssential):
 		httpserver.WriteError(w, r, http.StatusConflict, "essential", err.Error())

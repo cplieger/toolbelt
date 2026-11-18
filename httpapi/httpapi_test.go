@@ -664,8 +664,8 @@ func TestRoutes_EssentialRemovalIsACodedRefusal(t *testing.T) {
 				t.Fatalf("DELETE %s = %d, want 409 (body %s)", path, rec.Code, rec.Body.String())
 			}
 			var env struct {
-				Error string `json:"error"`
-				Code  string `json:"code"`
+				Message string `json:"message"`
+				Code    string `json:"code"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
 				t.Fatalf("DELETE %s: decode %s: %v", path, rec.Body.String(), err)
@@ -673,8 +673,8 @@ func TestRoutes_EssentialRemovalIsACodedRefusal(t *testing.T) {
 			if env.Code != "essential" {
 				t.Errorf("DELETE %s code = %q, want %q", path, env.Code, "essential")
 			}
-			if !strings.Contains(env.Error, "gh") {
-				t.Errorf("DELETE %s error = %q, want it to name the tool", path, env.Error)
+			if !strings.Contains(env.Message, "gh") {
+				t.Errorf("DELETE %s message = %q, want it to name the tool", path, env.Message)
 			}
 			assertCachePolicy(t, rec, atCommit, noStorePolicy)
 		})
@@ -1266,5 +1266,44 @@ func TestPatchRoute_VersionArgs(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "NUL") {
 		t.Errorf("PATCH NUL version_args = %d %s, want 400 naming the NUL", rec.Code, rec.Body.String())
+	}
+}
+
+// The two extended refusals carry the standard envelope's four fields beside
+// their own, and the body's request_id is the X-Request-ID header.
+func TestWriteEngineError_ExtendedEnvelopesCarryRequestID(t *testing.T) {
+	cases := map[string]struct {
+		err    error
+		status int
+		code   string
+		extra  string
+	}{
+		"dependents": {&toolbelt.DependentsError{Dependents: []string{"dep"}}, http.StatusConflict, "has_dependents", "dependents"},
+		"rate limit": {&toolbelt.GitHubRateLimitError{}, http.StatusServiceUnavailable, toolbelt.ErrorCodeGitHubRateLimited, "rate_limit"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			writeEngineError(rec, httptest.NewRequest(http.MethodDelete, "/api/tools/x", http.NoBody), tc.err)
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
+			}
+			var body map[string]json.RawMessage
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %s: %v", rec.Body.String(), err)
+			}
+			for _, key := range []string{"code", "message", "remediation", "request_id", tc.extra} {
+				if _, ok := body[key]; !ok {
+					t.Errorf("body %s lacks %q", rec.Body.String(), key)
+				}
+			}
+			if _, old := body["error"]; old {
+				t.Errorf("body %s still carries the v1 error key", rec.Body.String())
+			}
+			var id string
+			if err := json.Unmarshal(body["request_id"], &id); err != nil || id == "" || id != rec.Header().Get("X-Request-ID") {
+				t.Errorf("request_id = %q, X-Request-ID = %q, want one non-empty id", id, rec.Header().Get("X-Request-ID"))
+			}
+		})
 	}
 }

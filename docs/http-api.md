@@ -42,9 +42,9 @@ Search results leave out each entry's embedded install definition. In the reply,
 
 ## Replies and refusals
 
-A change returns `202 {"job": ...}`, with a null job when nothing needed doing. A refusal is `409` with a coded error:
+A change returns `202 {"job": ...}`, with a null job when nothing needed doing. Every refusal body has `code`, `message`, `remediation` and `request_id`, and `request_id` is also the `X-Request-ID` header. A refusal is `409` with a coded error:
 
-- `has_dependents` names the enabled tools that need this one, directly or through other tools, enabled, disabled or not yet added.
+- `has_dependents` names the enabled tools that need this one, directly or through other tools, enabled, disabled or not yet added, in a `dependents` array.
 - `essential` marks a tool your product declares it needs.
 - `disabled` marks an install sent to a template.
 - `not_configured` marks a catalog refresh on an engine without `Config.Refresh`.
