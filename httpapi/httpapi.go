@@ -206,19 +206,19 @@ type Route struct {
 }
 
 var (
-	codeInventoryFailed = Code{Code: "inventory_failed", Status: http.StatusInternalServerError}
-	codeNotFound        = Code{Code: "not_found", Status: http.StatusNotFound}
+	codeInventoryFailed = codeOf("inventory_failed")
+	codeNotFound        = codeOf("not_found")
 	// engineCodes are the codes writeEngineError answers with.
 	engineCodes = []Code{
-		{Code: "has_dependents", Status: http.StatusConflict},
-		{Code: toolbelt.ErrorCodeGitHubRateLimited, Status: http.StatusServiceUnavailable},
-		{Code: "essential", Status: http.StatusConflict},
+		codeOf("has_dependents"),
+		codeOf(toolbelt.ErrorCodeGitHubRateLimited),
+		codeOf("essential"),
 		codeNotFound,
-		{Code: "disabled", Status: http.StatusConflict},
-		{Code: "not_configured", Status: http.StatusConflict},
-		{Code: "queue_full", Status: http.StatusServiceUnavailable},
-		{Code: "shutting_down", Status: http.StatusServiceUnavailable},
-		{Code: "bad_request", Status: http.StatusBadRequest},
+		codeOf("disabled"),
+		codeOf("not_configured"),
+		codeOf("queue_full"),
+		codeOf("shutting_down"),
+		codeOf("bad_request"),
 	}
 )
 

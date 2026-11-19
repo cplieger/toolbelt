@@ -2,71 +2,23 @@ package httpapi
 
 import (
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/cplieger/toolbelt/v3"
 )
 
-// writtenCodes parses httpapi.go for every code it writes: the code argument of
-// httpserver.WriteError and the Code field of a typed error body.
-func writtenCodes(t *testing.T) []string {
-	t.Helper()
-	f, err := parser.ParseFile(token.NewFileSet(), "httpapi.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse httpapi.go: %v", err)
-	}
-	consts := map[string]string{"toolbelt.ErrorCodeGitHubRateLimited": toolbelt.ErrorCodeGitHubRateLimited}
-	resolve := func(e ast.Expr) string {
-		switch v := e.(type) {
-		case *ast.BasicLit:
-			s, err := strconv.Unquote(v.Value)
-			if err != nil {
-				t.Fatalf("code literal %s: %v", v.Value, err)
-			}
-			return s
-		case *ast.SelectorExpr:
-			if x, ok := v.X.(*ast.Ident); ok {
-				if s, ok := consts[x.Name+"."+v.Sel.Name]; ok {
-					return s
-				}
-			}
-		}
-		t.Fatalf("a code expression %T this test cannot resolve", e)
-		return ""
-	}
-	var out []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch v := n.(type) {
-		case *ast.CallExpr:
-			if sel, ok := v.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WriteError" && len(v.Args) == 5 {
-				out = append(out, resolve(v.Args[3]))
-			}
-		case *ast.KeyValueExpr:
-			if k, ok := v.Key.(*ast.Ident); ok && k.Name == "Code" {
-				if _, isCode := v.Value.(*ast.BasicLit); isCode || isSelector(v.Value) {
-					out = append(out, resolve(v.Value))
-				}
-			}
-		}
-		return true
-	})
-	slices.Sort(out)
-	return slices.Compact(out)
-}
-
-func isSelector(e ast.Expr) bool { _, ok := e.(*ast.SelectorExpr); return ok }
-
+// The route table lists exactly the codes the package writes:
+// TestCodeSpecs_matchSource holds that set to the source, so the table is
+// compared against its keys rather than a second scan.
 func TestRoutes_CodesAreTheCodesWritten(t *testing.T) {
-	written := writtenCodes(t)
+	written := []string{"bad_request", "not_found"}
+	for c := range CodeSpecs() {
+		written = append(written, string(c))
+	}
+	slices.Sort(written)
 	status := map[string]int{}
 	for _, rt := range Routes() {
 		for _, c := range rt.Codes {
