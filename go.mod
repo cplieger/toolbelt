@@ -6,7 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/cplieger/go/filesafe v1.2.0-dev.1
 	github.com/cplieger/go/httpclient v1.2.0
-	github.com/cplieger/go/httpserver/v2 v2.0.0-dev.7
+	github.com/cplieger/go/httpserver/v2 v2.0.0-dev.8
 	github.com/cplieger/go/keyenc v1.3.0
 	github.com/cplieger/go/pathinside v1.1.0
 	github.com/cplieger/go/scheduler/v2 v2.0.0-dev.1
