@@ -383,6 +383,38 @@ func TestInstall_SyncFailureRetainsPreviousVersion(t *testing.T) {
 	}
 }
 
+// TestInstall_AlreadyInstalledStateWriteFailureFailsTheJob: a job that finds
+// the row installed but cannot clear its recorded error must fail, or it
+// reports done while last_error keeps the earlier reason.
+func TestInstall_AlreadyInstalledStateWriteFailureFailsTheJob(t *testing.T) {
+	e := newTestEngine(t, nil)
+	captureLogs(e)
+	addManual(t, e, "tt", nil)
+	const reason = "install command failed: exit status 1"
+	if err := e.store.setToolStatus("tt", func(s *ToolStatus) { s.LastError = reason }); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	swapBarriers(t, nil, nil, func(path string, data []byte) (bool, error) {
+		if strings.HasSuffix(path, "tools-state.json") {
+			return false, &os.PathError{Op: "write", Path: path, Err: syscall.ENOSPC}
+		}
+		return realAtomicWrite(path, data)
+	})
+
+	job, err := e.Install("tt")
+	if err != nil {
+		t.Fatalf("Install = %v", err)
+	}
+	final := waitJob(t, e, job.ID)
+
+	if final.State != JobFailed || !strings.Contains(final.Error, "record install state") {
+		t.Errorf("job = %s (%q), want failed containing %q", final.State, final.Error, "record install state")
+	}
+	if got := inventoryRow(t, e, "tt").LastError; got != reason {
+		t.Errorf("last_error = %q, want the earlier reason %q kept", got, reason)
+	}
+}
+
 // TestMutateState_ReportsWriteFailures: the state file is the engine's
 // durability record, so a failed write and a landed-but-not-durable write
 // are both errors the caller must see, and neither may corrupt the
