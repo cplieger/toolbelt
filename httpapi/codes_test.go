@@ -1,11 +1,14 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"maps"
+	"net/http"
 	"testing"
 
 	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/go/httpserver/v2/httpservertest"
+	"github.com/cplieger/toolbelt/v3"
 )
 
 // The source writes exactly the codes CodeSpecs and httpserver's own CodeSpecs
@@ -41,5 +44,36 @@ func TestRoutesCodes_matchSpecs(t *testing.T) {
 				t.Errorf("%s %s: code %q status %d has no matching spec with a remediation (%+v)", rt.Method, rt.Suffix, c.Code, c.Status, spec)
 			}
 		}
+	}
+}
+
+// Without WithErrors a refusal of this package's own code carries its
+// remediation; with it, every plain refusal goes through the given writer, and
+// the two refusals with extra fields keep their remediation either way.
+func TestRefusalsCarryRemediation(t *testing.T) {
+	const doc = `{"entries":{"gh":{"name":"gh","source":"manual","version":"1","install":"true","essential":true}}}`
+	e, h := newHandlerWithCatalog(t, doc)
+	if _, err := e.Add(t.Context(), &toolbelt.AddRequest{Name: "gh", Disabled: true}); err != nil {
+		t.Fatalf("Setup: add gh: %v", err)
+	}
+	rec, _ := serve(t, h, http.MethodDelete, "/api/tools/gh", "")
+	var body httpserver.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Code != "essential" || body.Remediation != codeSpecs["essential"].Remediation {
+		t.Errorf("default writer answered %s, want essential with its remediation", rec.Body.String())
+	}
+
+	var got []httpserver.ErrorCode
+	custom := Handler(e, "/api/tools", WithErrors(func(w http.ResponseWriter, r *http.Request, status int, code httpserver.ErrorCode, msg string) {
+		got = append(got, code)
+		httpserver.WriteError(w, r, status, code, msg)
+	}))
+	serve(t, custom, http.MethodDelete, "/api/tools/gh", "")
+	if len(got) != 1 || got[0] != "essential" {
+		t.Errorf("WithErrors writer saw %v, want [essential]", got)
+	}
+
+	env := newErrorResponse(nil, "has_dependents", "tool has dependents: x")
+	if env.Remediation != codeSpecs["has_dependents"].Remediation || env.RequestID == "" {
+		t.Errorf("has_dependents envelope = %+v, want its remediation and a request id", env)
 	}
 }

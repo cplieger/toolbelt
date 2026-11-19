@@ -1284,7 +1284,7 @@ func TestWriteEngineError_ExtendedEnvelopesCarryRequestID(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			writeEngineError(rec, httptest.NewRequest(http.MethodDelete, "/api/tools/x", http.NoBody), tc.err)
+			newRouteServer(nil, nil).writeEngineError(rec, httptest.NewRequest(http.MethodDelete, "/api/tools/x", http.NoBody), tc.err)
 			if rec.Code != tc.status {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.status)
 			}

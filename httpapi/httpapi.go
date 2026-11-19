@@ -224,14 +224,15 @@ var (
 
 // Routes returns the projection's routes in table order: the routes
 // Handler serves.
-func Routes() []Route {
+func Routes(opts ...Option) []Route {
 	out := make([]Route, 0, len(routes))
 	for i := range routes {
 		rt := &routes[i]
 		h := rt.h
 		out = append(out, Route{
 			Handler: func(e *toolbelt.Engine) http.Handler {
-				return withNoStore(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h(e, w, r) }))
+				s := newRouteServer(e, opts)
+				return withNoStore(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { h(s, w, r) }))
 			},
 			Params:   rt.params,
 			Request:  rt.request,
@@ -248,7 +249,7 @@ func Routes() []Route {
 
 // routeHandler is the shape of every entry in the route table: the
 // engine the projection reads, plus the standard http pair.
-type routeHandler func(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request)
+type routeHandler func(s *server, w http.ResponseWriter, r *http.Request)
 
 // route is one route of the projection. Field order is
 // fieldalignment's, not the reading order; the table below uses keyed
@@ -288,11 +289,11 @@ var routes = []route{
 		query: reflect.TypeFor[SearchQuery](), response: reflect.TypeFor[SearchResponse](), status: http.StatusOK,
 	},
 	{
-		method: http.MethodGet, suffix: "/jobs", h: func(e *toolbelt.Engine, w http.ResponseWriter, _ *http.Request) { getJobs(e, w) },
+		method: http.MethodGet, suffix: "/jobs", h: func(s *server, w http.ResponseWriter, _ *http.Request) { getJobs(s.e, w) },
 		response: reflect.TypeFor[JobsResponse](), status: http.StatusOK,
 	},
 	{
-		method: http.MethodGet, suffix: "/catalog", h: func(e *toolbelt.Engine, w http.ResponseWriter, _ *http.Request) { getCatalog(e, w) },
+		method: http.MethodGet, suffix: "/catalog", h: func(s *server, w http.ResponseWriter, _ *http.Request) { getCatalog(s.e, w) },
 		response: reflect.TypeFor[toolbelt.CatalogInfo](), status: http.StatusOK,
 	},
 	engineRoute(http.MethodPost, "/catalog/refresh", postCatalogRefresh, nil, nil, reflect.TypeFor[JobResponse]()),
@@ -319,13 +320,14 @@ var routes = []route{
 //	mux.Handle("/api/tools/", h)
 //
 // Every response carries Cache-Control: no-store unless already set.
-func Handler(e *toolbelt.Engine, prefix string) http.Handler {
+func Handler(e *toolbelt.Engine, prefix string, opts ...Option) http.Handler {
+	s := newRouteServer(e, opts)
 	prefix = strings.TrimSuffix(prefix, "/")
 	mux := http.NewServeMux()
 	for i := range routes {
 		h := routes[i].h
 		mux.HandleFunc(routes[i].method+" "+prefix+routes[i].suffix, func(w http.ResponseWriter, r *http.Request) {
-			h(e, w, r)
+			h(s, w, r)
 		})
 	}
 	return withNoStore(mux)
@@ -345,10 +347,11 @@ func withNoStore(h http.Handler) http.Handler {
 	})
 }
 
-func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func getInventory(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	inv, err := e.Inventory()
 	if err != nil {
-		httpserver.WriteError(w, r, http.StatusInternalServerError, "inventory_failed", err.Error())
+		s.errs(w, r, http.StatusInternalServerError, "inventory_failed", err.Error())
 		return
 	}
 	httpserver.WriteJSON(w, inv)
@@ -362,7 +365,8 @@ func getInventory(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 // a deployment flag.
 const searchUnavailableParam = "unavailable"
 
-func getSearch(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func getSearch(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	q := r.URL.Query().Get("q")
 	sc := e.SearchWithCounts(q)
 	httpserver.WriteJSON(w, searchReply(&sc, q, searchWantsUnavailable(r)))
@@ -500,69 +504,75 @@ func getCatalog(e *toolbelt.Engine, w http.ResponseWriter) {
 	httpserver.WriteJSON(w, e.CatalogInfo())
 }
 
-func postCatalogRefresh(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func postCatalogRefresh(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	job, err := e.RefreshCatalog()
 	if err != nil {
-		writeEngineError(w, r, err)
+		s.writeEngineError(w, r, err)
 		return
 	}
 	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
-func postAdd(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func postAdd(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	var req toolbelt.AddRequest
 	if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
-		httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		s.errs(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	job, err := e.Add(r.Context(), &req)
 	if err != nil {
-		writeEngineError(w, r, err)
+		s.writeEngineError(w, r, err)
 		return
 	}
 	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
-func postUpdate(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func postUpdate(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	var req UpdateRequest
 	if r.ContentLength != 0 {
 		if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
-			httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+			s.errs(w, r, http.StatusBadRequest, "bad_request", err.Error())
 			return
 		}
 	}
 	job, err := e.Update(req.Names...)
 	if err != nil {
-		writeEngineError(w, r, err)
+		s.writeEngineError(w, r, err)
 		return
 	}
 	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
-func patchTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func patchTool(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	var req toolbelt.PatchRequest
 	if err := httpserver.DecodeJSONInto(w, r, &req, maxBodyBytes); err != nil {
-		httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		s.errs(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 	job, err := e.Patch(r.PathValue("name"), req)
 	if err != nil {
-		writeEngineError(w, r, err)
+		s.writeEngineError(w, r, err)
 		return
 	}
 	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
-func postInstall(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func postInstall(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	job, err := e.Install(r.PathValue("name"))
 	if err != nil {
-		writeEngineError(w, r, err)
+		s.writeEngineError(w, r, err)
 		return
 	}
 	httpserver.WriteJSONStatus(w, http.StatusAccepted, JobResponse{Job: job})
 }
 
-func deleteTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func deleteTool(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	// The route's ?force=1 is the caller's cascade intent; the two engine
 	// methods are what that intent selects.
 	force := r.URL.Query().Get("force") == "1" || r.URL.Query().Get("force") == "true"
@@ -572,48 +582,49 @@ func deleteTool(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
 	}
 	job, dependents, err := remove(r.PathValue("name"))
 	if err != nil {
-		writeEngineError(w, r, err)
+		s.writeEngineError(w, r, err)
 		return
 	}
 	httpserver.WriteJSONStatus(w, http.StatusAccepted, RemoveResponse{Job: job, Dependents: dependents})
 }
 
-func postCancel(e *toolbelt.Engine, w http.ResponseWriter, r *http.Request) {
+func postCancel(s *server, w http.ResponseWriter, r *http.Request) {
+	e := s.e
 	if !e.CancelJob(r.PathValue("id")) {
-		httpserver.WriteError(w, r, http.StatusNotFound, "not_found", "no such job")
+		s.errs(w, r, http.StatusNotFound, "not_found", "no such job")
 		return
 	}
 	httpserver.WriteJSON(w, OKResponse{OK: true})
 }
 
 // writeEngineError maps engine sentinels onto wire responses.
-func writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
+func (s *server) writeEngineError(w http.ResponseWriter, r *http.Request, err error) {
 	var dep *toolbelt.DependentsError
 	var rl *toolbelt.GitHubRateLimitError
 	switch {
 	case errors.As(err, &dep):
 		httpserver.WriteErrorBody(w, http.StatusConflict, DependentsResponse{
-			ErrorResponse: httpserver.NewErrorResponse(r, "has_dependents", dep.Error()),
+			ErrorResponse: newErrorResponse(r, "has_dependents", dep.Error()),
 			Dependents:    dep.Dependents,
 		})
 	case errors.As(err, &rl):
 		httpserver.WriteErrorBody(w, http.StatusServiceUnavailable, RateLimitResponse{
-			ErrorResponse: httpserver.NewErrorResponse(r, toolbelt.ErrorCodeGitHubRateLimited, err.Error()),
+			ErrorResponse: newErrorResponse(r, toolbelt.ErrorCodeGitHubRateLimited, err.Error()),
 			RateLimit:     rl.Wire(),
 		})
 	case errors.Is(err, toolbelt.ErrEssential):
-		httpserver.WriteError(w, r, http.StatusConflict, "essential", err.Error())
+		s.errs(w, r, http.StatusConflict, "essential", err.Error())
 	case errors.Is(err, toolbelt.ErrNotFound):
-		httpserver.WriteError(w, r, http.StatusNotFound, "not_found", err.Error())
+		s.errs(w, r, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, toolbelt.ErrDisabled):
-		httpserver.WriteError(w, r, http.StatusConflict, "disabled", err.Error())
+		s.errs(w, r, http.StatusConflict, "disabled", err.Error())
 	case errors.Is(err, toolbelt.ErrRefreshNotConfigured):
-		httpserver.WriteError(w, r, http.StatusConflict, "not_configured", err.Error())
+		s.errs(w, r, http.StatusConflict, "not_configured", err.Error())
 	case errors.Is(err, toolbelt.ErrQueueFull):
-		httpserver.WriteError(w, r, http.StatusServiceUnavailable, "queue_full", err.Error())
+		s.errs(w, r, http.StatusServiceUnavailable, "queue_full", err.Error())
 	case errors.Is(err, toolbelt.ErrShuttingDown):
-		httpserver.WriteError(w, r, http.StatusServiceUnavailable, "shutting_down", err.Error())
+		s.errs(w, r, http.StatusServiceUnavailable, "shutting_down", err.Error())
 	default:
-		httpserver.WriteError(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		s.errs(w, r, http.StatusBadRequest, "bad_request", err.Error())
 	}
 }
