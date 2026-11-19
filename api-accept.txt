@@ -1,0 +1,6 @@
+# The httpserver v2 error envelope replaces the hand-written refusal bodies (cplieger/toolbelt#732).
+# Delete this file once a stable tag contains the change.
+github.com/cplieger/toolbelt/v3/httpapi: DependentsResponse.Code: changed from string to github.com/cplieger/go/httpserver/v2.ErrorCode
+github.com/cplieger/toolbelt/v3/httpapi: DependentsResponse.Error: removed
+github.com/cplieger/toolbelt/v3/httpapi: RateLimitResponse.Code: changed from string to github.com/cplieger/go/httpserver/v2.ErrorCode
+github.com/cplieger/toolbelt/v3/httpapi: RateLimitResponse.Error: removed
