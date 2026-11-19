@@ -1,6 +1,8 @@
-# The httpserver v2 error envelope replaces the hand-written refusal bodies (cplieger/toolbelt#732).
+# The httpserver v2 error envelope (cplieger/toolbelt#732) and httpapi.WithErrors (cplieger/toolbelt#752).
 # Delete this file once a stable tag contains the change.
 github.com/cplieger/toolbelt/v3/httpapi: DependentsResponse.Code: changed from string to github.com/cplieger/go/httpserver/v2.ErrorCode
 github.com/cplieger/toolbelt/v3/httpapi: DependentsResponse.Error: removed
 github.com/cplieger/toolbelt/v3/httpapi: RateLimitResponse.Code: changed from string to github.com/cplieger/go/httpserver/v2.ErrorCode
 github.com/cplieger/toolbelt/v3/httpapi: RateLimitResponse.Error: removed
+github.com/cplieger/toolbelt/v3/httpapi: Handler: changed from func(*github.com/cplieger/toolbelt/v3.Engine, string) net/http.Handler to func(*github.com/cplieger/toolbelt/v3.Engine, string, ...Option) net/http.Handler
+github.com/cplieger/toolbelt/v3/httpapi: Routes: changed from func() []Route to func(...Option) []Route
