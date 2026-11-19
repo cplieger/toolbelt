@@ -1660,7 +1660,7 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 	st := e.store.State().Tools[name]
 	if st.InstalledVersion == t.Version && st.Python == t.Python && e.probeInstalled(name, t, &st) {
 		output(fmt.Sprintf("%s %s already installed", name, t.Version))
-		return nil
+		return e.clearRecordedFailure(name, &st)
 	}
 	output(fmt.Sprintf("installing %s %s from %s", name, t.Version, t.Source))
 	res, err := e.inst.install(ctx, name, t, e.aquaDef(t.Source), &st)
@@ -1682,6 +1682,16 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		}
 	}
 	e.pruneSuperseded(name, t)
+	return nil
+}
+
+func (e *Engine) clearRecordedFailure(name string, st *ToolStatus) error {
+	if st.LastError == "" {
+		return nil
+	}
+	if err := e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = "" }); err != nil {
+		return fmt.Errorf("record install state for %s: %w", name, err)
+	}
 	return nil
 }
 
@@ -1716,17 +1726,10 @@ func (e *Engine) followInstalledVersion(name string, t *Tool, installed string, 
 }
 
 // settleAptHold runs holdToPin after an apt: install and joins its failure
-// to the install's, recording the result on the row. A job that ends with
-// both done clears the row's error, which the already-installed path would
-// otherwise keep from the hold failure this job repaired.
+// to the install's, recording a hold failure on the row.
 func (e *Engine) settleAptHold(ctx context.Context, name string, installErr error, output func(string)) error {
 	herr := e.holdToPin(ctx, name)
 	if herr == nil {
-		if installErr == nil && e.store.State().Tools[name].LastError != "" {
-			if serr := e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = "" }); serr != nil {
-				return fmt.Errorf("record install state for %s: %w", name, serr)
-			}
-		}
 		return installErr
 	}
 	output(fmt.Sprintf("ERROR %s: %v", name, herr))
@@ -1738,8 +1741,8 @@ func (e *Engine) settleAptHold(ctx context.Context, name string, installErr erro
 }
 
 // resolveInstallTarget prepares the entry installTool is about to act on:
-// it reads the manifest row, refuses one the catalog could not hydrate,
-// and resolves (and persists) a sparse entry's version. A nil Tool with a
+// it reads the manifest row and resolves it (resolveRow), recording a
+// resolve failure on the row as an install failure is. A nil Tool with a
 // nil error means there is nothing to install — a disabled template,
 // which is a no-op rather than a failure, so a reconcile pass carrying
 // one does not fail the whole job.
@@ -1756,21 +1759,31 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 		output(fmt.Sprintf("%s is disabled, so it was skipped", name))
 		return nil, nil
 	}
-	if t.Source == "" {
-		return nil, e.unhydratedError(name, &t)
-	}
-	if t.Version != "" {
-		return &t, nil
-	}
-	latest, err := e.versions.Latest(ctx, &t, e.aquaDef(t.Source))
-	if err != nil {
-		return nil, fmt.Errorf("resolve latest version: %w", err)
-	}
-	if err := e.persistVersion(name, latest); err != nil {
+	if err := e.resolveRow(ctx, name, &t); err != nil {
+		if serr := e.recordFailure(name, err); serr != nil {
+			e.log.Error("toolbelt: resolve error not recorded", "tool", name, "error", serr)
+		}
 		return nil, err
 	}
-	t.Version = latest
 	return &t, nil
+}
+
+func (e *Engine) resolveRow(ctx context.Context, name string, t *Tool) error {
+	if t.Source == "" {
+		return e.unhydratedError(name, t)
+	}
+	if t.Version != "" {
+		return nil
+	}
+	latest, err := e.versions.Latest(ctx, t, e.aquaDef(t.Source))
+	if err != nil {
+		return fmt.Errorf("resolve latest version: %w", err)
+	}
+	if err := e.persistVersion(name, latest); err != nil {
+		return err
+	}
+	t.Version = latest
+	return nil
 }
 
 // unhydratedError explains a row hydrateStatic left without a source: the

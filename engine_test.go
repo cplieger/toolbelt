@@ -451,6 +451,73 @@ func TestInstall_VersionBannerMismatchFailsTheInstall(t *testing.T) {
 	}
 }
 
+// TestInstall_AlreadyInstalledJobClearsTheRowsError: last_error is cleared on
+// success (ToolStatus.LastError), so a job that ends done because the row is
+// already installed leaves no earlier failure on it.
+func TestInstall_AlreadyInstalledJobClearsTheRowsError(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fail  func(r *Tool)
+		retry func(e *Engine, installed Tool) (*Job, error)
+	}{
+		{
+			name: "after a resolve failure",
+			fail: func(r *Tool) { r.Source = "" },
+			retry: func(e *Engine, installed Tool) (*Job, error) {
+				if err := e.store.MutateManifest(func(m *Manifest) error {
+					m.Tools["tt"] = installed
+					return nil
+				}); err != nil {
+					return nil, err
+				}
+				return e.Install("tt")
+			},
+		},
+		{
+			name: "after an install failure at another version",
+			fail: func(r *Tool) { r.Version, r.Install = "2", "exit 1" },
+			retry: func(e *Engine, _ Tool) (*Job, error) {
+				v := "1"
+				return e.Patch("tt", PatchRequest{Version: &v})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newTestEngine(t, nil)
+			addManual(t, e, "tt", nil)
+			var installed Tool
+			if err := e.store.MutateManifest(func(m *Manifest) error {
+				installed = m.Tools["tt"]
+				r := installed
+				tc.fail(&r)
+				m.Tools["tt"] = r
+				return nil
+			}); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			job, err := e.Install("tt")
+			if err != nil {
+				t.Fatalf("Install = %v", err)
+			}
+			failed := waitJob(t, e, job.ID)
+			if reason := inventoryRow(t, e, "tt").LastError; failed.State != JobFailed || reason == "" {
+				t.Fatalf("failing job = %s, last_error = %q; want failed with the reason recorded", failed.State, reason)
+			}
+
+			job, err = tc.retry(e, installed)
+			if err != nil || job == nil {
+				t.Fatalf("retry = %v, %v", job, err)
+			}
+			final := waitJob(t, e, job.ID)
+
+			row := inventoryRow(t, e, "tt")
+			if final.State != JobDone || !row.Installed || row.LastError != "" {
+				t.Errorf("retry job = %s (%q), installed = %v, last_error = %q; want done, installed, no error", final.State, final.Error, row.Installed, row.LastError)
+			}
+		})
+	}
+}
+
 // TestInstall_EnablesAnObligatoryDependency pins the dependency cascade:
 // asking for a tool is asking for what it cannot run without. The
 // refusal this replaced was a dead end — the dependent's install failed
