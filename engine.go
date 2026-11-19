@@ -1660,7 +1660,7 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 	st := e.store.State().Tools[name]
 	if st.InstalledVersion == t.Version && st.Python == t.Python && e.probeInstalled(name, t, &st) {
 		output(fmt.Sprintf("%s %s already installed", name, t.Version))
-		return nil
+		return e.clearRecordedFailure(name, &st)
 	}
 	output(fmt.Sprintf("installing %s %s from %s", name, t.Version, t.Source))
 	res, err := e.inst.install(ctx, name, t, e.aquaDef(t.Source), &st)
@@ -1682,6 +1682,16 @@ func (e *Engine) installTool(ctx context.Context, name string, output func(strin
 		}
 	}
 	e.pruneSuperseded(name, t)
+	return nil
+}
+
+func (e *Engine) clearRecordedFailure(name string, st *ToolStatus) error {
+	if st.LastError == "" {
+		return nil
+	}
+	if err := e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = "" }); err != nil {
+		return fmt.Errorf("record install state for %s: %w", name, err)
+	}
 	return nil
 }
 
@@ -1716,17 +1726,10 @@ func (e *Engine) followInstalledVersion(name string, t *Tool, installed string, 
 }
 
 // settleAptHold runs holdToPin after an apt: install and joins its failure
-// to the install's, recording the result on the row. A job that ends with
-// both done clears the row's error, which the already-installed path would
-// otherwise keep from the hold failure this job repaired.
+// to the install's, recording a hold failure on the row.
 func (e *Engine) settleAptHold(ctx context.Context, name string, installErr error, output func(string)) error {
 	herr := e.holdToPin(ctx, name)
 	if herr == nil {
-		if installErr == nil && e.store.State().Tools[name].LastError != "" {
-			if serr := e.store.setToolStatus(name, func(s *ToolStatus) { s.LastError = "" }); serr != nil {
-				return fmt.Errorf("record install state for %s: %w", name, serr)
-			}
-		}
 		return installErr
 	}
 	output(fmt.Sprintf("ERROR %s: %v", name, herr))
@@ -1765,8 +1768,6 @@ func (e *Engine) resolveInstallTarget(ctx context.Context, name string, output f
 	return &t, nil
 }
 
-// resolveRow completes one enabled row for install: it refuses a row the
-// catalog could not hydrate and resolves and persists a sparse row's version.
 func (e *Engine) resolveRow(ctx context.Context, name string, t *Tool) error {
 	if t.Source == "" {
 		return e.unhydratedError(name, t)
