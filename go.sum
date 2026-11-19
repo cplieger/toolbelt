@@ -4,8 +4,8 @@ github.com/cplieger/go/filesafe v1.2.0-dev.1 h1:dAx3rSGWZaF4GfrL8a8tnBd7kHliXJ3R
 github.com/cplieger/go/filesafe v1.2.0-dev.1/go.mod h1:ji4TnJD8S8kgKelJlCQxlHyX0UXQGTW1ylSBqH5xqhI=
 github.com/cplieger/go/httpclient v1.2.0 h1:E+lbIpiNkUkcq3fxdMDYn116cwx6tU1XWmn4mDdBGU0=
 github.com/cplieger/go/httpclient v1.2.0/go.mod h1:couTQSCNdgNwOotbaQREGcM4CjUKZJ4Bdb7FSkNwL8U=
-github.com/cplieger/go/httpserver/v2 v2.0.0-dev.4 h1:0zG3tTCBHmwOjjSwXrqbKZ9zXM0PoMA5Tl9QFkiekIw=
-github.com/cplieger/go/httpserver/v2 v2.0.0-dev.4/go.mod h1:JBXevsjiJP17//Y8mtWmkF6piUAXN8Ax/yEgFtlqiyg=
+github.com/cplieger/go/httpserver/v2 v2.0.0-dev.6 h1:3ep0PfgLaUz10WnKoZYzHVutKVBkOAchPn4BO0XHtHA=
+github.com/cplieger/go/httpserver/v2 v2.0.0-dev.6/go.mod h1:MBXpBuVO/zdiyXOcq5eRMRJVmdryzDfH7DFo+olLF88=
 github.com/cplieger/go/keyenc v1.3.0 h1:v0zvHSY4ZOZapGNYGAkghEXPz1SeifT/Trg0b9A8IBU=
 github.com/cplieger/go/keyenc v1.3.0/go.mod h1:EI1v4Q6FU1Y9hUWTE6kp1n3Mozrm0ws5GOT+Vt/x1+w=
 github.com/cplieger/go/pathinside v1.1.0 h1:INqhQezkPwf/gA4fGxVuTBvV4bh4CedFGKm36c+GeIQ=
