@@ -38,3 +38,49 @@ func codeOf(c httpserver.ErrorCode) Code {
 	}
 	return Code{Code: string(c), Status: spec.Status}
 }
+
+// Option configures Handler and Routes.
+type Option func(*server)
+
+// WithErrors sets the ErrorResponder that writes every plain refusal, such as
+// an app's catalog responder. Nil means the default, which answers the
+// standard envelope with this package's own remediation. The two refusals that
+// carry extra fields (has_dependents, github_rate_limited) are always written
+// here, with their remediation from CodeSpecs.
+func WithErrors(r httpserver.ErrorResponder) Option {
+	return func(s *server) {
+		if r != nil {
+			s.errs = r
+		}
+	}
+}
+
+// server is what every route reads: the engine and the refusal writer.
+type server struct {
+	e    *toolbelt.Engine
+	errs httpserver.ErrorResponder
+}
+
+func newRouteServer(e *toolbelt.Engine, opts []Option) *server {
+	s := &server{e: e, errs: writeError}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
+
+// writeError is the default refusal writer: httpserver's envelope, with this
+// package's remediation for a code httpserver does not list.
+func writeError(w http.ResponseWriter, r *http.Request, status int, code httpserver.ErrorCode, msg string) {
+	httpserver.WriteErrorBody(w, status, newErrorResponse(r, code, msg))
+}
+
+// newErrorResponse is httpserver.NewErrorResponse with the remediation of a
+// code this package owns.
+func newErrorResponse(r *http.Request, code httpserver.ErrorCode, msg string) httpserver.ErrorResponse {
+	env := httpserver.NewErrorResponse(r, code, msg)
+	if spec, ok := codeSpecs[code]; ok && env.Remediation == "" {
+		env.Remediation = spec.Remediation
+	}
+	return env
+}
