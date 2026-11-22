@@ -12,7 +12,7 @@ require (
 	github.com/cplieger/go/scheduler/v2 v2.0.0-dev.2
 	github.com/cplieger/go/ssrf v1.1.0
 	github.com/cplieger/go/textsafe v1.1.0
-	github.com/expr-lang/expr v1.18.0
+	github.com/expr-lang/expr v1.18.1
 	github.com/hashicorp/go-version v1.9.0
 	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/mod v0.43.0
