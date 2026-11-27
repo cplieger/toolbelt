@@ -18,8 +18,8 @@ github.com/cplieger/go/textsafe v1.1.0 h1:D+p7ZDBQmABv/empI2TNMZfvhMXNlfii8E2e5V
 github.com/cplieger/go/textsafe v1.1.0/go.mod h1:x29RmZpMO2yjPt1zRbjtcXWVdkekukl+jA5FN1wXUlI=
 github.com/cplieger/go/urlform v1.2.0 h1:AQkwiRasHq1e57dzpFyrSRZWgp503XNPJ0DikXQLt1E=
 github.com/cplieger/go/urlform v1.2.0/go.mod h1:o7cRPRmslS3o05jpTJHqGKebD4eawAV7rIOB4AdGLao=
-github.com/expr-lang/expr v1.17.8 h1:W1loDTT+0PQf5YteHSTpju2qfUfNoBt4yw9+wOEU9VM=
-github.com/expr-lang/expr v1.17.8/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
+github.com/expr-lang/expr v1.18.1 h1:mu6I2eTkwUgMP+Q4KgS9Ipc1CrukUpRrG9PsQYPv9js=
+github.com/expr-lang/expr v1.18.1/go.mod h1:8/vRC7+7HBzESEqt5kKpYXxrxkr31SaO8r40VO/1IT4=
 github.com/hashicorp/go-version v1.9.0 h1:CeOIz6k+LoN3qX9Z0tyQrPtiB1DFYRPfCIBtaXPSCnA=
 github.com/hashicorp/go-version v1.9.0/go.mod h1:fltr4n8CU8Ke44wwGCBoEymUuxUHl09ZGVZPK5anwXA=
 go.yaml.in/yaml/v4 v4.0.0 h1:/LG1pNO84Z4l603j/xMn69CcS5OYhMQ/f7l2LoQUGuw=
